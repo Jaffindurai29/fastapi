@@ -1,21 +1,91 @@
 ---
 title: Introduction
-description: FastAPI na enna, and indha guide-la enna irukku.
+description: FastAPI na enna, yeandhukku, Django/Flask-oda compare pandra.
 ---
 
 ## FastAPI na enna?
 
-FastAPI nu solradhu oru modern, high-performance Python web framework, APIs
-build panradhukku. Idhu normal Python type hints vachu velai seiyum. Idhu
-[Starlette](https://www.starlette.io/) (web part-ku) mattrum
-[Pydantic](https://docs.pydantic.dev/) (data part-ku) mela build pannirukanga.
+FastAPI nu solradhu oru modern Python framework, APIs build panradhukku.
+Idhu normal Python type hints vachu dhan velai ellam pannikum. Idhu
+[Starlette](https://www.starlette.io/) (web/ASGI part) mattrum
+[Pydantic](https://docs.pydantic.dev/) (data validation part) mela build
+pannirukanga.
 
-Neenga type hints use panna, FastAPI automatic-a:
+Unga type hints-ah read pannitu, FastAPI automatic-a:
 
-- Request data-va **validate** pannum, error irundha clear-a message tharum.
+- Request data-va **validate** pannum, thappu irundha clear error tharum.
 - Response data-va JSON-a **serialize** pannum.
-- Interactive API documentation-ah **generate** pannum — free-la.
-- Editor-la **autocomplete** kammi vishayam illama full-a work aagum.
+- Interactive API docs-ah **generate** pannum — free-la.
+- Editor-la **autocomplete** full-a work aagum.
+
+## Yeandhukku FastAPI?
+
+FastAPI varradhukku munnadi, Python-la API build panna rendu vazhi
+irundhuchu: Flask mathiri simple framework, validation mattrum docs
+neengale eludhanum — illana Django REST Framework mathiri, adhu ellame
+tharum, aana boilerplate code athigam, async support kammi.
+
+FastAPI-oda main idea: unga type hints-e documentation.
+
+- **Oru source of truth.** Type-ah once eludhunga (`item_id: int`), adha
+  vachi FastAPI validation pannum, response-ah JSON-a maathum,
+  API docs-um build pannum. Moonaiyum separate-a eludhi, sync-la
+  irukanga-nu prayer pannanum nu therikadhu.
+- **Async by default.** FastAPI Starlette mattrum
+  [Uvicorn](https://www.uvicorn.org/) mela run aagudhu, so `async def`
+  route oru — example-ku database-ku wait panra pothu — palli requests-ah
+  same time-la handle pannum, block aagama.
+- **Fewer bugs.** Unga code run aaguradhukku munnadi dhan data type-ku
+  etherka check aagudhu. So "number expect pannen, text vandhuchu"
+  mathiri bugs automatic-a catch aagum.
+- **Docs eppovum correct-a irukum.** `/docs` mattrum `/redoc`, request
+  handle panra same code-la irundhu dhan build aagudhu. Manual-a update
+  panna vera file edhuvum illa.
+
+## Python web frameworks: Django, Flask, mattrum FastAPI
+
+Python-la web/API velai mostly indha moonu frameworks mela dhan. Edhuvum
+"best" illa — ovoru onnum vera vera velai-ku fit aagum:
+
+- **[Django](https://www.djangoproject.com/)** — full framework: ORM,
+  admin panel, authentication, templates ellame built-in. Idhu mostly
+  synchronous, complete web apps-kaga, APIs mattum-kaga illa.
+- **[Flask](https://flask.palletsprojects.com/)** — microframework:
+  chinna core plus routing. Baaki ellam — ORM, validation, auth — neenga
+  add panra extension. Start panna easy, aana validation mattrum API
+  docs unga responsibility.
+- **FastAPI** — APIs-kaga mattum dhan build pannirukanga. Unga data-va
+  Python types vachu (mostly Pydantic models) describe pannuveenga, adha
+  vachi validation, serialization, interactive docs automatic-a
+  generate aagum. Idhu async by default.
+
+### Comparison table
+
+| | [Django](https://www.djangoproject.com/) | [Flask](https://flask.palletsprojects.com/) | FastAPI |
+|---|---|---|---|
+| Yaaru create pannanga | Adrian Holovaty & Simon Willison | Armin Ronacher | Sebastián Ramírez |
+| First release | 2005 | 2010 | 2018 |
+| Category | Full-stack framework | Microframework | API framework |
+| Async support | Konjam (apparam add pannanga) | Extensions vachu | Native-a (built-in) |
+| Data validation | Django forms / DRF serializers | Manual-a, illana extensions | Built-in, type hints-la irundhu |
+| API docs | Manual-a, illana DRF add-ons | Manual-a, illana extensions | Automatic (Swagger UI + ReDoc) |
+| Admin panel | Built-in | Illa (extension mattum) | Illa (idhu adhoda velai illa) |
+| ORM | Built-in (Django ORM) | Illa (neenga pick pannanum) | Illa (neenga pick pannanum) |
+| Best for | Admin/back office venum apps-ku | Chinna services, full control | Typed data irukra APIs-ku |
+
+Admin panel venum-nu irukra project-ku FastAPI fit aagadhu. Automatic
+validation venum-nu irukra API-only service-ku plain Flask fit aagadhu.
+Velai enna nu paathu pick pannunga, hype paathu illa.
+
+## FastAPI-ah yaaru create pannanga, eppo?
+
+FastAPI-ah [Sebastián Ramírez](https://github.com/tiangolo) (GitHub
+handle `tiangolo`) create pannanga — Colombia-la irundhu vandha software
+developer. Avaru idha first-a **December 5, 2018** release pannanaru.
+APIs build panra pothu same problem repeat-a face pannaru: same data-ku
+validation, serialization, docs moonaiyum separate-a eludhi, time pogum
+pothu avanga sync-la illama poiduvanga. Adha fix panna dhan FastAPI
+vandhuchu — moonaiyum oru set of type hints-la irundhu derive pannurathu.
 
 ## Oru simple FastAPI app
 
@@ -29,12 +99,12 @@ def read_root():
     return {"message": "Hello, FastAPI!"}
 ```
 
-Ivlo dhan. [Uvicorn](https://www.uvicorn.org/) vachu run pannunga, `/docs`
-la automatic documentation vandhurum.
+Ivlo dhan. Uvicorn vachu run pannunga, `/docs` la automatic documentation
+vandhurum.
 
 ## Indha guide-la enna irukku
 
-Idhu oru short-ah, hands-on path, real APIs build panna FastAPI-la
+Oru short-ah, hands-on path, real APIs build panna FastAPI-la
 therinjukka vendiya core ideas:
 
 1. [Installation](/tanglish/docs/installation) — project setup panni FastAPI install pannuvom.

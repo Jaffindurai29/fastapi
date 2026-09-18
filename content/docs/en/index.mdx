@@ -1,21 +1,91 @@
 ---
 title: Introduction
-description: What FastAPI is, and what this guide covers.
+description: What FastAPI is, why it exists, and how it compares to Django and Flask.
 ---
 
 ## What is FastAPI?
 
-FastAPI is a modern, high-performance Python web framework for building APIs,
-based on standard Python type hints. It is built on top of
-[Starlette](https://www.starlette.io/) (for the web parts) and
-[Pydantic](https://docs.pydantic.dev/) (for the data parts).
+FastAPI is a modern Python framework for building APIs. It uses normal
+Python type hints to do most of the work for you. It's built on top of
+[Starlette](https://www.starlette.io/) (handles the web/ASGI parts) and
+[Pydantic](https://docs.pydantic.dev/) (handles data validation).
 
-Because it uses regular Python type hints, FastAPI can:
+Because it reads your type hints, FastAPI can:
 
-- **Validate** request data automatically and return clear error messages.
-- **Serialize** your response data to JSON.
-- **Generate** interactive API documentation for you, for free.
-- Give you **editor autocompletion** everywhere in your code.
+- **Validate** incoming request data, and return a clear error if it's wrong.
+- **Serialize** your response data to JSON automatically.
+- **Generate** interactive API docs for you, for free.
+- Give you **autocomplete** everywhere in your editor.
+
+## Why FastAPI?
+
+Before FastAPI, building a Python API meant picking one of two paths:
+a simple framework like Flask, where you write validation and docs
+yourself — or a bigger framework like Django REST Framework, which gives
+you more, but with more boilerplate and less async support.
+
+FastAPI's main idea: your type hints *are* the documentation.
+
+- **One source of truth.** Write a type once (`item_id: int`), and
+  FastAPI uses it for validation, for turning your response into JSON,
+  and for the API docs. You don't write those three things separately
+  and hope they stay in sync.
+- **Async by default.** FastAPI runs on Starlette and
+  [Uvicorn](https://www.uvicorn.org/), so an `async def` route can handle
+  many requests at once — for example, while waiting on a database —
+  without blocking.
+- **Fewer bugs.** Your data is checked against its type before your code
+  runs. So a whole class of bugs — like getting text where you expected a
+  number — gets caught automatically.
+- **Docs that stay correct.** `/docs` and `/redoc` are built from the
+  same code that handles the request. There's no separate file to update
+  by hand.
+
+## Python web frameworks: Django, Flask, and FastAPI
+
+Most Python web and API work is built on one of three frameworks. None of
+them is "the best" — each fits a different job:
+
+- **[Django](https://www.djangoproject.com/)** is a full framework:
+  it comes with an ORM, an admin panel, authentication, and templates
+  built in. It's mainly synchronous, and built for whole web apps, not
+  just APIs.
+- **[Flask](https://flask.palletsprojects.com/)** is a microframework:
+  a small core plus routing. Everything else — ORM, validation, auth —
+  is an extension you add yourself. Easy to start, but validation and
+  API docs are on you.
+- **FastAPI** is built just for APIs. You describe your data with Python
+  types (usually Pydantic models), and it generates validation,
+  serialization, and interactive docs from that automatically. It's
+  async by default.
+
+### Comparison table
+
+| | [Django](https://www.djangoproject.com/) | [Flask](https://flask.palletsprojects.com/) | FastAPI |
+|---|---|---|---|
+| Created by | Adrian Holovaty & Simon Willison | Armin Ronacher | Sebastián Ramírez |
+| First released | 2005 | 2010 | 2018 |
+| Category | Full-stack framework | Microframework | API framework |
+| Async support | Partial (added later) | Via extensions | Native (built-in) |
+| Data validation | Django forms / DRF serializers | Manual, or via extensions | Built-in, from type hints |
+| API docs | Manual, or via DRF add-ons | Manual, or via extensions | Automatic (Swagger UI + ReDoc) |
+| Admin panel | Built-in | None (extension only) | None (not its job) |
+| ORM | Built-in (Django ORM) | None (bring your own) | None (bring your own) |
+| Best for | Full apps with an admin/back office | Small services, full control | APIs with typed data |
+
+A project that needs Django's admin panel is a bad fit for FastAPI. An
+API-only service that wants automatic validation is a bad fit for plain
+Flask. Pick based on the job, not the hype.
+
+## Who created FastAPI, and when?
+
+FastAPI was created by [Sebastián Ramírez](https://github.com/tiangolo)
+(GitHub handle `tiangolo`), a software developer from Colombia. He first
+released it on **December 5, 2018**. He'd run into the same problem
+again and again while building APIs: writing validation, serialization,
+and docs separately for the same data, and watching them drift out of
+sync over time. FastAPI grew out of fixing that — deriving all three
+from one set of type hints.
 
 ## A minimal FastAPI app
 
@@ -29,12 +99,12 @@ def read_root():
     return {"message": "Hello, FastAPI!"}
 ```
 
-That's it. Run it with [Uvicorn](https://www.uvicorn.org/) and you have a
-working API with automatic docs at `/docs`.
+That's it. Run it with Uvicorn and you have a working API with automatic
+docs at `/docs`.
 
 ## What this guide covers
 
-This is a short, hands-on path through the core ideas you need to build real
+A short, hands-on path through the core ideas you need to build real
 APIs with FastAPI:
 
 1. [Installation](/en/docs/installation) — set up a project and install FastAPI.
