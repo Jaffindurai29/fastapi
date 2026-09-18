@@ -1,0 +1,13 @@
+{
+  "title": "FastAPI Kaththukalam",
+  "pages": [
+    "index",
+    "installation",
+    "first-steps",
+    "path-parameters",
+    "query-parameters",
+    "request-body",
+    "response-and-status-codes",
+    "interactive-docs"
+  ]
+}

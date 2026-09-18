@@ -1,0 +1,67 @@
+---
+title: Request Body
+description: Accept structured JSON data using Pydantic models.
+---
+
+## Defining a data shape with Pydantic
+
+A request **body** is data sent by the client (usually JSON). To declare
+one, create a class based on Pydantic's `BaseModel`:
+
+```python
+from fastapi import FastAPI
+from pydantic import BaseModel
+
+class Item(BaseModel):
+    name: str
+    description: str | None = None
+    price: float
+    tax: float | None = None
+
+app = FastAPI()
+
+@app.post("/items")
+def create_item(item: Item):
+    return item
+```
+
+FastAPI will:
+
+1. Read the request body as JSON.
+2. Convert the matching types (validating them as it goes).
+3. Give you the data as the `item` parameter, fully typed.
+4. Generate a JSON Schema for `Item` and expose it in the interactive docs.
+
+## Using the parsed model
+
+Because `item` is a real Pydantic instance, you get attribute access and
+autocompletion:
+
+```python
+@app.post("/items")
+def create_item(item: Item):
+    item_dict = item.dict()
+    if item.tax is not None:
+        item_dict["price_with_tax"] = item.price + item.tax
+    return item_dict
+```
+
+## Body, path, and query together
+
+Declare path parameters, query parameters, and a request body in the same
+function — FastAPI recognizes each by how it's declared:
+
+```python
+@app.put("/items/{item_id}")
+def update_item(item_id: int, item: Item, q: str | None = None):
+    result = {"item_id": item_id, **item.dict()}
+    if q:
+        result.update({"q": q})
+    return result
+```
+
+Here, `item_id` comes from the path, `q` is an optional query parameter, and
+`item` — because it's a Pydantic model — is read from the request body.
+
+Next: [Response & Status Codes](/en/docs/response-and-status-codes), to shape
+what your API sends back.

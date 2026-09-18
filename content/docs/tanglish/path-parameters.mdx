@@ -1,0 +1,75 @@
+---
+title: Path Parameters
+description: URL path-la irundhu direct-a dynamic values eduppom.
+---
+
+## Path parameter declare pannurathu
+
+Python format strings syntax mathiri dhan path "parameters" declare
+pannalam:
+
+```python
+from fastapi import FastAPI
+
+app = FastAPI()
+
+@app.get("/items/{item_id}")
+def read_item(item_id: int):
+    return {"item_id": item_id}
+```
+
+`/items/5` open panna `{"item_id": 5}` varum.
+
+## Type hints — free-a validation
+
+`item_id` ah `int` nu annotate panniruken-nu, FastAPI:
+
+- URL string `"5"`-ah Python `int` `5`-a **convert** pannum.
+- **Validate** pannum — yaaravadhu `/items/foo` nu request anuppina, bad
+  data function-ku pogama, clear-a `422 Unprocessable Entity` error
+  varum.
+- Interactive docs-la parameter type-ah automatic-a **document** pannum.
+
+## Fixed path-ku order matter aagum
+
+`/users/me` mathiri fixed path irukku, `/users/{user_id}` mathiri dynamic
+path-um irukku-na, fixed path-ah **first** declare pannunga:
+
+```python
+@app.get("/users/me")
+def read_current_user():
+    return {"user_id": "the current user"}
+
+@app.get("/users/{user_id}")
+def read_user(user_id: str):
+    return {"user_id": user_id}
+```
+
+Illana `/users/{user_id}` dhan first match aagum, `"me"` ah `user_id` nu
+edukka try pannum.
+
+## Enum vachu fixed values
+
+Path parameter-ah oru fixed set of values-kku restrict panna, Python
+`Enum` use pannunga:
+
+```python
+from enum import Enum
+from fastapi import FastAPI
+
+class ModelName(str, Enum):
+    resnet = "resnet"
+    lenet = "lenet"
+
+app = FastAPI()
+
+@app.get("/models/{model_name}")
+def get_model(model_name: ModelName):
+    return {"model_name": model_name}
+```
+
+Verey edhaavadhu value anuppina automatic-a validation error varum, docs
+UI-la options dropdown-a render aagum.
+
+Adutha-ah: URL-la `?` ku apram varra values-kku
+[Query Parameters](/tanglish/docs/query-parameters) paakalam.

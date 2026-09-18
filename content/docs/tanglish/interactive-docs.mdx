@@ -1,0 +1,70 @@
+---
+title: Interactive Docs
+description: Automatic Swagger UI mattrum ReDoc pages vachu unga API-ah explore pannunga.
+---
+
+## Swagger UI
+
+Ovoru FastAPI app-kum free-a `/docs`-la oru live, interactive API explorer
+kidaikkum:
+
+```bash
+uvicorn main:app --reload
+```
+
+[http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs) open pannunga.
+Neenga define panna ovoru path operation-um, group panni, document panni
+kaamikkum — **"Try it out"** button-um irukku, browser-la irundhe real
+requests anuppalam.
+
+Idhu [Swagger UI](https://github.com/swagger-api/swagger-ui) vachu power
+aagudhu, FastAPI unga code-la irundhu automatic-a generate panra OpenAPI
+schema vachu build aagudhu — unga type hints, `response_model`s,
+docstrings ellame idhula feed aagum.
+
+## ReDoc
+
+`/redoc`-la vera oru, document mathiri irukra view kidaikkum:
+
+[http://127.0.0.1:8000/redoc](http://127.0.0.1:8000/redoc)
+
+Same OpenAPI schema vachu dhan generate aagudhu, Swagger UI-ku pathila
+[ReDoc](https://github.com/Redocly/redoc) vachu render aagudhu nu dhan
+difference.
+
+## Raw OpenAPI schema
+
+Rendu pages-um oru single JSON document-la irundhu dhan read pannudhu,
+adhuvum automatic-a serve aagudhu:
+
+[http://127.0.0.1:8000/openapi.json](http://127.0.0.1:8000/openapi.json)
+
+Idha vera tools-kum feed pannalam — client code generators, API gateways,
+testing tools — documentation manual-a eludhama.
+
+## Docstrings mattrum metadata vachu docs improve pannurathu
+
+FastAPI types mattum illama vera vishayangalayum edukkum. Docstring
+mattrum `summary` add panni, generate aagra docs-ah improve pannunga:
+
+```python
+from fastapi import FastAPI
+
+app = FastAPI()
+
+@app.get("/items/{item_id}", summary="Get one item")
+def read_item(item_id: int):
+    """
+    Fetch a single item by its ID.
+
+    - **item_id**: the numeric ID of the item to look up.
+    """
+    return {"item_id": item_id}
+```
+
+Idhu dhan core loop: type hints vachu normal Python function eludhunga,
+validation, serialization, documentation ellame FastAPI handle pannikum.
+
+Guide mudinjidhu — [Introduction](/tanglish/docs) ku eppo venumna
+thirumba poyi paakalam, illana same guide-ah
+[English-layum](/en/docs) padikkalam.

@@ -1,0 +1,74 @@
+---
+title: First Steps
+description: Unga first FastAPI application-ah eludhi run pannunga.
+---
+
+## Kammi simple-ana FastAPI app
+
+`main.py` nu oru file create pannunga:
+
+```python title="main.py"
+from fastapi import FastAPI
+
+app = FastAPI()
+
+@app.get("/")
+def read_root():
+    return {"message": "Hello, FastAPI!"}
+```
+
+Line by line paakalam:
+
+- `from fastapi import FastAPI` — `FastAPI` class-ah import pannudhu.
+- `app = FastAPI()` — oru "application" instance create pannudhu. Idhu dhan
+  main object, ASGI server idhukooda dhan pesum, routes ellam idhula dhan
+  attach aagum.
+- `@app.get("/")` — idhu oru **decorator**, FastAPI-kitta solradhu: "keezha
+  irukra function dhan `/` path-ku `GET` request vandha handle pannum".
+  Idhukku **path operation** nu per.
+- `def read_root(): ...` — **path operation function**. Match aagra request
+  vandha odane FastAPI idha call pannum, edhu return pannudho adhaye
+  response-a anuppum.
+
+## Server run pannunga
+
+```bash
+uvicorn main:app --reload
+```
+
+- `main` — `main.py` file (Python "module").
+- `app` — `main.py` kulla `app = FastAPI()` nu create panna object.
+- `--reload` — code change panna automatic-a server restart aagum.
+  Development-ku mattum use pannunga.
+
+[http://127.0.0.1:8000](http://127.0.0.1:8000) open pannunga, idhu
+kaamikkum:
+
+```json
+{ "message": "Hello, FastAPI!" }
+```
+
+## Verey HTTP methods-ku path operations
+
+`@app.get` — `GET` ku. Ovoru HTTP method-kum FastAPI-la matching decorator
+irukku:
+
+```python
+@app.get("/items")
+def list_items(): ...
+
+@app.post("/items")
+def create_item(): ...
+
+@app.put("/items/{item_id}")
+def replace_item(): ...
+
+@app.delete("/items/{item_id}")
+def delete_item(): ...
+```
+
+Data read panna `GET`, create panna `POST`, update panna `PUT`/`PATCH`,
+delete panna `DELETE` — decorator maathina operation maarum.
+
+Adutha step: URL-la irundhu dynamic values eduka
+[Path Parameters](/tanglish/docs/path-parameters) padinga.

@@ -1,0 +1,49 @@
+---
+title: Introduction
+description: FastAPI na enna, and indha guide-la enna irukku.
+---
+
+## FastAPI na enna?
+
+FastAPI nu solradhu oru modern, high-performance Python web framework, APIs
+build panradhukku. Idhu normal Python type hints vachu velai seiyum. Idhu
+[Starlette](https://www.starlette.io/) (web part-ku) mattrum
+[Pydantic](https://docs.pydantic.dev/) (data part-ku) mela build pannirukanga.
+
+Neenga type hints use panna, FastAPI automatic-a:
+
+- Request data-va **validate** pannum, error irundha clear-a message tharum.
+- Response data-va JSON-a **serialize** pannum.
+- Interactive API documentation-ah **generate** pannum — free-la.
+- Editor-la **autocomplete** kammi vishayam illama full-a work aagum.
+
+## Oru simple FastAPI app
+
+```python title="main.py"
+from fastapi import FastAPI
+
+app = FastAPI()
+
+@app.get("/")
+def read_root():
+    return {"message": "Hello, FastAPI!"}
+```
+
+Ivlo dhan. [Uvicorn](https://www.uvicorn.org/) vachu run pannunga, `/docs`
+la automatic documentation vandhurum.
+
+## Indha guide-la enna irukku
+
+Idhu oru short-ah, hands-on path, real APIs build panna FastAPI-la
+therinjukka vendiya core ideas:
+
+1. [Installation](/tanglish/docs/installation) — project setup panni FastAPI install pannuvom.
+2. [First Steps](/tanglish/docs/first-steps) — first app run panni, path operations puriyunga.
+3. [Path Parameters](/tanglish/docs/path-parameters) — URL path-la irundhu values eduppom.
+4. [Query Parameters](/tanglish/docs/query-parameters) — `?` mark ku apram varra values eduppom.
+5. [Request Body](/tanglish/docs/request-body) — Pydantic models vachu JSON data accept pannuvom.
+6. [Response & Status Codes](/tanglish/docs/response-and-status-codes) — neenga anuppura response-ah shape pannuvom.
+7. [Interactive Docs](/tanglish/docs/interactive-docs) — automatic Swagger UI, ReDoc pages use pannuvom.
+
+Idhu English-layum irukku, [inga click pannunga](/en/docs) formal-a
+padikkanumna.

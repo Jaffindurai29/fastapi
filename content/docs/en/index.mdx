@@ -1,0 +1,49 @@
+---
+title: Introduction
+description: What FastAPI is, and what this guide covers.
+---
+
+## What is FastAPI?
+
+FastAPI is a modern, high-performance Python web framework for building APIs,
+based on standard Python type hints. It is built on top of
+[Starlette](https://www.starlette.io/) (for the web parts) and
+[Pydantic](https://docs.pydantic.dev/) (for the data parts).
+
+Because it uses regular Python type hints, FastAPI can:
+
+- **Validate** request data automatically and return clear error messages.
+- **Serialize** your response data to JSON.
+- **Generate** interactive API documentation for you, for free.
+- Give you **editor autocompletion** everywhere in your code.
+
+## A minimal FastAPI app
+
+```python title="main.py"
+from fastapi import FastAPI
+
+app = FastAPI()
+
+@app.get("/")
+def read_root():
+    return {"message": "Hello, FastAPI!"}
+```
+
+That's it. Run it with [Uvicorn](https://www.uvicorn.org/) and you have a
+working API with automatic docs at `/docs`.
+
+## What this guide covers
+
+This is a short, hands-on path through the core ideas you need to build real
+APIs with FastAPI:
+
+1. [Installation](/en/docs/installation) — set up a project and install FastAPI.
+2. [First Steps](/en/docs/first-steps) — run your first app and understand path operations.
+3. [Path Parameters](/en/docs/path-parameters) — read values from the URL path.
+4. [Query Parameters](/en/docs/query-parameters) — read values after the `?` in a URL.
+5. [Request Body](/en/docs/request-body) — accept JSON data with Pydantic models.
+6. [Response & Status Codes](/en/docs/response-and-status-codes) — shape what you send back.
+7. [Interactive Docs](/en/docs/interactive-docs) — use the automatic Swagger UI and ReDoc pages.
+
+This guide is also available in [Tanglish](/tanglish/docs) if you'd prefer a
+more casual, code-mixed explanation.

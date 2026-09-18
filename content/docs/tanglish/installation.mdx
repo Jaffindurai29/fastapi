@@ -1,0 +1,53 @@
+---
+title: Installation
+description: Python project set up panni, FastAPI install pannuvom.
+---
+
+## Requirements
+
+FastAPI-ku Python 3.8 or above venum. Enna irukku nu check pannunga:
+
+```bash
+python --version
+```
+
+## Virtual environment create pannunga
+
+Every project-kum dependencies separate-a vecha nallа irukum. Adhukaga
+virtual environment create pannunga.
+
+```bash
+python -m venv venv
+```
+
+Activate pannunga:
+
+```bash title="macOS / Linux"
+source venv/bin/activate
+```
+
+```bash title="Windows (PowerShell)"
+venv\Scripts\Activate.ps1
+```
+
+## FastAPI mattrum server install pannunga
+
+FastAPI-kulla server include aagala. Development-ku
+[Uvicorn](https://www.uvicorn.org/) dhan recommended ASGI server.
+
+```bash
+pip install fastapi uvicorn[standard]
+```
+
+- `fastapi` — framework.
+- `uvicorn[standard]` — app-ah run panna server, extra performance mattrum
+  reload dependencies-oda.
+
+## Install correct-a aacha nu verify pannunga
+
+```bash
+python -c "import fastapi; print(fastapi.__version__)"
+```
+
+Error illama version number print aana, neenga ready —
+[First Steps](/tanglish/docs/first-steps) ku pogalam.

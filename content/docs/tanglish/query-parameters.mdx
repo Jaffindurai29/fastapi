@@ -1,0 +1,80 @@
+---
+title: Query Parameters
+description: Optional values-ah query string-la irundhu eduppom.
+---
+
+## Enna dhan query parameter-a count aagum
+
+Path-la illama irukra edhavadhu function parameter, query parameter-a dhan
+treat aagum:
+
+```python
+from fastapi import FastAPI
+
+app = FastAPI()
+
+fake_items = [{"name": "Foo"}, {"name": "Bar"}, {"name": "Baz"}]
+
+@app.get("/items")
+def list_items(skip: int = 0, limit: int = 10):
+    return fake_items[skip : skip + limit]
+```
+
+`/items?skip=1&limit=2` request panna `[{"name": "Bar"}, {"name": "Baz"}]`
+varum.
+
+## Optional parameters
+
+Default value-ah `None` vachu kudunga (`Optional`, illa Python 3.10+
+irundha `| None`), parameter optional aagum:
+
+```python
+from typing import Optional
+from fastapi import FastAPI
+
+app = FastAPI()
+
+@app.get("/items/{item_id}")
+def read_item(item_id: str, q: Optional[str] = None):
+    if q:
+        return {"item_id": item_id, "q": q}
+    return {"item_id": item_id}
+```
+
+## Required query parameters
+
+Default value **illama** irukra parameter, path-la illainaalum required
+aagum:
+
+```python
+@app.get("/items/{item_id}")
+def read_item(item_id: str, needy: str):
+    return {"item_id": item_id, "needy": needy}
+```
+
+`?needy=...` illama `/items/foo` call panna, `needy` required-nu
+explain panra `422` error varum.
+
+## Path mattrum query parameters sernthu
+
+Function signature-la order matter aagadhu — name vachu dhan FastAPI path
+vs query parameter-ah figure out pannum:
+
+```python
+@app.get("/users/{user_id}/items/{item_id}")
+def read_user_item(
+    user_id: int,
+    item_id: str,
+    q: Optional[str] = None,
+    short: bool = False,
+):
+    item = {"item_id": item_id, "owner_id": user_id}
+    if q:
+        item.update({"q": q})
+    if not short:
+        item.update({"description": "This is a long description"})
+    return item
+```
+
+Adutha step: URL-la irundhu illama, structured JSON data anuppa
+[Request Body](/tanglish/docs/request-body) paakalam.

@@ -1,0 +1,79 @@
+---
+title: Query Parameters
+description: Read optional values from the query string.
+---
+
+## What counts as a query parameter
+
+Any function parameter that is **not** part of the path is treated as a
+query parameter:
+
+```python
+from fastapi import FastAPI
+
+app = FastAPI()
+
+fake_items = [{"name": "Foo"}, {"name": "Bar"}, {"name": "Baz"}]
+
+@app.get("/items")
+def list_items(skip: int = 0, limit: int = 10):
+    return fake_items[skip : skip + limit]
+```
+
+A request to `/items?skip=1&limit=2` returns `[{"name": "Bar"}, {"name": "Baz"}]`.
+
+## Optional parameters
+
+Give a parameter a default value of `None` (with `Optional`, or `| None` on
+Python 3.10+) to make it optional:
+
+```python
+from typing import Optional
+from fastapi import FastAPI
+
+app = FastAPI()
+
+@app.get("/items/{item_id}")
+def read_item(item_id: str, q: Optional[str] = None):
+    if q:
+        return {"item_id": item_id, "q": q}
+    return {"item_id": item_id}
+```
+
+## Required query parameters
+
+A parameter with **no default value** is required, even though it's a query
+parameter and not part of the path:
+
+```python
+@app.get("/items/{item_id}")
+def read_item(item_id: str, needy: str):
+    return {"item_id": item_id, "needy": needy}
+```
+
+Calling `/items/foo` without `?needy=...` returns a `422` error explaining
+that `needy` is a required query parameter.
+
+## Mixing path and query parameters
+
+FastAPI figures out path vs. query parameters by name — order in the
+function signature doesn't matter:
+
+```python
+@app.get("/users/{user_id}/items/{item_id}")
+def read_user_item(
+    user_id: int,
+    item_id: str,
+    q: Optional[str] = None,
+    short: bool = False,
+):
+    item = {"item_id": item_id, "owner_id": user_id}
+    if q:
+        item.update({"q": q})
+    if not short:
+        item.update({"description": "This is a long description"})
+    return item
+```
+
+Next: [Request Body](/en/docs/request-body), for sending structured JSON data
+to your API instead of reading it from the URL.

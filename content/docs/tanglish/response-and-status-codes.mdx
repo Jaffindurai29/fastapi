@@ -1,0 +1,77 @@
+---
+title: Response & Status Codes
+description: Response shape, status codes, error handling control pannuvom.
+---
+
+## Status code set pannurathu
+
+Path operation decorator-ku `status_code` kudukka, default response
+status-ah control pannalam:
+
+```python
+from fastapi import FastAPI, status
+
+app = FastAPI()
+
+@app.post("/items", status_code=status.HTTP_201_CREATED)
+def create_item(name: str):
+    return {"name": name}
+```
+
+Plain `201` ku pathila `status` module use panna, code readable-a irukum,
+autocomplete-um kidaikkum.
+
+## `response_model` vachu response shape restrict pannurathu
+
+Palasaari, neenga receive panna data-ye exact-a return panna koodadhu —
+example-ku, input-la password accept panniteenganu, output-la adha never
+anuppa koodadhu. Output shape-ah separate-a declare panna `response_model`
+use pannunga:
+
+```python
+from fastapi import FastAPI
+from pydantic import BaseModel
+
+app = FastAPI()
+
+class UserIn(BaseModel):
+    username: str
+    password: str
+    email: str
+
+class UserOut(BaseModel):
+    username: str
+    email: str
+
+@app.post("/users", response_model=UserOut)
+def create_user(user: UserIn):
+    return user
+```
+
+Function full `user` object return pannalum, FastAPI response-ah
+`UserOut` vachi filter pannum, so `password` server-la irundhu velila
+varadhu.
+
+## `HTTPException` vachu errors raise pannurathu
+
+`HTTPException` raise panni proper error response return pannunga:
+
+```python
+from fastapi import FastAPI, HTTPException
+
+app = FastAPI()
+
+items = {"foo": "The Foo Wrestlers"}
+
+@app.get("/items/{item_id}")
+def read_item(item_id: str):
+    if item_id not in items:
+        raise HTTPException(status_code=404, detail="Item not found")
+    return {"item": items[item_id]}
+```
+
+Idhu odane execution-ah stop panni, `{"detail": "Item not found"}` mathiri
+JSON body-oda `404` status return pannum.
+
+Adutha step: ellame automatic-a oru live API explorer-a paakka
+[Interactive Docs](/tanglish/docs/interactive-docs) paakalam.

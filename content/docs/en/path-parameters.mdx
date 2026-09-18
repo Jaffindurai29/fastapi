@@ -1,0 +1,74 @@
+---
+title: Path Parameters
+description: Read dynamic values straight from the URL path.
+---
+
+## Declaring a path parameter
+
+You can declare path "parameters" using the same syntax as Python format
+strings:
+
+```python
+from fastapi import FastAPI
+
+app = FastAPI()
+
+@app.get("/items/{item_id}")
+def read_item(item_id: int):
+    return {"item_id": item_id}
+```
+
+Visiting `/items/5` returns `{"item_id": 5}`.
+
+## Type hints give you validation for free
+
+Because `item_id` is annotated as `int`, FastAPI will:
+
+- **Parse and convert** the URL string `"5"` into the Python `int` `5`.
+- **Validate** it — if someone requests `/items/foo`, FastAPI returns a
+  clear `422 Unprocessable Entity` error instead of letting bad data reach
+  your function.
+- **Document** the parameter's type automatically in the interactive docs.
+
+## Order matters with fixed paths
+
+If you have a fixed path like `/users/me` and a dynamic one like
+`/users/{user_id}`, declare the fixed path **first**:
+
+```python
+@app.get("/users/me")
+def read_current_user():
+    return {"user_id": "the current user"}
+
+@app.get("/users/{user_id}")
+def read_user(user_id: str):
+    return {"user_id": user_id}
+```
+
+Otherwise, `/users/{user_id}` would match `/users/me` first and try to treat
+`"me"` as a `user_id`.
+
+## Predefined values with enums
+
+To restrict a path parameter to a fixed set of values, use a Python `Enum`:
+
+```python
+from enum import Enum
+from fastapi import FastAPI
+
+class ModelName(str, Enum):
+    resnet = "resnet"
+    lenet = "lenet"
+
+app = FastAPI()
+
+@app.get("/models/{model_name}")
+def get_model(model_name: ModelName):
+    return {"model_name": model_name}
+```
+
+Requests with any other value automatically get a validation error, and the
+docs UI will render the choices as a dropdown.
+
+Next up: [Query Parameters](/en/docs/query-parameters), for values that come
+after the `?` in a URL.
