@@ -44,6 +44,12 @@ export default async function RootLayout({
         <RootProvider
           theme={{ enabled: false }}
           i18n={i18nProvider(translations, lang)}
+          search={{
+            options: {
+              type: "static",
+              api: `${process.env.NEXT_PUBLIC_BASE_PATH ?? ""}/api/search`,
+            },
+          }}
         >
           {children}
         </RootProvider>
