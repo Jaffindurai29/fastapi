@@ -1,0 +1,70 @@
+---
+title: POST
+description: URL-la irundhu read panradhukku pathila, JSON body accept pannuvom.
+---
+
+## Client anuppura data describe pannurathu
+
+Ippavarikkum ella-vidhamum read panna dhan paartom — fixed path, dynamic
+path parameter. `POST` nu solradhu server-ku data **anuppurathukaga** —
+oru pudhu item, form, URL-la fit aagadha edhavadhu shape-oda data.
+
+Andha shape-ah Pydantic-oda `BaseModel`-la irundhu vandha class-a
+describe pannunga:
+
+```python
+from fastapi import FastAPI
+from pydantic import BaseModel
+
+app = FastAPI()
+
+class Item(BaseModel):
+    name: str
+    price: float
+
+@app.post("/items")
+def create_item(item: Item):
+    return item
+```
+
+## Line by line
+
+1. `from pydantic import BaseModel` — ovoru request-body model-um
+   inherit panra base class.
+2. `class Item(BaseModel): name: str, price: float` — FastAPI expect
+   panna vendiya JSON shape-ah describe pannudhu. Rendu fields-kum
+   default value illa, so rendaiyum required.
+3. `@app.post("/items")` — `/items`-ku varra `POST` requests-kku indha
+   function-ah register pannudhu. Indha data vachi path edhuvum maaradhu
+   — adhu dhan idha body-a aakkudhu, path illa query parameter-a illa.
+4. `def create_item(item: Item):` — `Item` oru `BaseModel` subclass
+   (plain `int`/`str` illa, path-layum illa), so FastAPI idha JSON
+   request body-la irundhu padikkanum-nu therinjikum.
+5. `return item` — `item` ippo real `Item` object dhan, dict illa.
+   Adha directly return panna, automatic-a JSON-a serialize aagum.
+
+## Free-a enna kidaikkum
+
+`{"name": "Laptop", "price": 999.99}` anuppunga, adha maadhiri thirumba
+kidaikkum. Aana `price` leave out pannunga, illana number-ku pathila
+string anuppunga — FastAPI unga function run aaguradhukku munnadi
+`422` vachu reject pannidum:
+
+```json
+{
+  "detail": [
+    {
+      "type": "missing",
+      "loc": ["body", "price"],
+      "msg": "Field required"
+    }
+  ]
+}
+```
+
+Adha catch panna neenga oru `if` statement kooda eludhala. Idhu path
+parameters-la paartha same type-hints-as-validation idea dhan, ippo
+full request body-kku apply aagudhu, oru value-kku pathila.
+
+Adutha step: [Array + CRUD](/tanglish/docs/array-crud) — chinna
+in-memory array mela ella aaru HTTP verbs-um.

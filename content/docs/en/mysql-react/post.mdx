@@ -1,0 +1,35 @@
+---
+title: "2. POST"
+description: The add form — unchanged from the array version.
+---
+
+## No difference here
+
+```jsx
+async function addItem(event) {
+  event.preventDefault();
+  if (value.trim() === "") return;
+
+  const response = await fetch(`${API_URL}/items`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ value: value }),
+  });
+
+  if (!response.ok) {
+    setError(`Failed to add item (status ${response.status})`);
+    return;
+  }
+
+  setValue("");
+  await loadItems();
+}
+```
+
+Identical to [React's POST](/en/docs/react/post) — the request body is
+the same `{ value }` shape either way. **The one thing that changed
+happened on the backend, not here:** the database now assigns a real
+`id` to the new row, instead of the frontend assuming it landed at
+`items.length`.
+
+Next: [PUT](/en/docs/mysql-react/put) — editing a row, addressed by ID.

@@ -1,0 +1,39 @@
+---
+title: "4. PATCH"
+description: PUT-oda same edit code, vera verb-oda rendavadhu button-ku wired.
+---
+
+## Same function, vera button
+
+Separate-a `savePatch` function edhuvum illa — [`saveEdit`](/tanglish/docs/react/put)
+already `method`-ah parameter-a edukkum, so **"Save (PATCH)"** button
+adha vera string-oda call pannum mattum dhan:
+
+```jsx
+<button onClick={() => saveEdit(index, "PATCH")}>Save (PATCH)</button>
+```
+
+Munnadi page-oda PUT button-oda compare pannunga:
+
+```jsx
+<button onClick={() => saveEdit(index, "PUT")}>Save (PUT)</button>
+```
+
+Same component, same request body, same `fetch` call — frontend-la
+real difference `"PUT"` vs `"PATCH"` literal string dhan, argument-a
+pass pannudhu. Andha oru difference dhan backend-la rendu HTTP
+methods-um genuinely exercise pannudhu, oru button-um cosmetic illa nu
+kaamikkum.
+
+```jsx
+{editingIndex === index && (
+  <>
+    <button onClick={() => saveEdit(index, "PUT")}>Save (PUT)</button>
+    <button onClick={() => saveEdit(index, "PATCH")}>Save (PATCH)</button>
+    <button onClick={() => setEditingIndex(null)}>Cancel</button>
+  </>
+)}
+```
+
+Adutha step: [DELETE](/tanglish/docs/react/delete) — oru item-ah
+remove pannurathu, mattrum full list eppadi render aagum.

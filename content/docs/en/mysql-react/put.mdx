@@ -1,0 +1,47 @@
+---
+title: "3. PUT"
+description: Editing a row, addressed by database ID.
+---
+
+## Entering edit mode, by ID
+
+```jsx
+function startEditing(id, currentValue) {
+  setEditingId(id);
+  setEditValue(currentValue);
+}
+```
+
+**Difference from [React's PUT](/en/docs/react/put):**
+`setEditingIndex` → `setEditingId` — the same rename as on the
+[index page](/en/docs/mysql-react).
+
+## Saving with PUT
+
+```jsx
+async function saveEdit(id, method) {
+  const response = await fetch(`${API_URL}/items/${id}`, {
+    method: method, // "PUT" or "PATCH"
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ value: editValue }),
+  });
+
+  if (!response.ok) {
+    setError(`Failed to update item (status ${response.status})`);
+    return;
+  }
+
+  setEditingId(null);
+  await loadItems();
+}
+```
+
+```jsx
+<button onClick={() => saveEdit(item.id, "PUT")}>Save (PUT)</button>
+```
+
+Same function, same idea as the array version — `index` renamed to
+`id` throughout, nothing else.
+
+Next: [PATCH](/en/docs/mysql-react/patch) — the same function, called
+with a different verb.

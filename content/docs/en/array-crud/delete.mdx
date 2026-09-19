@@ -1,0 +1,43 @@
+---
+title: "5. DELETE"
+description: Removing the item at a given index.
+---
+
+## The code
+
+```python title="main.py"
+from fastapi import FastAPI, HTTPException, status
+
+app = FastAPI()
+
+data = ["first", "second"]
+
+@app.delete("/items/{item_index}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_item(item_index: int):
+    if item_index < 0 or item_index >= len(data):
+        raise HTTPException(status_code=404, detail="Item not found")
+    data.pop(item_index)
+```
+
+## Line by line
+
+1. **Check the index exists first** — the same bounds check as every
+   other route in this topic.
+2. **`status_code=status.HTTP_204_NO_CONTENT`** — `204` means "it
+   worked, and there's nothing to send back." The function doesn't
+   `return` anything; a `204` response has no body by convention.
+3. **`data.pop(item_index)`** — removes that entry, shifting everything
+   after it down by one position. That's why array indexes aren't
+   stable identifiers — deleting index `0` makes the old index `1`
+   become the new index `0`. A real database uses a fixed ID per row
+   instead, precisely to avoid this — see
+   [MySQL + CRUD](/en/docs/mysql-crud).
+
+## Try it
+
+```bash
+curl -i -X DELETE http://127.0.0.1:8000/items/0
+```
+
+Next: [React + Array + CRUD](/en/docs/react) — connecting a real frontend to all five
+of these verbs.

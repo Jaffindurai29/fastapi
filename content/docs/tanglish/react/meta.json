@@ -1,0 +1,4 @@
+{
+  "title": "React + Array + CRUD",
+  "pages": ["index", "get", "post", "put", "patch", "delete"]
+}

@@ -1,0 +1,93 @@
+---
+title: React + MySQL + CRUD
+description: Topic 5-oda same React frontend, real MySQL database mela point panni.
+---
+
+## Backend
+
+[MySQL + CRUD](/tanglish/docs/mysql-crud)-oda aaru routes-um, oru
+app-a sernthu — [Array + CRUD](/tanglish/docs/array-crud)-oda
+routes [React + Array + CRUD](/tanglish/docs/react)-kaga sernthadhu mathiri dhan —
+plus andha topic-oda same `CORSMiddleware`:
+
+```python
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+```
+
+Vera edhuvum maaradhu — CORS-ku, protect panra routes-oda pinnadi enna
+irukku nu kavalai illa.
+
+## Same frontend, oru state rename
+
+Idhu [React + Array + CRUD](/tanglish/docs/react)-la irundha exact same app dhan,
+array backend-ku pathila mela irukra MySQL backend mela point pannudhu.
+Indha section-oda ovoru page-um direct comparison — diff eppovum same
+oru change: **index → id**.
+
+```jsx
+const [items, setItems] = useState([]);          // database rows, ovonnum { id, value }
+const [editingId, setEditingId] = useState(null); // edit aagra row-oda id
+```
+
+`editingIndex` → `editingId`. Same idea, ippo enna hold pannudho adha
+match panna rename pannirukom — array-la position illa, database ID.
+`items`-oda shape-um maari, ovoru entry-um `{ id, value }`.
+
+1. [GET](/tanglish/docs/mysql-react/get) — rows load pannurathu, ID vachi oru row reach pannurathu.
+2. [POST](/tanglish/docs/mysql-react/post) — add form (maaradhu).
+3. [PUT](/tanglish/docs/mysql-react/put) — "Save (PUT)" button, ID vachi address pannurathu.
+4. [PATCH](/tanglish/docs/mysql-react/patch) — "Save (PATCH)" button, ID vachi address pannurathu.
+5. [DELETE](/tanglish/docs/mysql-react/delete) — row-ah delete pannurathu, mattrum IDs yeandhukku shift aagadhu.
+
+## Indha topic-ah eppadi run pannurathu
+
+[MySQL + CRUD](/tanglish/docs/mysql-crud)-oda same database setup
+venum, plus backend mattrum frontend rendum oru time-la run aaga
+vendum:
+
+1. **Oru thadava database setup** (andha topic-ku already pannirundha skip pannunga):
+
+   ```bash
+   pip install sqlalchemy pymysql
+   ```
+
+   ```sql
+   CREATE DATABASE fastapi_learn;
+   ```
+
+   ```bash
+   export MYSQL_HOST=127.0.0.1
+   export MYSQL_PORT=3306
+   export MYSQL_USER=root
+   export MYSQL_PASSWORD=your-password
+   export MYSQL_DB=fastapi_learn
+   ```
+
+   MySQL kaiyila illaya? Pathila `export DATABASE_URL="sqlite:///./test.db"` pannunga.
+
+2. **Terminal 1 — backend:**
+
+   ```bash
+   cd example/7/a
+   uvicorn main:app --reload
+   ```
+
+3. **Terminal 2 — frontend:**
+
+   ```bash
+   cd example/7/react
+   npm install
+   npm run dev
+   ```
+
+4. Vite print panra URL open pannunga (usually
+   [http://localhost:5173](http://localhost:5173)).
+
+Full frontend code indha repo-la `example/7/react`-la irukku (adhoda
+`README.md` mattrum `STEPS.md` paarunga).

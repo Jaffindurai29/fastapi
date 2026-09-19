@@ -1,0 +1,50 @@
+---
+title: "5. DELETE"
+description: Removing a row, and why IDs don't shift.
+---
+
+## Deleting a row
+
+```jsx
+async function deleteItem(id) {
+  const response = await fetch(`${API_URL}/items/${id}`, {
+    method: "DELETE",
+  });
+
+  if (!response.ok) {
+    setError(`Failed to delete item (status ${response.status})`);
+    return;
+  }
+
+  await loadItems();
+}
+```
+
+Same shape as [React's DELETE](/en/docs/react/delete) —
+`DELETE /items/${id}` instead of `DELETE /items/${index}`. **This is
+where the real, visible difference shows up when you actually use the
+app:** delete a row in the array version and every row after it shifts
+down one index. Delete a row here and every other row keeps its `#id`
+exactly as it was — nothing renumbers.
+
+## Rendering
+
+```jsx
+{items.map((item) =>
+  editingId === item.id ? (
+    <li key={item.id}>{/* edit mode */}</li>
+  ) : (
+    <li key={item.id}>{/* normal mode */}</li>
+  ),
+)}
+```
+
+**Difference:** `.map((item, index) => ...)` → `.map((item) => ...)` —
+no need to pull `index` out of `.map()` anymore, since everything the UI
+needs (`id`, `value`) already lives on `item`. `key={index}` also
+becomes `key={item.id}` — React's `key` should always be a stable
+identity, and a database ID is a better one than a position that can
+shift.
+
+That's not just a rename. This is the practical payoff of the database
+topics: identities that don't move.

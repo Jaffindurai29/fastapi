@@ -1,0 +1,24 @@
+---
+title: "4. PATCH"
+description: The same edit code as PUT, addressed by database ID.
+---
+
+## Same story as the array version
+
+```jsx
+<button onClick={() => saveEdit(item.id, "PATCH")}>Save (PATCH)</button>
+```
+
+Compared to [PUT](/en/docs/mysql-react/put)'s button:
+
+```jsx
+<button onClick={() => saveEdit(item.id, "PUT")}>Save (PUT)</button>
+```
+
+Exactly the same relationship as [React's PATCH](/en/docs/react/patch)
+— one shared `saveEdit` function, one string argument that decides the
+HTTP method. The only thing different here versus the array version is
+`item.id` instead of `index` as the first argument.
+
+Next: [DELETE](/en/docs/mysql-react/delete) — removing a row, and why
+IDs don't shift.

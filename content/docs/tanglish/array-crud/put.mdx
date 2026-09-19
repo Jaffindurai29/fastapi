@@ -1,0 +1,44 @@
+---
+title: "3. PUT"
+description: Oru index-la irukra item-ah full-a replace pannurathu.
+---
+
+## Code
+
+```python title="main.py"
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+
+app = FastAPI()
+
+data = ["first", "second"]
+
+class ItemRequest(BaseModel):
+    value: str
+
+@app.put("/items/{item_index}")
+def replace_item(item_index: int, item: ItemRequest):
+    if item_index < 0 or item_index >= len(data):
+        raise HTTPException(status_code=404, detail="Item not found")
+    data[item_index] = item.value
+    return {"index": item_index, "value": data[item_index]}
+```
+
+## Line by line
+
+1. **Index irukka nu first check pannunga** — [GET](/tanglish/docs/array-crud/get)-la
+   irukra same bounds check dhan, out-of-range `PUT`-kum clean `404`
+   varum, crash aagadhu.
+2. **`data[item_index] = item.value`** — andha slot-ah full-a
+   overwrite pannudhu. `PUT` nu solradhu "idhu dhan indha resource-oda
+   complete pudhu representation" — client full value-ah anuppanum,
+   maari irukra part mattum illa.
+
+## Try it
+
+```bash
+curl -X PUT http://127.0.0.1:8000/items/0 -H "Content-Type: application/json" -d "{\"value\": \"replaced\"}"
+```
+
+Adutha step: [PATCH](/tanglish/docs/array-crud/patch) — same idea,
+aana field optional.

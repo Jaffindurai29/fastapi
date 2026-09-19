@@ -1,0 +1,47 @@
+---
+title: "1. GET"
+description: MySQL-la irundhu rows padikkurathu — full table, mattrum ID vachi oru row.
+---
+
+## Code
+
+```python title="main.py"
+from fastapi import Depends, FastAPI, HTTPException
+from sqlalchemy.orm import Session
+# ...engine/Base/ItemModel/get_db, index page-la irukra setup-la irundhu
+
+app = FastAPI()
+
+@app.get("/items")
+def list_items(db: Session = Depends(get_db)):
+    rows = db.query(ItemModel).order_by(ItemModel.id).all()
+    return [{"id": row.id, "value": row.value} for row in rows]
+
+@app.get("/items/{item_id}")
+def get_item(item_id: int, db: Session = Depends(get_db)):
+    row = db.get(ItemModel, item_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Item not found")
+    return {"id": row.id, "value": row.value}
+```
+
+## Line by line
+
+1. `db: Session = Depends(get_db)` — indha route run aaguradhukku
+   munnadi FastAPI `get_db()`-ah call pannum, session open pannum,
+   apparam automatic-a close pannum, route-la error vandhalum.
+2. `db.query(ItemModel).order_by(ItemModel.id).all()` — table-la irukra
+   ovoru row-um, predictable order-la.
+3. `db.get(ItemModel, item_id)` — SQLAlchemy-oda "primary key vachi
+   fetch pannu" shortcut, edhuvum match aagalana `None` return pannum —
+   munnadi topics-la paartha same `404`-if-missing pattern.
+
+## Try it
+
+```bash
+curl http://127.0.0.1:8000/items
+curl http://127.0.0.1:8000/items/1
+```
+
+Adutha step: [POST](/tanglish/docs/mysql-crud/post) — pudhu row insert
+pannurathu.

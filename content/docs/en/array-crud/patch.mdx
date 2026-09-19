@@ -1,0 +1,51 @@
+---
+title: "4. PATCH"
+description: Partially updating an item — the field is optional.
+---
+
+## The code
+
+```python title="main.py"
+from typing import Optional
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+
+app = FastAPI()
+
+data = ["first", "second"]
+
+class ItemPatch(BaseModel):
+    value: Optional[str] = None
+
+@app.patch("/items/{item_index}")
+def update_item(item_index: int, patch: ItemPatch):
+    if item_index < 0 or item_index >= len(data):
+        raise HTTPException(status_code=404, detail="Item not found")
+    if patch.value is not None:
+        data[item_index] = patch.value
+    return {"index": item_index, "value": data[item_index]}
+```
+
+## Line by line
+
+1. **`ItemPatch`'s field is optional** (`value: Optional[str] = None`)
+   — unlike [PUT](/en/docs/array-crud/put)'s `ItemRequest`, where
+   `value` is required. That's the whole difference between `PUT` and
+   `PATCH`: `PUT` demands the full representation, `PATCH` lets you
+   send only what changed.
+2. **`if patch.value is not None:`** — only overwrites the slot if the
+   client actually sent a value. An empty body (`{}`) leaves the item
+   untouched.
+
+With only one field on this item, `PUT` and `PATCH` behave almost
+identically — the real difference shows up once a resource has several
+fields and you only want to change one of them.
+
+## Try it
+
+```bash
+curl -X PATCH http://127.0.0.1:8000/items/1 -H "Content-Type: application/json" -d "{\"value\": \"patched\"}"
+curl -X PATCH http://127.0.0.1:8000/items/0 -H "Content-Type: application/json" -d "{}"
+```
+
+Next: [DELETE](/en/docs/array-crud/delete) — removing an item.

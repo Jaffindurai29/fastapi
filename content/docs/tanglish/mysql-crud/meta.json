@@ -1,0 +1,4 @@
+{
+  "title": "MySQL + CRUD",
+  "pages": ["index", "get", "post", "put", "patch", "delete"]
+}

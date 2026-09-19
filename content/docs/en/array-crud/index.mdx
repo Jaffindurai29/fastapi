@@ -1,0 +1,41 @@
+---
+title: Array + CRUD
+description: All five HTTP verbs over a small in-memory array.
+---
+
+**CRUD** stands for **C**reate, **R**ead, **U**pdate, **D**elete — the
+four things almost every API resource needs. Each maps to an HTTP verb:
+
+| CRUD | HTTP verb(s) |
+|---|---|
+| Create | `POST` |
+| Read | `GET` |
+| Update | `PUT` (full replace) or `PATCH` (partial) |
+| Delete | `DELETE` |
+
+This topic builds all five over a plain Python list (an "array"), kept
+outside any route function so every request sees the same one — each
+page below is one verb, seeded with two starting items so it's testable
+on its own.
+
+## Running this topic
+
+Backend only — no frontend, no database. Each verb has its own
+runnable file in `example/4` (`4/a` GET, `4/b` POST, `4/c` PUT, `4/d`
+PATCH, `4/e` DELETE); they don't need to run together:
+
+```bash
+cd example/4/a   # or b, c, d, e
+uvicorn main:app --reload
+```
+
+Then open [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
+(Swagger UI), or use `curl`/Postman as shown on each page below.
+
+1. [GET](/en/docs/array-crud/get) — list the whole array, or reach one item by index.
+2. [POST](/en/docs/array-crud/post) — add a new item to the end.
+3. [PUT](/en/docs/array-crud/put) — replace an item at a given index entirely.
+4. [PATCH](/en/docs/array-crud/patch) — partially update an item — the field is optional.
+5. [DELETE](/en/docs/array-crud/delete) — remove an item at a given index.
+
+Work through them in order, or jump to whichever verb you need.

@@ -1,0 +1,46 @@
+---
+title: "4. PATCH"
+description: Partially updating a row — the field is optional.
+---
+
+## The code
+
+```python title="main.py"
+from typing import Optional
+from fastapi import Depends, FastAPI, HTTPException
+from pydantic import BaseModel
+from sqlalchemy.orm import Session
+
+app = FastAPI()
+
+class ItemPatch(BaseModel):
+    value: Optional[str] = None
+
+@app.patch("/items/{item_id}")
+def update_item(item_id: int, patch: ItemPatch, db: Session = Depends(get_db)):
+    row = db.get(ItemModel, item_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Item not found")
+    if patch.value is not None:
+        row.value = patch.value
+    db.commit()
+    db.refresh(row)
+    return {"id": row.id, "value": row.value}
+```
+
+## Line by line
+
+1. **`ItemPatch.value` is optional** — unlike [PUT](/en/docs/mysql-crud/put)'s
+   `ItemRequest`, where `value` is required. Same distinction as the
+   array topic's PATCH: `PUT` demands the full representation, `PATCH`
+   lets you send only what changed.
+2. **`if patch.value is not None: row.value = patch.value`** — only
+   updates the row if the client actually sent a value.
+
+## Try it
+
+```bash
+curl -X PATCH http://127.0.0.1:8000/items/2 -H "Content-Type: application/json" -d "{\"value\": \"patched\"}"
+```
+
+Next: [DELETE](/en/docs/mysql-crud/delete) — removing a row.

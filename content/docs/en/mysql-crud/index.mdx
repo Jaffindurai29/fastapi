@@ -1,0 +1,92 @@
+---
+title: MySQL + CRUD
+description: The same five verbs from Array + CRUD, now backed by a real MySQL table.
+---
+
+Same five verbs as [Array + CRUD](/en/docs/array-crud) — same
+routes, same request/response shapes — but reading and writing a real
+[MySQL](https://www.mysql.com/) table via
+[SQLAlchemy](https://www.sqlalchemy.org/) instead of a Python list. Data
+survives a restart; array positions become real, stable database IDs.
+
+## Setup
+
+```bash
+pip install sqlalchemy pymysql
+```
+
+Create the database once, in your MySQL client:
+
+```sql
+CREATE DATABASE fastapi_learn;
+```
+
+Then set connection details as environment variables:
+
+```bash
+export MYSQL_HOST=127.0.0.1
+export MYSQL_PORT=3306
+export MYSQL_USER=root
+export MYSQL_PASSWORD=your-password
+export MYSQL_DB=fastapi_learn
+```
+
+No MySQL handy? Point `DATABASE_URL` at a SQLite file instead — the same
+code works unchanged:
+
+```bash
+export DATABASE_URL="sqlite:///./test.db"
+```
+
+## Running this topic
+
+Backend only, same setup above applies to every letter — do it once,
+then run whichever verb you want:
+
+```bash
+cd example/6/a   # or b, c, d, e
+uvicorn main:app --reload
+```
+
+## The pieces every page below shares
+
+**Connection, from environment variables:**
+
+```python
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
+)
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+```
+
+**The table, as a Python class** — with a real, stable, auto-incrementing
+`id`, unlike the array topic's position-based index:
+
+```python
+class ItemModel(Base):
+    __tablename__ = "items"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    value = Column(String(255), nullable=False)
+
+Base.metadata.create_all(bind=engine)
+```
+
+**A session per request, via `Depends`** — the same dependency-injection
+pattern from earlier topics, now managing a real database connection:
+
+```python
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+```
+
+1. [GET](/en/docs/mysql-crud/get) — list every row, or reach one by ID.
+2. [POST](/en/docs/mysql-crud/post) — insert a new row.
+3. [PUT](/en/docs/mysql-crud/put) — replace a row's value entirely.
+4. [PATCH](/en/docs/mysql-crud/patch) — partially update a row.
+5. [DELETE](/en/docs/mysql-crud/delete) — remove a row by ID.

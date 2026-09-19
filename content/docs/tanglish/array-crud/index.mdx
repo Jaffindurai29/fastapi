@@ -1,0 +1,45 @@
+---
+title: Array + CRUD
+description: Chinna in-memory array mela ella aaru HTTP verbs-um.
+---
+
+**CRUD** solradhu **C**reate, **R**ead, **U**pdate, **D**elete —
+almost ella API resource-kum venum nalu vishayam. Ovonnum oru HTTP
+verb-ku map aagum:
+
+| CRUD | HTTP verb(s) |
+|---|---|
+| Create | `POST` |
+| Read | `GET` |
+| Update | `PUT` (full replace) illana `PATCH` (partial) |
+| Delete | `DELETE` |
+
+Indha topic plain Python list ("array") mela ella aaru verbs-um build
+pannudhu, edhavadhu route function-ku velila vechirukom so ovoru
+request-um same list-ah dhan paakum — keezha irukra ovoru page-um oru
+verb, rendu starting items-oda seed pannirukom, so standalone-a
+testable.
+
+## Indha topic-ah eppadi run pannurathu
+
+Backend mattum dhan — frontend illa, database illa. Ovoru verb-kum
+`example/4`-la thani file irukku (`4/a` GET, `4/b` POST, `4/c` PUT,
+`4/d` PATCH, `4/e` DELETE); ivanga sernthu run aaga theva illa:
+
+```bash
+cd example/4/a   # illana b, c, d, e
+uvicorn main:app --reload
+```
+
+Apparam [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
+(Swagger UI) open pannunga, illana keezha irukra ovoru page-la
+kaataradhu mathiri `curl`/Postman use pannunga.
+
+1. [GET](/tanglish/docs/array-crud/get) — full array-ah list pannunga, illana index vachi oru item-ah reach pannunga.
+2. [POST](/tanglish/docs/array-crud/post) — array-oda end-la pudhu item add pannunga.
+3. [PUT](/tanglish/docs/array-crud/put) — oru index-la irukra item-ah full-a replace pannunga.
+4. [PATCH](/tanglish/docs/array-crud/patch) — partially update pannunga — field optional.
+5. [DELETE](/tanglish/docs/array-crud/delete) — oru index-la irukra item-ah remove pannunga.
+
+Order-la work pannunga, illana unga ku venum na direct-a edhavadhu verb-ku
+pogalam.

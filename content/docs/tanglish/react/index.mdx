@@ -1,0 +1,80 @@
+---
+title: React + Array + CRUD
+description: Array CRUD API-ku CORS add panni, full React frontend-oda connect pannunga.
+---
+
+## Yeandhukku browser ippo call panna mudiyadhu
+
+[Array + CRUD](/tanglish/docs/array-crud) `curl` illana Postman-la
+fine-a work aagum — aana `http://localhost:5173`-la run aagra page-la
+(React dev server) irundhu open pannunga, browser idha block pannidum.
+Browsers, oru origin-la irukra JavaScript-ah, vera origin-oda response
+read panna vidadhu, server explicit-a allow pannala-na. Idhu dhan CORS,
+browser rule, FastAPI-oda rule illa — server correct-a dhan answer
+pannudhu; browser dhan response-ah kudukka refuse pannudhu.
+
+## CORSMiddleware add pannurathu
+
+```python
+from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+```
+
+[Array + CRUD](/tanglish/docs/array-crud) backend mela ivlo dhan
+entire change — ella aaru routes-um oru app-a sernthu, `app` create
+panna odane idha once register pannirukom. `5173` nu solradhu Vite-oda
+default port.
+
+## State: page enna remember panna vendum
+
+```jsx
+const [items, setItems] = useState([]);       // full array
+const [value, setValue] = useState("");       // "add" box
+const [reached, setReached] = useState(null); // "reach by index" result
+const [error, setError] = useState(null);
+
+const [editingIndex, setEditingIndex] = useState(null); // edit aagra row
+const [editValue, setEditValue] = useState("");         // in-progress text
+```
+
+Aaru pieces of state. Indha section-oda pages, ovonnum enna use
+pannudho adha walk pannum:
+
+1. [GET](/tanglish/docs/react/get) — array-ah load pannurathu, mattrum index vachi oru item reach pannurathu.
+2. [POST](/tanglish/docs/react/post) — add form.
+3. [PUT](/tanglish/docs/react/put) — "Save (PUT)" edit button.
+4. [PATCH](/tanglish/docs/react/patch) — "Save (PATCH)" edit button.
+5. [DELETE](/tanglish/docs/react/delete) — delete button, mattrum list eppadi render aagum.
+
+## Indha topic-ah eppadi run pannurathu
+
+Rendu pieces-um oru time-la run aaga vendum — backend first, apparam
+adha point panni frontend:
+
+1. **Terminal 1 — backend:**
+
+   ```bash
+   cd example/5/a
+   uvicorn main:app --reload
+   ```
+
+2. **Terminal 2 — frontend:**
+
+   ```bash
+   cd example/5/react
+   npm install
+   npm run dev
+   ```
+
+3. Vite print panra URL open pannunga (usually
+   [http://localhost:5173](http://localhost:5173)).
+
+Full frontend code indha repo-la `example/5/react`-la irukku (adhoda
+`README.md` mattrum `STEPS.md` paarunga).

@@ -1,0 +1,48 @@
+---
+title: "1. GET"
+description: Array-ah load pannurathu, mattrum index vachi oru item reach pannurathu.
+---
+
+## Page open aagum pothu load pannurathu
+
+```jsx
+useEffect(() => {
+  loadItems();
+}, []);
+
+async function loadItems() {
+  const response = await fetch(`${API_URL}/items`);
+  if (!response.ok) {
+    setError(`Failed to load items (status ${response.status})`);
+    return;
+  }
+  setItems(await response.json());
+  setError(null);
+}
+```
+
+`useEffect(..., [])` first render aana odane, once dhan run aagum —
+idhu dhan starting list-ah load pannudhu. `loadItems` keezha irukra
+ovoru create/update/delete-kum apparam-um call aagum, so page eppovum
+server-la real-a irukradha dhan reflect pannum.
+
+## Index vachi oru item reach pannurathu
+
+```jsx
+async function reachItem(index) {
+  const response = await fetch(`${API_URL}/items/${index}`);
+  if (!response.ok) {
+    setError(`Failed to reach index ${index} (status ${response.status})`);
+    setReached(null);
+    return;
+  }
+  setReached(await response.json());
+  setError(null);
+}
+```
+
+`items`-la irundhu separate-a, `reached` state-la store pannirukom —
+so idhu clear-a fresh fetch nu therium. Ovoru row-kum irukra
+**"Reach"** button-oda wired.
+
+Adutha step: [POST](/tanglish/docs/react/post) — add form.

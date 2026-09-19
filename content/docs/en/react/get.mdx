@@ -1,0 +1,48 @@
+---
+title: "1. GET"
+description: Loading the array, and reaching one item by index.
+---
+
+## Load on page open
+
+```jsx
+useEffect(() => {
+  loadItems();
+}, []);
+
+async function loadItems() {
+  const response = await fetch(`${API_URL}/items`);
+  if (!response.ok) {
+    setError(`Failed to load items (status ${response.status})`);
+    return;
+  }
+  setItems(await response.json());
+  setError(null);
+}
+```
+
+`useEffect(..., [])` runs once, right after the first render — that's
+what loads the starting list. `loadItems` is also called again after
+every create/update/delete below, so the page always reflects what the
+server actually has, not just an optimistic guess.
+
+## Reach one item by index
+
+```jsx
+async function reachItem(index) {
+  const response = await fetch(`${API_URL}/items/${index}`);
+  if (!response.ok) {
+    setError(`Failed to reach index ${index} (status ${response.status})`);
+    setReached(null);
+    return;
+  }
+  setReached(await response.json());
+  setError(null);
+}
+```
+
+Stored in its own `reached` state, separate from `items` — so it's
+visibly a fresh fetch, not just re-reading something already on the
+page. Wired to a **"Reach"** button next to each row.
+
+Next: [POST](/en/docs/react/post) — the add form.

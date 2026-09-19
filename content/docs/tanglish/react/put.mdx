@@ -1,0 +1,51 @@
+---
+title: "3. PUT"
+description: Edit mode-ku poradhu, mattrum "Save (PUT)" button vachi save pannurathu.
+---
+
+## Edit mode-ku poradhu
+
+```jsx
+function startEditing(index, currentValue) {
+  setEditingIndex(index);
+  setEditValue(currentValue);
+}
+```
+
+Oru row-oda **"Edit"** button click panna, `editingIndex`-ah andha
+row-oda position-a set pannum, `editValue`-ah current text-oda
+pre-fill pannum — idhu dhan oru row-ah input box-a maathum, baaki
+ellame plain text-a irukum.
+
+## PUT vachi save pannurathu
+
+```jsx
+async function saveEdit(index, method) {
+  const response = await fetch(`${API_URL}/items/${index}`, {
+    method: method, // "PUT" illana "PATCH"
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ value: editValue }),
+  });
+
+  if (!response.ok) {
+    setError(`Failed to update item (status ${response.status})`);
+    return;
+  }
+
+  setEditingIndex(null);
+  await loadItems();
+}
+```
+
+**"Save (PUT)"** button `saveEdit(index, "PUT")` call pannum.
+`saveEdit` purpose-a `method`-ah parameter-a edukkum — rendu save
+buttons-um same function-ah dhan handle pannum; enna string
+anuppudho adhu mattum dhan real-a anuppa vendiya HTTP method-ah
+maathum.
+
+```jsx
+<button onClick={() => saveEdit(index, "PUT")}>Save (PUT)</button>
+```
+
+Adutha step: [PATCH](/tanglish/docs/react/patch) — same function,
+vera verb-oda call pannudhu.

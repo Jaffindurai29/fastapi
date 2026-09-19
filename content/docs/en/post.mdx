@@ -1,0 +1,69 @@
+---
+title: POST
+description: Accepting a JSON body, instead of just reading from the URL.
+---
+
+## Defining what the client sends
+
+Everything so far has been about reading — a fixed path, a dynamic path
+parameter. `POST` is for sending data *to* the server: a new item, a
+form, anything with more shape than fits in a URL.
+
+Describe that shape as a class based on Pydantic's `BaseModel`:
+
+```python
+from fastapi import FastAPI
+from pydantic import BaseModel
+
+app = FastAPI()
+
+class Item(BaseModel):
+    name: str
+    price: float
+
+@app.post("/items")
+def create_item(item: Item):
+    return item
+```
+
+## Line by line
+
+1. `from pydantic import BaseModel` — the base class every request-body
+   model inherits from.
+2. `class Item(BaseModel): name: str, price: float` — describes the
+   JSON shape FastAPI should expect. Neither field has a default value,
+   so both are required.
+3. `@app.post("/items")` — registers this function for `POST` requests
+   to `/items`. Nothing in the path itself changes based on this data —
+   that's what makes it a body, not a path or query parameter.
+4. `def create_item(item: Item):` — because `Item` is a `BaseModel`
+   subclass (not a plain `int`/`str`, and not named in the path),
+   FastAPI knows to read it from the JSON request body instead.
+5. `return item` — `item` is a real `Item` object at this point, not a
+   dict. Returning it directly serializes it back to JSON.
+
+## What you get for free
+
+Send `{"name": "Laptop", "price": 999.99}` and you get it back
+unchanged. But leave out `price`, or send a string where a number
+belongs, and FastAPI rejects the request with a `422` before your
+function ever runs:
+
+```json
+{
+  "detail": [
+    {
+      "type": "missing",
+      "loc": ["body", "price"],
+      "msg": "Field required"
+    }
+  ]
+}
+```
+
+You didn't write a single `if` statement to catch that. This is the same
+type-hints-as-validation idea from path parameters, just applied to a
+whole request body instead of one value.
+
+Next: [Array + CRUD](/en/docs/array-crud) — all five HTTP verbs
+over a small in-memory array.

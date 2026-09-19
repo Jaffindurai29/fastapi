@@ -1,0 +1,49 @@
+---
+title: "3. PUT"
+description: Entering edit mode, and saving with the "Save (PUT)" button.
+---
+
+## Entering edit mode
+
+```jsx
+function startEditing(index, currentValue) {
+  setEditingIndex(index);
+  setEditValue(currentValue);
+}
+```
+
+Clicking a row's **"Edit"** button sets `editingIndex` to that row's
+position and pre-fills `editValue` with its current text — that's what
+turns one row into an input box while the rest stay as plain text.
+
+## Saving with PUT
+
+```jsx
+async function saveEdit(index, method) {
+  const response = await fetch(`${API_URL}/items/${index}`, {
+    method: method, // "PUT" or "PATCH"
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ value: editValue }),
+  });
+
+  if (!response.ok) {
+    setError(`Failed to update item (status ${response.status})`);
+    return;
+  }
+
+  setEditingIndex(null);
+  await loadItems();
+}
+```
+
+The **"Save (PUT)"** button calls `saveEdit(index, "PUT")`. `saveEdit`
+takes `method` as a parameter on purpose — the exact same function
+handles both save buttons; only the string passed in changes which HTTP
+method actually gets sent.
+
+```jsx
+<button onClick={() => saveEdit(index, "PUT")}>Save (PUT)</button>
+```
+
+Next: [PATCH](/en/docs/react/patch) — the same function, called with a
+different verb.

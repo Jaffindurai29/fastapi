@@ -1,0 +1,30 @@
+---
+title: "1. GET"
+description: Loading rows, and reaching one by database ID.
+---
+
+## Load and reach, by ID
+
+```jsx
+async function loadItems() {
+  const response = await fetch(`${API_URL}/items`);
+  // ...identical to the array version
+  setItems(await response.json());
+}
+
+async function reachItem(id) {
+  const response = await fetch(`${API_URL}/items/${id}`);
+  // ...same as the array version, just named `id` instead of `index`
+  setReached(await response.json());
+}
+```
+
+**Difference from [React's GET](/en/docs/react/get):** the URL is still
+`/items/<something>` — only what that something *means* changed. Before,
+it was "the 3rd item in the array." Here, it's "the row whose database
+ID is this number," regardless of where it currently sits in the list.
+`loadItems` itself doesn't change at all — the backend returns objects
+instead of plain strings, but this function just stores whatever JSON
+comes back either way.
+
+Next: [POST](/en/docs/mysql-react/post) — the add form.

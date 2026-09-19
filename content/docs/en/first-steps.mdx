@@ -46,27 +46,5 @@ Open [http://127.0.0.1:8000](http://127.0.0.1:8000) and you should see:
 { "message": "Hello, FastAPI!" }
 ```
 
-## Path operations for other HTTP methods
-
-`@app.get` maps to `GET`. FastAPI has an equivalent decorator for every HTTP
-method:
-
-```python
-@app.get("/items")
-def list_items(): ...
-
-@app.post("/items")
-def create_item(): ...
-
-@app.put("/items/{item_id}")
-def replace_item(): ...
-
-@app.delete("/items/{item_id}")
-def delete_item(): ...
-```
-
-Use `GET` to read data, `POST` to create it, `PUT`/`PATCH` to update it, and
-`DELETE` to remove it — the operation you choose is just a decorator away.
-
 Next, learn how to read dynamic values from the URL itself in
 [Path Parameters](/en/docs/path-parameters).

@@ -1,0 +1,43 @@
+---
+title: "5. DELETE"
+description: Oru index-la irukra item-ah remove pannurathu.
+---
+
+## Code
+
+```python title="main.py"
+from fastapi import FastAPI, HTTPException, status
+
+app = FastAPI()
+
+data = ["first", "second"]
+
+@app.delete("/items/{item_index}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_item(item_index: int):
+    if item_index < 0 or item_index >= len(data):
+        raise HTTPException(status_code=404, detail="Item not found")
+    data.pop(item_index)
+```
+
+## Line by line
+
+1. **Index irukka nu first check pannunga** — indha topic-la irukra
+   ella route-um same bounds check.
+2. **`status_code=status.HTTP_204_NO_CONTENT`** — `204` nu solradhu
+   "velai aachu, thirumba anuppa edhuvum illa." Function edhuvum
+   `return` pannadhu; `204` response-ku convention-a body irukadhu.
+3. **`data.pop(item_index)`** — andha entry-ah remove pannudhu, apparam
+   irukra ellame oru position keezha shift aagum. Idhu dhan array
+   indexes stable identifiers illa nu solradhu — index `0`-ah delete
+   panna, old index `1`, pudhu index `0` aagidum. Real database, idha
+   avoid panna, row-ku fixed ID use pannum — paarunga
+   [MySQL + CRUD](/tanglish/docs/mysql-crud).
+
+## Try it
+
+```bash
+curl -i -X DELETE http://127.0.0.1:8000/items/0
+```
+
+Adutha step: [React + Array + CRUD](/tanglish/docs/react) — indha aaru verbs-ku real
+frontend-oda connect pannurathu.

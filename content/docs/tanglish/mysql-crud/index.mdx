@@ -1,0 +1,94 @@
+---
+title: MySQL + CRUD
+description: Array + CRUD-la irundha same aaru verbs, ippo real MySQL table use panni.
+---
+
+[Array + CRUD](/tanglish/docs/array-crud)-la irundha same aaru
+verbs — same routes, same request/response shapes — aana Python
+list-ku pathila real [MySQL](https://www.mysql.com/) table-ah
+[SQLAlchemy](https://www.sqlalchemy.org/) moola read/write pannudhu.
+Data restart aana survive aagum; array positions real, stable database
+IDs-a maarum.
+
+## Setup
+
+```bash
+pip install sqlalchemy pymysql
+```
+
+Indha database-ah once dhan create pannunga, MySQL client-la:
+
+```sql
+CREATE DATABASE fastapi_learn;
+```
+
+Apparam connection details-ah environment variables vachi set pannunga:
+
+```bash
+export MYSQL_HOST=127.0.0.1
+export MYSQL_PORT=3306
+export MYSQL_USER=root
+export MYSQL_PASSWORD=your-password
+export MYSQL_DB=fastapi_learn
+```
+
+MySQL kaiyila illaya? `DATABASE_URL`-ah SQLite file-ku pathila podunga —
+same code maathama work aagum:
+
+```bash
+export DATABASE_URL="sqlite:///./test.db"
+```
+
+## Indha topic-ah eppadi run pannurathu
+
+Backend mattum dhan, mela irukra setup ella letter-kum same — oru
+thadava pannunga, apparam unga ku venum verb-ah run pannunga:
+
+```bash
+cd example/6/a   # illana b, c, d, e
+uvicorn main:app --reload
+```
+
+## Keezha irukra ovoru page-um share panra pieces
+
+**Connection, environment variables-la irundhu:**
+
+```python
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
+)
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+```
+
+**Table, Python class-a** — real, stable, auto-incrementing `id`-oda,
+array topic-oda position-based index illa:
+
+```python
+class ItemModel(Base):
+    __tablename__ = "items"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    value = Column(String(255), nullable=False)
+
+Base.metadata.create_all(bind=engine)
+```
+
+**Ovoru request-kum oru session, `Depends` vachi** — munnadi topics-la
+paartha same dependency-injection pattern dhan, ippo real database
+connection manage pannudhu:
+
+```python
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+```
+
+1. [GET](/tanglish/docs/mysql-crud/get) — ovoru row-um list pannunga, illana ID vachi oru row-ah reach pannunga.
+2. [POST](/tanglish/docs/mysql-crud/post) — pudhu row insert pannunga.
+3. [PUT](/tanglish/docs/mysql-crud/put) — oru row-oda value-ah full-a replace pannunga.
+4. [PATCH](/tanglish/docs/mysql-crud/patch) — oru row-ah partially update pannunga.
+5. [DELETE](/tanglish/docs/mysql-crud/delete) — ID vachi oru row-ah remove pannunga.

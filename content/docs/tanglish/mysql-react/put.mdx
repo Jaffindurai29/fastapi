@@ -1,0 +1,47 @@
+---
+title: "3. PUT"
+description: Oru row-ah edit pannurathu, database ID vachi address panni.
+---
+
+## Edit mode-ku poradhu, ID vachi
+
+```jsx
+function startEditing(id, currentValue) {
+  setEditingId(id);
+  setEditValue(currentValue);
+}
+```
+
+**[React's PUT](/tanglish/docs/react/put)-oda vidhyasam:**
+`setEditingIndex` → `setEditingId` — [index page](/tanglish/docs/mysql-react)-la
+paartha same rename.
+
+## PUT vachi save pannurathu
+
+```jsx
+async function saveEdit(id, method) {
+  const response = await fetch(`${API_URL}/items/${id}`, {
+    method: method, // "PUT" illana "PATCH"
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ value: editValue }),
+  });
+
+  if (!response.ok) {
+    setError(`Failed to update item (status ${response.status})`);
+    return;
+  }
+
+  setEditingId(null);
+  await loadItems();
+}
+```
+
+```jsx
+<button onClick={() => saveEdit(item.id, "PUT")}>Save (PUT)</button>
+```
+
+Array version-oda same function, same idea — `index` engum `id`-a
+maari, vera edhuvum maaradhu.
+
+Adutha step: [PATCH](/tanglish/docs/mysql-react/patch) — same
+function, vera verb-oda call pannudhu.

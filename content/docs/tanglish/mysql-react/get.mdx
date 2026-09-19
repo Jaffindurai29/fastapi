@@ -1,0 +1,30 @@
+---
+title: "1. GET"
+description: Rows load pannurathu, database ID vachi oru row reach pannurathu.
+---
+
+## Load mattrum reach, ID vachi
+
+```jsx
+async function loadItems() {
+  const response = await fetch(`${API_URL}/items`);
+  // ...array version-ku identical
+  setItems(await response.json());
+}
+
+async function reachItem(id) {
+  const response = await fetch(`${API_URL}/items/${id}`);
+  // ...array version-oda same dhan, `index`-ku pathila `id` nu peru
+  setReached(await response.json());
+}
+```
+
+**[React's GET](/tanglish/docs/react/get)-oda vidhyasam:** URL innum
+`/items/<something>` dhan — andha something enna **meaning** pannudho
+adhu mattum maari irukku. Munnadi, "array-la 3rd item" nu irundhuchu.
+Inga, "database ID indha number-oda irukra row" nu — list-la ippo enga
+irukku nu paakadha. `loadItems` idhu maari maaradhu — backend plain
+string-ku pathila objects return pannudhu, aana indha function
+vandha JSON-ah adha maadhiri dhan store pannum.
+
+Adutha step: [POST](/tanglish/docs/mysql-react/post) — add form.

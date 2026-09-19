@@ -1,0 +1,50 @@
+---
+title: "1. GET"
+description: Array-ah padikkurathu — full list, mattrum index vachi oru item.
+---
+
+## Code
+
+```python title="main.py"
+from fastapi import FastAPI, HTTPException
+
+app = FastAPI()
+
+# Rendu items-oda seed pannirukom, so idhu standalone-a testable,
+# POST edhuvum munnadi venaam.
+data = ["first", "second"]
+
+@app.get("/items")
+def list_items():
+    return data
+
+@app.get("/items/{item_index}")
+def get_item(item_index: int):
+    if item_index < 0 or item_index >= len(data):
+        raise HTTPException(status_code=404, detail="Item not found")
+    return {"index": item_index, "value": data[item_index]}
+```
+
+## Line by line
+
+1. `data = ["first", "second"]` — module level-la seed pannirukom,
+   edhavadhu route function-ku velila, so ovoru request-um same
+   array-ah dhan padikkum.
+2. `GET /items` adha maadhiri return pannum — ellame kaamikkum.
+3. `GET /items/{item_index}` position vachi oru entry-ah reach pannum,
+   index panna munnadi bounds check-oda — idha skip pannina,
+   out-of-range index Python-oda sontha `IndexError`-ah raise pannum,
+   clean `404`-ku pathila generic `500`-a maathum.
+
+## Try it
+
+```bash
+curl http://127.0.0.1:8000/items
+curl http://127.0.0.1:8000/items/0
+```
+
+Idhu CRUD-oda read half — baaki naalu verbs indha same array-ah mutate
+pannum.
+
+Adutha step: [POST](/tanglish/docs/array-crud/post) — pudhu item add
+pannurathu.

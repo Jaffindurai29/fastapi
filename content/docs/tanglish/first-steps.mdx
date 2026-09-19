@@ -48,27 +48,5 @@ kaamikkum:
 { "message": "Hello, FastAPI!" }
 ```
 
-## Verey HTTP methods-ku path operations
-
-`@app.get` — `GET` ku. Ovoru HTTP method-kum FastAPI-la matching decorator
-irukku:
-
-```python
-@app.get("/items")
-def list_items(): ...
-
-@app.post("/items")
-def create_item(): ...
-
-@app.put("/items/{item_id}")
-def replace_item(): ...
-
-@app.delete("/items/{item_id}")
-def delete_item(): ...
-```
-
-Data read panna `GET`, create panna `POST`, update panna `PUT`/`PATCH`,
-delete panna `DELETE` — decorator maathina operation maarum.
-
 Adutha step: URL-la irundhu dynamic values eduka
 [Path Parameters](/tanglish/docs/path-parameters) padinga.

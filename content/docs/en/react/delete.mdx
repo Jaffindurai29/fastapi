@@ -1,0 +1,60 @@
+---
+title: "5. DELETE"
+description: Removing an item, and how the whole list renders.
+---
+
+## Deleting an item
+
+```jsx
+async function deleteItem(index) {
+  const response = await fetch(`${API_URL}/items/${index}`, {
+    method: "DELETE",
+  });
+
+  if (!response.ok) {
+    setError(`Failed to delete item (status ${response.status})`);
+    return;
+  }
+
+  await loadItems();
+}
+```
+
+The simplest of the five — no body, just a method and a URL, wired to a
+**"Delete"** button.
+
+## Putting it together: rendering the list
+
+```jsx
+{items.map((item, index) =>
+  editingIndex === index ? (
+    <li key={index}>
+      <input value={editValue} onChange={(e) => setEditValue(e.target.value)} />
+      <button onClick={() => saveEdit(index, "PUT")}>Save (PUT)</button>
+      <button onClick={() => saveEdit(index, "PATCH")}>Save (PATCH)</button>
+      <button onClick={() => setEditingIndex(null)}>Cancel</button>
+    </li>
+  ) : (
+    <li key={index}>
+      <span>{item}</span>
+      <button onClick={() => reachItem(index)}>Reach</button>
+      <button onClick={() => startEditing(index, item)}>Edit</button>
+      <button onClick={() => deleteItem(index)}>Delete</button>
+    </li>
+  ),
+)}
+```
+
+One `<li>` per array entry, switching between two layouts depending on
+whether `editingIndex === index` — that's the whole mechanism behind
+"click Edit, that one row turns into an input box, the rest don't."
+Every button here — Reach, Edit, Save (PUT), Save (PATCH), Cancel,
+Delete — calls one of the functions from the previous four pages.
+
+That's the complete app: [GET](/en/docs/react/get),
+[POST](/en/docs/react/post), [PUT](/en/docs/react/put),
+[PATCH](/en/docs/react/patch), and DELETE, all wired to one list of
+buttons per row.
+
+Next: [React + MySQL + CRUD](/en/docs/mysql-react) — the same frontend, pointed
+at a real database instead of an array.

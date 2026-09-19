@@ -1,0 +1,45 @@
+---
+title: "2. POST"
+description: MySQL-la pudhu row insert pannurathu.
+---
+
+## Code
+
+```python title="main.py"
+from fastapi import Depends, FastAPI, status
+from pydantic import BaseModel
+from sqlalchemy.orm import Session
+
+app = FastAPI()
+
+class ItemRequest(BaseModel):
+    value: str
+
+@app.post("/items", status_code=status.HTTP_201_CREATED)
+def create_item(item: ItemRequest, db: Session = Depends(get_db)):
+    row = ItemModel(value=item.value)
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return {"id": row.id, "value": row.value}
+```
+
+## Line by line
+
+1. `row = ItemModel(value=item.value)` — memory-la pudhu ORM object
+   build pannudhu; database-la edhuvum ippa write aagala.
+2. `db.add(row)` — insert panna stage pannudhu.
+3. `db.commit()` — real-a write pannudhu, idhu dhan MySQL real
+   auto-incrementing `id`-ah assign panra point.
+4. `db.refresh(row)` — database-la irundhu generate aana `id`-ah
+   `row`-ku thirumba edukkum, so function adha return pannalam. Idha
+   pannala, `row.id` innum `None` dhan irukum.
+
+## Try it
+
+```bash
+curl -i -X POST http://127.0.0.1:8000/items -H "Content-Type: application/json" -d "{\"value\": \"third\"}"
+```
+
+Adutha step: [PUT](/tanglish/docs/mysql-crud/put) — oru row-oda value-ah
+full-a replace pannurathu.

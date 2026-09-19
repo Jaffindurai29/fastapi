@@ -1,0 +1,50 @@
+---
+title: "5. DELETE"
+description: Oru row-ah remove pannurathu, mattrum IDs yeandhukku shift aagadhu.
+---
+
+## Oru row-ah delete pannurathu
+
+```jsx
+async function deleteItem(id) {
+  const response = await fetch(`${API_URL}/items/${id}`, {
+    method: "DELETE",
+  });
+
+  if (!response.ok) {
+    setError(`Failed to delete item (status ${response.status})`);
+    return;
+  }
+
+  await loadItems();
+}
+```
+
+[React's DELETE](/tanglish/docs/react/delete)-oda same shape —
+`DELETE /items/${id}`, `DELETE /items/${index}`-ku pathila. **App-ah
+real-a use pannum pothu real, visible difference inga dhan
+kaamikkum:** array version-la oru row-ah delete pannina, apparam
+irukra ellame oru index keezha shift aagum. Inga oru row-ah delete
+pannina, vera ella row-um adhoda `#id`-ah adha maadhiri dhan
+vechirukum — edhuvum renumber aagadhu.
+
+## Rendering
+
+```jsx
+{items.map((item) =>
+  editingId === item.id ? (
+    <li key={item.id}>{/* edit mode */}</li>
+  ) : (
+    <li key={item.id}>{/* normal mode */}</li>
+  ),
+)}
+```
+
+**Difference:** `.map((item, index) => ...)` → `.map((item) => ...)` —
+`.map()`-la irundhu `index`-ah edukka vendam ippo, UI-ku venum ella
+vishayamum (`id`, `value`) `item`-la already irukku. `key={index}`-um
+`key={item.id}` nu maarum — React-oda `key` eppovum stable identity-a
+irukanum, position shift aagra onnu vida database ID dhan better.
+
+Idhu just rename illa. Database topics-oda practical payoff idhu dhan:
+move aagadha identities.

@@ -1,0 +1,46 @@
+---
+title: "1. GET"
+description: Reading rows from MySQL — the whole table, and one row by ID.
+---
+
+## The code
+
+```python title="main.py"
+from fastapi import Depends, FastAPI, HTTPException
+from sqlalchemy.orm import Session
+# ...engine/Base/ItemModel/get_db from the setup on the index page
+
+app = FastAPI()
+
+@app.get("/items")
+def list_items(db: Session = Depends(get_db)):
+    rows = db.query(ItemModel).order_by(ItemModel.id).all()
+    return [{"id": row.id, "value": row.value} for row in rows]
+
+@app.get("/items/{item_id}")
+def get_item(item_id: int, db: Session = Depends(get_db)):
+    row = db.get(ItemModel, item_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Item not found")
+    return {"id": row.id, "value": row.value}
+```
+
+## Line by line
+
+1. `db: Session = Depends(get_db)` — FastAPI calls `get_db()` before
+   this route runs, opening a session, and closes it afterward
+   automatically, even if the route raises an error.
+2. `db.query(ItemModel).order_by(ItemModel.id).all()` — every row in
+   the table, in a predictable order.
+3. `db.get(ItemModel, item_id)` — SQLAlchemy's shortcut for "fetch by
+   primary key," returning `None` if nothing matches — the same
+   `404`-if-missing pattern from every earlier topic.
+
+## Try it
+
+```bash
+curl http://127.0.0.1:8000/items
+curl http://127.0.0.1:8000/items/1
+```
+
+Next: [POST](/en/docs/mysql-crud/post) — inserting a new row.

@@ -1,0 +1,61 @@
+---
+title: "5. DELETE"
+description: Oru item-ah remove pannurathu, mattrum full list eppadi render aagum.
+---
+
+## Oru item-ah delete pannurathu
+
+```jsx
+async function deleteItem(index) {
+  const response = await fetch(`${API_URL}/items/${index}`, {
+    method: "DELETE",
+  });
+
+  if (!response.ok) {
+    setError(`Failed to delete item (status ${response.status})`);
+    return;
+  }
+
+  await loadItems();
+}
+```
+
+Aaru-la irundhu simplest — body edhuvum illa, method mattrum URL
+mattum, **"Delete"** button-oda wired.
+
+## Ellame sernthu: list render pannurathu
+
+```jsx
+{items.map((item, index) =>
+  editingIndex === index ? (
+    <li key={index}>
+      <input value={editValue} onChange={(e) => setEditValue(e.target.value)} />
+      <button onClick={() => saveEdit(index, "PUT")}>Save (PUT)</button>
+      <button onClick={() => saveEdit(index, "PATCH")}>Save (PATCH)</button>
+      <button onClick={() => setEditingIndex(null)}>Cancel</button>
+    </li>
+  ) : (
+    <li key={index}>
+      <span>{item}</span>
+      <button onClick={() => reachItem(index)}>Reach</button>
+      <button onClick={() => startEditing(index, item)}>Edit</button>
+      <button onClick={() => deleteItem(index)}>Delete</button>
+    </li>
+  ),
+)}
+```
+
+Array-oda ovoru entry-kum oru `<li>`, `editingIndex === index` nu
+irundha rendu layouts-kum switch aagum — "Edit click pannina, andha
+oru row mattum input box-a maarum, baaki ellame maarathu" nu solra
+mechanism idhu dhan. Inga irukra ovoru button-um — Reach, Edit, Save
+(PUT), Save (PATCH), Cancel, Delete — munnadi naalu pages-oda
+functions-la irundhu edhavadhu onna call pannum.
+
+Idhu dhan full app: [GET](/tanglish/docs/react/get),
+[POST](/tanglish/docs/react/post), [PUT](/tanglish/docs/react/put),
+[PATCH](/tanglish/docs/react/patch), mattrum DELETE, ovoru row-kum oru
+list of buttons-oda wired.
+
+Adutha step: [React + MySQL + CRUD](/tanglish/docs/mysql-react) — same
+frontend, array-ku pathila real database mela point pannudhu.

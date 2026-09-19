@@ -1,0 +1,48 @@
+---
+title: "3. PUT"
+description: ID vachi oru row-oda value-ah full-a replace pannurathu.
+---
+
+## Code
+
+```python title="main.py"
+from fastapi import Depends, FastAPI, HTTPException
+from pydantic import BaseModel
+from sqlalchemy.orm import Session
+
+app = FastAPI()
+
+class ItemRequest(BaseModel):
+    value: str
+
+@app.put("/items/{item_id}")
+def replace_item(item_id: int, item: ItemRequest, db: Session = Depends(get_db)):
+    row = db.get(ItemModel, item_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Item not found")
+    row.value = item.value
+    db.commit()
+    db.refresh(row)
+    return {"id": row.id, "value": row.value}
+```
+
+## Line by line
+
+1. **Row-ah first-a look up pannunga** — `db.get(ItemModel, item_id)`
+   andha ID illa-na `None` return pannum, so silent-a edhuvum pannama
+   clean `404` varum.
+2. **`row.value = item.value`** — plain attribute assignment mathiri
+   kaamikkum, idhu dhan adhu. SQLAlchemy-oda ORM change-ah automatic-a
+   track pannikum; session-ku thirumba edhuvum add pannanum illa.
+3. **`db.commit()`** change-ah write pannum; **`db.refresh(row)`**
+   `row` database-la ippo enna irukko adha exact-a reflect pannum-nu
+   confirm pannum, return pannuradhukku munnadi.
+
+## Try it
+
+```bash
+curl -X PUT http://127.0.0.1:8000/items/1 -H "Content-Type: application/json" -d "{\"value\": \"replaced\"}"
+```
+
+Adutha step: [PATCH](/tanglish/docs/mysql-crud/patch) — oru row-ah
+partially update pannurathu.

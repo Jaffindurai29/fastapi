@@ -1,0 +1,45 @@
+---
+title: "2. POST"
+description: Adding a new item to the end of the array.
+---
+
+## The code
+
+```python title="main.py"
+from fastapi import FastAPI, status
+from pydantic import BaseModel
+
+app = FastAPI()
+
+data = ["first", "second"]
+
+class ItemRequest(BaseModel):
+    value: str
+
+@app.post("/items", status_code=status.HTTP_201_CREATED)
+def create_item(item: ItemRequest):
+    data.append(item.value)
+    return {"index": len(data) - 1, "value": item.value}
+```
+
+## Line by line
+
+1. `status_code=status.HTTP_201_CREATED` on the decorator — `POST`
+   routes default to `200`; `201` is the more correct code for "a new
+   resource was created."
+2. `data.append(item.value)` — adds the new value onto the end of the
+   shared array.
+3. `return {"index": len(data) - 1, "value": item.value}` — tells the
+   caller exactly where the new item landed, so a follow-up
+   [GET](/en/docs/array-crud/get), [PUT](/en/docs/array-crud/put), or
+   [DELETE](/en/docs/array-crud/delete) knows which index to use.
+
+## Try it
+
+```bash
+curl -i -X POST http://127.0.0.1:8000/items -H "Content-Type: application/json" -d "{\"value\": \"third\"}"
+```
+
+Expected: `201 Created`, `{"index": 2, "value": "third"}`.
+
+Next: [PUT](/en/docs/array-crud/put) — replacing an item entirely.

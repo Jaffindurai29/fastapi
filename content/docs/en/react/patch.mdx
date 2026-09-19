@@ -1,0 +1,39 @@
+---
+title: "4. PATCH"
+description: The same edit code as PUT, wired to a second button with a different verb.
+---
+
+## The same function, a different button
+
+There's no separate `savePatch` function — [`saveEdit`](/en/docs/react/put)
+already takes `method` as a parameter, so the **"Save (PATCH)"** button
+just calls it with a different string:
+
+```jsx
+<button onClick={() => saveEdit(index, "PATCH")}>Save (PATCH)</button>
+```
+
+Compare that to the PUT button from the previous page:
+
+```jsx
+<button onClick={() => saveEdit(index, "PUT")}>Save (PUT)</button>
+```
+
+Same component, same request body, same `fetch` call — the only
+difference on the frontend is the literal string `"PUT"` vs `"PATCH"`
+passed as an argument. That one difference is enough to genuinely
+exercise both HTTP methods against the backend, proving neither button
+is just cosmetic.
+
+```jsx
+{editingIndex === index && (
+  <>
+    <button onClick={() => saveEdit(index, "PUT")}>Save (PUT)</button>
+    <button onClick={() => saveEdit(index, "PATCH")}>Save (PATCH)</button>
+    <button onClick={() => setEditingIndex(null)}>Cancel</button>
+  </>
+)}
+```
+
+Next: [DELETE](/en/docs/react/delete) — removing an item, and how the
+whole list renders.

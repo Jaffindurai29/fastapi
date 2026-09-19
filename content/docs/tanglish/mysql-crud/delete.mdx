@@ -1,0 +1,42 @@
+---
+title: "5. DELETE"
+description: ID vachi oru row-ah remove pannurathu.
+---
+
+## Code
+
+```python title="main.py"
+from fastapi import Depends, FastAPI, HTTPException, status
+from sqlalchemy.orm import Session
+
+app = FastAPI()
+
+@app.delete("/items/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_item(item_id: int, db: Session = Depends(get_db)):
+    row = db.get(ItemModel, item_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Item not found")
+    db.delete(row)
+    db.commit()
+```
+
+## Line by line
+
+1. **Row-ah first-a look up pannunga** — indha topic-la irukra ella
+   route-um same `404`-if-missing pattern.
+2. **`db.delete(row)` apparam `db.commit()`** — deletion-ah stage
+   pannum, apparam write pannum.
+3. **Array topic-ku vidhyasam-a**, inga oru row-ah delete panna, vera
+   edhavadhu row-oda `id` shift aagadhu — MySQL-oda auto-increment `id`
+   oru stable identity dhan, list-la position illa. Deletions-ah
+   predictable-a survive panna, in-memory array-ku vida database-oda
+   real advantage idhu dhan.
+
+## Try it
+
+```bash
+curl -i -X DELETE http://127.0.0.1:8000/items/1
+```
+
+Adutha step: [React + MySQL + CRUD](/tanglish/docs/mysql-react) — indha
+backend-ku real frontend-oda connect pannurathu.

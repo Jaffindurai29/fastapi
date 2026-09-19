@@ -1,0 +1,41 @@
+---
+title: "2. POST"
+description: The add form.
+---
+
+## Adding a new item
+
+```jsx
+async function addItem(event) {
+  event.preventDefault();
+  if (value.trim() === "") return;
+
+  const response = await fetch(`${API_URL}/items`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ value: value }),
+  });
+
+  if (!response.ok) {
+    setError(`Failed to add item (status ${response.status})`);
+    return;
+  }
+
+  setValue("");
+  await loadItems();
+}
+```
+
+`event.preventDefault()` stops the browser's default "reload the page"
+behavior on form submit. After a successful `POST`, it clears the input
+and reloads the list — the new item comes from the server's response to
+`loadItems()`, not from guessing what index it landed at.
+
+```jsx
+<form onSubmit={addItem}>
+  <input value={value} onChange={(e) => setValue(e.target.value)} />
+  <button type="submit">Add</button>
+</form>
+```
+
+Next: [PUT](/en/docs/react/put) — the "Save (PUT)" edit button.

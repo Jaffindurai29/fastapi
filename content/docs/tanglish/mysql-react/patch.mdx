@@ -1,0 +1,24 @@
+---
+title: "4. PATCH"
+description: PUT-oda same edit code, database ID vachi address panni.
+---
+
+## Array version-oda same story
+
+```jsx
+<button onClick={() => saveEdit(item.id, "PATCH")}>Save (PATCH)</button>
+```
+
+[PUT](/tanglish/docs/mysql-react/put)-oda button-oda compare pannunga:
+
+```jsx
+<button onClick={() => saveEdit(item.id, "PUT")}>Save (PUT)</button>
+```
+
+[React's PATCH](/tanglish/docs/react/patch)-oda exact same
+relationship — oru shared `saveEdit` function, oru string argument
+HTTP method-ah decide pannum. Array version-ku vidhyasam mattum,
+`index`-ku pathila `item.id` first argument-a irukradhu.
+
+Adutha step: [DELETE](/tanglish/docs/mysql-react/delete) — oru row-ah
+remove pannurathu, mattrum IDs yeandhukku shift aagadhu.
