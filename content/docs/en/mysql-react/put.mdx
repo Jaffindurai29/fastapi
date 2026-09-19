@@ -3,6 +3,25 @@ title: "3. PUT"
 description: Editing a row, addressed by database ID.
 ---
 
+## Backend
+
+```python title="example/7/a/main.py"
+@app.put("/items/{item_id}")
+def replace_item(item_id: int, item: ItemRequest, db: Session = Depends(get_db)):
+    row = db.get(ItemModel, item_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Item not found")
+    row.value = item.value
+    db.commit()
+    db.refresh(row)
+    return {"id": row.id, "value": row.value}
+```
+
+Same route as [MySQL + CRUD's PUT](/en/docs/mysql-crud/put) — see that
+page for the line-by-line breakdown.
+
+## Frontend
+
 ## Entering edit mode, by ID
 
 ```jsx
@@ -45,3 +64,242 @@ Same function, same idea as the array version — `index` renamed to
 
 Next: [PATCH](/en/docs/mysql-react/patch) — the same function, called
 with a different verb.
+
+## Code so far
+
+**Backend** — `example/7/a/main.py`, up to PUT:
+
+```python title="example/7/a/main.py"
+import os
+
+from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from sqlalchemy import Column, Integer, String, create_engine
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
+MYSQL_USER = os.getenv("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
+
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
+)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+class ItemModel(Base):
+    __tablename__ = "crud_react_items"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    value = Column(String(255), nullable=False)
+
+
+Base.metadata.create_all(bind=engine)
+
+with SessionLocal() as db:
+    if db.query(ItemModel).count() == 0:
+        db.add_all([ItemModel(value="first"), ItemModel(value="second")])
+        db.commit()
+
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+class ItemRequest(BaseModel):
+    value: str
+
+
+@app.get("/items")
+def list_items(db: Session = Depends(get_db)):
+    rows = db.query(ItemModel).order_by(ItemModel.id).all()
+    return [{"id": row.id, "value": row.value} for row in rows]
+
+
+@app.get("/items/{item_id}")
+def get_item(item_id: int, db: Session = Depends(get_db)):
+    row = db.get(ItemModel, item_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Item not found")
+    return {"id": row.id, "value": row.value}
+
+
+@app.post("/items", status_code=status.HTTP_201_CREATED)
+def create_item(item: ItemRequest, db: Session = Depends(get_db)):
+    row = ItemModel(value=item.value)
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return {"id": row.id, "value": row.value}
+
+
+@app.put("/items/{item_id}")
+def replace_item(item_id: int, item: ItemRequest, db: Session = Depends(get_db)):
+    row = db.get(ItemModel, item_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Item not found")
+    row.value = item.value
+    db.commit()
+    db.refresh(row)
+    return {"id": row.id, "value": row.value}
+```
+
+**Frontend** — `example/7/react/src/App.jsx`, up to PUT:
+
+```jsx title="example/7/react/src/App.jsx"
+import { useEffect, useState } from "react";
+
+const API_URL = "http://127.0.0.1:8000";
+
+export default function App() {
+  const [items, setItems] = useState([]);
+  const [value, setValue] = useState("");
+  const [reached, setReached] = useState(null);
+  const [error, setError] = useState(null);
+
+  const [editingId, setEditingId] = useState(null);
+  const [editValue, setEditValue] = useState("");
+
+  useEffect(() => {
+    loadItems();
+  }, []);
+
+  async function loadItems() {
+    try {
+      const response = await fetch(`${API_URL}/items`);
+      if (!response.ok) {
+        throw new Error(`Failed to load items (status ${response.status})`);
+      }
+      setItems(await response.json());
+      setError(null);
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  async function addItem(event) {
+    event.preventDefault();
+    if (value.trim() === "") return;
+
+    const response = await fetch(`${API_URL}/items`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ value: value }),
+    });
+
+    if (!response.ok) {
+      setError(`Failed to add item (status ${response.status})`);
+      return;
+    }
+
+    setValue("");
+    await loadItems();
+  }
+
+  async function reachItem(id) {
+    const response = await fetch(`${API_URL}/items/${id}`);
+    if (!response.ok) {
+      setError(`Failed to reach id ${id} (status ${response.status})`);
+      setReached(null);
+      return;
+    }
+    setReached(await response.json());
+    setError(null);
+  }
+
+  function startEditing(id, currentValue) {
+    setEditingId(id);
+    setEditValue(currentValue);
+  }
+
+  async function saveEdit(id, method) {
+    const response = await fetch(`${API_URL}/items/${id}`, {
+      method: method,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ value: editValue }),
+    });
+
+    if (!response.ok) {
+      setError(`Failed to update item (status ${response.status})`);
+      return;
+    }
+
+    setEditingId(null);
+    await loadItems();
+  }
+
+  return (
+    <main style={{ maxWidth: 560, margin: "3rem auto", fontFamily: "sans-serif" }}>
+      <h1>MySQL Store</h1>
+
+      {error && <p style={{ color: "crimson" }}>{error}</p>}
+
+      <form onSubmit={addItem} style={{ display: "flex", gap: "0.5rem" }}>
+        <input
+          value={value}
+          onChange={(event) => setValue(event.target.value)}
+          placeholder="Add a value"
+          style={{ flex: 1, padding: "0.5rem" }}
+        />
+        <button type="submit">Add</button>
+      </form>
+
+      <ul style={{ listStyle: "none", padding: 0, marginTop: "1.5rem" }}>
+        {items.map((item) =>
+          editingId === item.id ? (
+            <li
+              key={item.id}
+              style={{ display: "flex", alignItems: "center", gap: "0.5rem", padding: "0.25rem 0" }}
+            >
+              <span style={{ color: "#888", width: "2rem" }}>#{item.id}</span>
+              <input
+                value={editValue}
+                onChange={(event) => setEditValue(event.target.value)}
+                style={{ flex: 1, padding: "0.25rem" }}
+              />
+              <button onClick={() => saveEdit(item.id, "PUT")}>Save (PUT)</button>
+              <button onClick={() => setEditingId(null)}>Cancel</button>
+            </li>
+          ) : (
+            <li
+              key={item.id}
+              style={{ display: "flex", alignItems: "center", gap: "0.5rem", padding: "0.25rem 0" }}
+            >
+              <span style={{ color: "#888", width: "2rem" }}>#{item.id}</span>
+              <span style={{ flex: 1 }}>{item.value}</span>
+              <button onClick={() => reachItem(item.id)}>Reach</button>
+              <button onClick={() => startEditing(item.id, item.value)}>Edit</button>
+            </li>
+          ),
+        )}
+      </ul>
+
+      {reached && (
+        <p style={{ marginTop: "1rem" }}>
+          Reached id <strong>#{reached.id}</strong>: <strong>{reached.value}</strong>
+        </p>
+      )}
+    </main>
+  );
+}
+```

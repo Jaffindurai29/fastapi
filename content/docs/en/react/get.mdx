@@ -3,6 +3,28 @@ title: "1. GET"
 description: Loading the array, and reaching one item by index.
 ---
 
+## Backend
+
+```python title="example/5/a/main.py"
+@app.get("/items")
+def list_items():
+    return data
+
+
+@app.get("/items/{item_index}")
+def get_item(item_index: int):
+    if item_index < 0 or item_index >= len(data):
+        raise HTTPException(status_code=404, detail="Item not found")
+    return {"index": item_index, "value": data[item_index]}
+```
+
+Same two routes as [Array + CRUD's GET](/en/docs/array-crud/get) — see
+that page for the line-by-line breakdown. Nothing about them changes
+for React; only `CORSMiddleware` was added so the browser is allowed to
+call them at all.
+
+## Frontend
+
 ## Load on page open
 
 ```jsx
@@ -46,3 +68,109 @@ visibly a fresh fetch, not just re-reading something already on the
 page. Wired to a **"Reach"** button next to each row.
 
 Next: [POST](/en/docs/react/post) — the add form.
+
+## Code so far
+
+**Backend** — `example/5/a/main.py`, up to GET:
+
+```python title="example/5/a/main.py"
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+data = ["first", "second"]
+
+
+@app.get("/items")
+def list_items():
+    return data
+
+
+@app.get("/items/{item_index}")
+def get_item(item_index: int):
+    if item_index < 0 or item_index >= len(data):
+        raise HTTPException(status_code=404, detail="Item not found")
+    return {"index": item_index, "value": data[item_index]}
+```
+
+**Frontend** — `example/5/react/src/App.jsx`, up to GET:
+
+```jsx title="example/5/react/src/App.jsx"
+import { useEffect, useState } from "react";
+
+const API_URL = "http://127.0.0.1:8000";
+
+export default function App() {
+  const [items, setItems] = useState([]);
+  const [reached, setReached] = useState(null);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    loadItems();
+  }, []);
+
+  async function loadItems() {
+    try {
+      const response = await fetch(`${API_URL}/items`);
+      if (!response.ok) {
+        throw new Error(`Failed to load items (status ${response.status})`);
+      }
+      setItems(await response.json());
+      setError(null);
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  async function reachItem(index) {
+    const response = await fetch(`${API_URL}/items/${index}`);
+    if (!response.ok) {
+      setError(`Failed to reach index ${index} (status ${response.status})`);
+      setReached(null);
+      return;
+    }
+    setReached(await response.json());
+    setError(null);
+  }
+
+  return (
+    <main style={{ maxWidth: 560, margin: "3rem auto", fontFamily: "sans-serif" }}>
+      <h1>Array Store</h1>
+
+      {error && <p style={{ color: "crimson" }}>{error}</p>}
+
+      <ul style={{ listStyle: "none", padding: 0, marginTop: "1.5rem" }}>
+        {items.map((item, index) => (
+          <li
+            key={index}
+            style={{ display: "flex", alignItems: "center", gap: "0.5rem", padding: "0.25rem 0" }}
+          >
+            <span style={{ color: "#888", width: "1.5rem" }}>{index}</span>
+            <span style={{ flex: 1 }}>{item}</span>
+            <button onClick={() => reachItem(index)}>Reach</button>
+          </li>
+        ))}
+      </ul>
+
+      {reached && (
+        <p style={{ marginTop: "1rem" }}>
+          Reached index <strong>{reached.index}</strong>:{" "}
+          <strong>{reached.value}</strong>
+        </p>
+      )}
+    </main>
+  );
+}
+```
+
+No add/edit/delete UI yet — those show up as each of those pages adds
+its piece. Next page adds POST.

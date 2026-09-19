@@ -3,6 +3,24 @@ title: "2. POST"
 description: The add form.
 ---
 
+## Backend
+
+```python title="example/5/a/main.py"
+class ItemRequest(BaseModel):
+    value: str
+
+
+@app.post("/items", status_code=status.HTTP_201_CREATED)
+def create_item(item: ItemRequest):
+    data.append(item.value)
+    return {"index": len(data) - 1, "value": item.value}
+```
+
+Same route as [Array + CRUD's POST](/en/docs/array-crud/post) — see
+that page for the line-by-line breakdown.
+
+## Frontend
+
 ## Adding a new item
 
 ```jsx
@@ -39,3 +57,149 @@ and reloads the list — the new item comes from the server's response to
 ```
 
 Next: [PUT](/en/docs/react/put) — the "Save (PUT)" edit button.
+
+## Code so far
+
+**Backend** — `example/5/a/main.py`, up to POST:
+
+```python title="example/5/a/main.py"
+from fastapi import FastAPI, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+data = ["first", "second"]
+
+
+class ItemRequest(BaseModel):
+    value: str
+
+
+@app.get("/items")
+def list_items():
+    return data
+
+
+@app.get("/items/{item_index}")
+def get_item(item_index: int):
+    if item_index < 0 or item_index >= len(data):
+        raise HTTPException(status_code=404, detail="Item not found")
+    return {"index": item_index, "value": data[item_index]}
+
+
+@app.post("/items", status_code=status.HTTP_201_CREATED)
+def create_item(item: ItemRequest):
+    data.append(item.value)
+    return {"index": len(data) - 1, "value": item.value}
+```
+
+**Frontend** — `example/5/react/src/App.jsx`, up to POST:
+
+```jsx title="example/5/react/src/App.jsx"
+import { useEffect, useState } from "react";
+
+const API_URL = "http://127.0.0.1:8000";
+
+export default function App() {
+  const [items, setItems] = useState([]);
+  const [value, setValue] = useState("");
+  const [reached, setReached] = useState(null);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    loadItems();
+  }, []);
+
+  async function loadItems() {
+    try {
+      const response = await fetch(`${API_URL}/items`);
+      if (!response.ok) {
+        throw new Error(`Failed to load items (status ${response.status})`);
+      }
+      setItems(await response.json());
+      setError(null);
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  async function addItem(event) {
+    event.preventDefault();
+    if (value.trim() === "") return;
+
+    const response = await fetch(`${API_URL}/items`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ value: value }),
+    });
+
+    if (!response.ok) {
+      setError(`Failed to add item (status ${response.status})`);
+      return;
+    }
+
+    setValue("");
+    await loadItems();
+  }
+
+  async function reachItem(index) {
+    const response = await fetch(`${API_URL}/items/${index}`);
+    if (!response.ok) {
+      setError(`Failed to reach index ${index} (status ${response.status})`);
+      setReached(null);
+      return;
+    }
+    setReached(await response.json());
+    setError(null);
+  }
+
+  return (
+    <main style={{ maxWidth: 560, margin: "3rem auto", fontFamily: "sans-serif" }}>
+      <h1>Array Store</h1>
+
+      {error && <p style={{ color: "crimson" }}>{error}</p>}
+
+      <form onSubmit={addItem} style={{ display: "flex", gap: "0.5rem" }}>
+        <input
+          value={value}
+          onChange={(event) => setValue(event.target.value)}
+          placeholder="Add a value"
+          style={{ flex: 1, padding: "0.5rem" }}
+        />
+        <button type="submit">Add</button>
+      </form>
+
+      <ul style={{ listStyle: "none", padding: 0, marginTop: "1.5rem" }}>
+        {items.map((item, index) => (
+          <li
+            key={index}
+            style={{ display: "flex", alignItems: "center", gap: "0.5rem", padding: "0.25rem 0" }}
+          >
+            <span style={{ color: "#888", width: "1.5rem" }}>{index}</span>
+            <span style={{ flex: 1 }}>{item}</span>
+            <button onClick={() => reachItem(index)}>Reach</button>
+          </li>
+        ))}
+      </ul>
+
+      {reached && (
+        <p style={{ marginTop: "1rem" }}>
+          Reached index <strong>{reached.index}</strong>:{" "}
+          <strong>{reached.value}</strong>
+        </p>
+      )}
+    </main>
+  );
+}
+```
+
+Still no edit/delete UI — those come next.
