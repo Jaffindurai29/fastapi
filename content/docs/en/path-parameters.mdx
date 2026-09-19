@@ -48,27 +48,5 @@ def read_user(user_id: str):
 Otherwise, `/users/{user_id}` would match `/users/me` first and try to treat
 `"me"` as a `user_id`.
 
-## Predefined values with enums
-
-To restrict a path parameter to a fixed set of values, use a Python `Enum`:
-
-```python
-from enum import Enum
-from fastapi import FastAPI
-
-class ModelName(str, Enum):
-    resnet = "resnet"
-    lenet = "lenet"
-
-app = FastAPI()
-
-@app.get("/models/{model_name}")
-def get_model(model_name: ModelName):
-    return {"model_name": model_name}
-```
-
-Requests with any other value automatically get a validation error, and the
-docs UI will render the choices as a dropdown.
-
-Next up: [Query Parameters](/en/docs/query-parameters), for values that come
-after the `?` in a URL.
+Next: [Practice Exercises](/en/docs/practice) — six quick drills using
+just what you've learned so far, before moving on.

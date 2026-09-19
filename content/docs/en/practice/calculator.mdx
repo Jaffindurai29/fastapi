@@ -1,0 +1,95 @@
+---
+title: "4. Calculator"
+description: Branch on an operation field, and handle bad input on purpose.
+---
+
+## The code
+
+```python title="main.py"
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+
+app = FastAPI()
+
+class CalculateRequest(BaseModel):
+    a: float
+    b: float
+    operation: str
+
+@app.post("/calculate")
+def calculate(request: CalculateRequest):
+    if request.operation == "add":
+        result = request.a + request.b
+    elif request.operation == "subtract":
+        result = request.a - request.b
+    elif request.operation == "multiply":
+        result = request.a * request.b
+    elif request.operation == "divide":
+        if request.b == 0:
+            raise HTTPException(status_code=400, detail="Cannot divide by zero")
+        result = request.a / request.b
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="operation must be one of: add, subtract, multiply, divide",
+        )
+    return {"result": result}
+```
+
+## Line by line
+
+1. `operation: str` — a third field alongside the two numbers, holding
+   which calculation to run.
+2. `if / elif` chain — checks `request.operation` against each of the
+   four expected words, one at a time, and computes `result` for
+   whichever one matches.
+3. **The zero check is the important part:** `b: float` happily accepts
+   `0` — a type hint can't catch "this particular value is a problem."
+   So the code checks for it explicitly and raises `HTTPException(400, ...)`
+   before ever attempting `a / b`.
+4. **The final `else`** catches anything that isn't one of the four
+   expected words — a typo, or a client sending garbage — also as a
+   `400`, with a message telling the client what's actually allowed.
+5. `return {"result": result}` — only reached if one of the branches
+   above set `result` without raising.
+
+## Try it
+
+```bash
+cd example/3/d
+uvicorn main:app --reload
+```
+
+```bash
+curl -X POST http://127.0.0.1:8000/calculate -H "Content-Type: application/json" -d "{\"a\": 5, \"b\": 3, \"operation\": \"multiply\"}"
+```
+
+**Output:**
+
+```json
+{"result": 15.0}
+```
+
+Now try dividing by zero:
+
+```bash
+curl -i -X POST http://127.0.0.1:8000/calculate -H "Content-Type: application/json" -d "{\"a\": 5, \"b\": 0, \"operation\": \"divide\"}"
+```
+
+**Output:** `400 Bad Request`
+
+```json
+{"detail": "Cannot divide by zero"}
+```
+
+And an unknown operation:
+
+```bash
+curl -i -X POST http://127.0.0.1:8000/calculate -H "Content-Type: application/json" -d "{\"a\": 5, \"b\": 3, \"operation\": \"power\"}"
+```
+
+**Output:** `400 Bad Request`
+
+```json
+{"detail": "operation must be one of: add, subtract, multiply, divide"}
+```

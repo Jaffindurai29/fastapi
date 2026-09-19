@@ -1,0 +1,101 @@
+---
+title: "6. Login Authentication"
+description: The shape of a login check, kept deliberately simple.
+---
+
+## The code
+
+```python title="main.py"
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+
+app = FastAPI()
+
+fake_users_db = {
+    "admin": "password123",
+}
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+@app.post("/login")
+def login(request: LoginRequest):
+    correct_password = fake_users_db.get(request.username)
+
+    if correct_password is None or correct_password != request.password:
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+
+    return {"message": f"Welcome, {request.username}!"}
+```
+
+## Line by line
+
+1. `fake_users_db = {"admin": "password123"}` — a stand-in for a real
+   users table: username maps to password.
+2. `correct_password = fake_users_db.get(request.username)` — `.get(...)`
+   returns `None` if the username isn't in the dict, instead of raising
+   a `KeyError`.
+3. **The combined check matters:**
+   `if correct_password is None or correct_password != request.password:`
+   — an unknown username *and* a wrong password both land here, and
+   both get the exact same `401` with the exact same message. Telling an
+   attacker "that username doesn't exist" (as opposed to "wrong
+   password") is information a real system shouldn't leak.
+4. `raise HTTPException(status_code=401, ...)` — `401 Unauthorized` is
+   the correct status for "these credentials didn't work," as opposed
+   to `404` (nothing to find) or `400` (malformed request).
+5. `return {"message": f"Welcome, {request.username}!"}` — only reached
+   if the check above didn't raise.
+
+**What's missing, on purpose:** real login systems hash passwords before
+storing them (never compare plain text like this), and return a token
+(e.g. a JWT) on success instead of just a message. This version keeps
+the shape of a login check visible without those extra moving parts.
+
+## Try it
+
+```bash
+cd example/3/f
+uvicorn main:app --reload
+```
+
+```bash
+curl -i -X POST http://127.0.0.1:8000/login -H "Content-Type: application/json" -d "{\"username\": \"admin\", \"password\": \"password123\"}"
+```
+
+**Output:** `200 OK`
+
+```json
+{"message": "Welcome, admin!"}
+```
+
+Now the wrong password:
+
+```bash
+curl -i -X POST http://127.0.0.1:8000/login -H "Content-Type: application/json" -d "{\"username\": \"admin\", \"password\": \"wrong\"}"
+```
+
+**Output:** `401 Unauthorized`
+
+```json
+{"detail": "Invalid username or password"}
+```
+
+And a username that doesn't exist at all:
+
+```bash
+curl -i -X POST http://127.0.0.1:8000/login -H "Content-Type: application/json" -d "{\"username\": \"nobody\", \"password\": \"x\"}"
+```
+
+**Output:** `401 Unauthorized` — the exact same response as the wrong
+password above:
+
+```json
+{"detail": "Invalid username or password"}
+```
+
+That's it for this section — you've covered the FastAPI fundamentals:
+running an app, path operations, and six hands-on drills. From here, the
+official [FastAPI tutorial](https://fastapi.tiangolo.com/tutorial/)
+picks up with query parameters, request bodies, and everything beyond.

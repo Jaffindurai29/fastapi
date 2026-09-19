@@ -1,0 +1,117 @@
+---
+title: "5. Show, Append & Print"
+description: A tiny in-memory list, read and written with GET and POST.
+---
+
+## The code
+
+```python title="main.py"
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+
+app = FastAPI()
+
+data = []
+
+class ItemRequest(BaseModel):
+    value: str
+
+@app.get("/items")
+def show_data():
+    return data
+
+@app.post("/items")
+def append_data(item: ItemRequest):
+    data.append(item.value)
+    return {"message": "Added", "data": data}
+
+@app.get("/items/{item_index}")
+def get_specific_data(item_index: int):
+    if item_index < 0 or item_index >= len(data):
+        raise HTTPException(status_code=404, detail="Item not found")
+    return {"index": item_index, "value": data[item_index]}
+```
+
+## Line by line
+
+1. `data = []` — declared outside any route function, at module level,
+   so every request sees and modifies the *same* list, not a fresh one
+   each time.
+2. `GET /items` returns `data` exactly as it stands — showing everything
+   currently stored.
+3. `POST /items` appends `item.value` and returns the whole list back,
+   so you can see the result of the append immediately.
+4. `GET /items/{item_index}` reads one entry by its position. The
+   bounds check (`item_index < 0 or item_index >= len(data)`) matters —
+   without it, an out-of-range index would raise Python's own
+   `IndexError` and crash into a generic `500`, instead of a clean `404`.
+
+This is the same create/list/get-one shape a real database uses — just
+without anything surviving a restart.
+
+## Try it
+
+```bash
+cd example/3/e
+uvicorn main:app --reload
+```
+
+```bash
+curl http://127.0.0.1:8000/items
+```
+
+**Output:**
+
+```json
+[]
+```
+
+Now add something:
+
+```bash
+curl -X POST http://127.0.0.1:8000/items -H "Content-Type: application/json" -d "{\"value\": \"first\"}"
+```
+
+**Output:**
+
+```json
+{"message": "Added", "data": ["first"]}
+```
+
+Add a second item, then read them all:
+
+```bash
+curl -X POST http://127.0.0.1:8000/items -H "Content-Type: application/json" -d "{\"value\": \"second\"}"
+
+curl http://127.0.0.1:8000/items
+```
+
+**Output:**
+
+```json
+["first", "second"]
+```
+
+Read one specific item by position:
+
+```bash
+curl http://127.0.0.1:8000/items/0
+```
+
+**Output:**
+
+```json
+{"index": 0, "value": "first"}
+```
+
+And an out-of-range index:
+
+```bash
+curl -i http://127.0.0.1:8000/items/99
+```
+
+**Output:** `404 Not Found`
+
+```json
+{"detail": "Item not found"}
+```

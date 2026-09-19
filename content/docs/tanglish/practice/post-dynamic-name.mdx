@@ -1,0 +1,56 @@
+---
+title: "2. POST: Dynamic Name"
+description: URL-ku pathila same kind of value-ah JSON body-la irundhu padikkurathu.
+---
+
+## Code
+
+```python title="main.py"
+from fastapi import FastAPI
+from pydantic import BaseModel
+
+app = FastAPI()
+
+class NameRequest(BaseModel):
+    name: str
+
+@app.post("/hello")
+def say_hello(request: NameRequest):
+    return {"message": f"Hello, {request.name}!"}
+```
+
+## Line by line
+
+1. `from pydantic import BaseModel` — value ippo request body-la irundhu
+   varudhu, URL-la illama, so idhu venum.
+2. `class NameRequest(BaseModel): name: str` — FastAPI expect panna
+   vendiya JSON-oda shape-ah describe pannudhu: oru required field,
+   `name`, string.
+3. `@app.post("/hello")` — indha route-la path-la `{...}` edhuvum illa;
+   URL-la irundhu padikka edhuvum illa.
+4. `def say_hello(request: NameRequest):` — parameter-oda type oru
+   `BaseModel` subclass (plain `str`/`int` illa), so FastAPI idha JSON
+   request body-la irundhu parse pannanum-nu therinjikum.
+5. `request.name` — `request` oru real `NameRequest` object, so adhoda
+   field-ah dot vachi access pannalam, vera edhavadhu Python object
+   mathiri.
+
+## Try it
+
+```bash
+cd example/3/b
+uvicorn main:app --reload
+```
+
+```bash
+curl -X POST http://127.0.0.1:8000/hello -H "Content-Type: application/json" -d "{\"name\": \"Alice\"}"
+```
+
+**Output:**
+
+```json
+{"message": "Hello, Alice!"}
+```
+
+GET version-oda same result — value engendhu vandhuchu nu mattum dhan
+real difference.

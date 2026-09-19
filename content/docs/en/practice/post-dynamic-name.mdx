@@ -1,0 +1,54 @@
+---
+title: "2. POST: Dynamic Name"
+description: Read the same kind of value from a JSON body instead of the URL.
+---
+
+## The code
+
+```python title="main.py"
+from fastapi import FastAPI
+from pydantic import BaseModel
+
+app = FastAPI()
+
+class NameRequest(BaseModel):
+    name: str
+
+@app.post("/hello")
+def say_hello(request: NameRequest):
+    return {"message": f"Hello, {request.name}!"}
+```
+
+## Line by line
+
+1. `from pydantic import BaseModel` — needed because the value now comes
+   from a request body, not the URL.
+2. `class NameRequest(BaseModel): name: str` — describes the shape of
+   the JSON FastAPI should expect: one required field, `name`, a string.
+3. `@app.post("/hello")` — this route has no `{...}` in its path at all;
+   there's nothing to read from the URL.
+4. `def say_hello(request: NameRequest):` — because the parameter's type
+   is a `BaseModel` subclass (not a plain `str`/`int`), FastAPI knows to
+   parse it from the JSON request body instead.
+5. `request.name` — `request` is a real `NameRequest` object, so its
+   field is accessed with a dot, the same as any Python object.
+
+## Try it
+
+```bash
+cd example/3/b
+uvicorn main:app --reload
+```
+
+```bash
+curl -X POST http://127.0.0.1:8000/hello -H "Content-Type: application/json" -d "{\"name\": \"Alice\"}"
+```
+
+**Output:**
+
+```json
+{"message": "Hello, Alice!"}
+```
+
+Same result as the GET version — the only real difference is where the
+value came from.

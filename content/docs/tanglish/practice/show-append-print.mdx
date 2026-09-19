@@ -1,0 +1,118 @@
+---
+title: "5. Show, Append & Print"
+description: GET mattrum POST vachi read/write panra oru chinna in-memory list.
+---
+
+## Code
+
+```python title="main.py"
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+
+app = FastAPI()
+
+data = []
+
+class ItemRequest(BaseModel):
+    value: str
+
+@app.get("/items")
+def show_data():
+    return data
+
+@app.post("/items")
+def append_data(item: ItemRequest):
+    data.append(item.value)
+    return {"message": "Added", "data": data}
+
+@app.get("/items/{item_index}")
+def get_specific_data(item_index: int):
+    if item_index < 0 or item_index >= len(data):
+        raise HTTPException(status_code=404, detail="Item not found")
+    return {"index": item_index, "value": data[item_index]}
+```
+
+## Line by line
+
+1. `data = []` — edhavadhu route function-ku velila, module level-la
+   declare pannirukom, so ovoru request-um same list-ah dhan paakum,
+   modify pannum — ovoru murai fresh-a illa.
+2. `GET /items` — `data`-ah adha maadhiri return pannum — ippo store
+   panniruradha ellame show pannum.
+3. `POST /items` — `item.value`-ah append pannum, whole list-ah
+   return pannum, so append result-ah odane paakalam.
+4. `GET /items/{item_index}` — position vachi oru entry padikkum.
+   Bounds check (`item_index < 0 or item_index >= len(data)`) matter
+   aagudhu — idhu illainaa, out-of-range index Python-oda sontha
+   `IndexError`-ah raise pannum, clean `404`-ku pathila generic `500`-la
+   crash aagum.
+
+Idhu real database use panra same create/list/get-one shape dhan —
+restart aana survive aagadhu nu mattum dhan difference.
+
+## Try it
+
+```bash
+cd example/3/e
+uvicorn main:app --reload
+```
+
+```bash
+curl http://127.0.0.1:8000/items
+```
+
+**Output:**
+
+```json
+[]
+```
+
+Ippo edhavadhu add pannunga:
+
+```bash
+curl -X POST http://127.0.0.1:8000/items -H "Content-Type: application/json" -d "{\"value\": \"first\"}"
+```
+
+**Output:**
+
+```json
+{"message": "Added", "data": ["first"]}
+```
+
+Rendavadhu item add pannunga, apparam ellame padinga:
+
+```bash
+curl -X POST http://127.0.0.1:8000/items -H "Content-Type: application/json" -d "{\"value\": \"second\"}"
+
+curl http://127.0.0.1:8000/items
+```
+
+**Output:**
+
+```json
+["first", "second"]
+```
+
+Position vachi oru specific item padinga:
+
+```bash
+curl http://127.0.0.1:8000/items/0
+```
+
+**Output:**
+
+```json
+{"index": 0, "value": "first"}
+```
+
+Mattrum out-of-range index:
+
+```bash
+curl -i http://127.0.0.1:8000/items/99
+```
+
+**Output:** `404 Not Found`
+
+```json
+{"detail": "Item not found"}
+```

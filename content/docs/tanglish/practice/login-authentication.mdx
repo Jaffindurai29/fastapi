@@ -1,0 +1,102 @@
+---
+title: "6. Login Authentication"
+description: Deliberately simple-a vecha login check-oda shape.
+---
+
+## Code
+
+```python title="main.py"
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+
+app = FastAPI()
+
+fake_users_db = {
+    "admin": "password123",
+}
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+@app.post("/login")
+def login(request: LoginRequest):
+    correct_password = fake_users_db.get(request.username)
+
+    if correct_password is None or correct_password != request.password:
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+
+    return {"message": f"Welcome, {request.username}!"}
+```
+
+## Line by line
+
+1. `fake_users_db = {"admin": "password123"}` — real users table-ku oru
+   stand-in: username, password-ku map aagum.
+2. `correct_password = fake_users_db.get(request.username)` — username
+   dict-la illa-na `.get(...)` `None` return pannum, `KeyError` raise
+   pannama.
+3. **Combined check dhan matter aagudhu:**
+   `if correct_password is None or correct_password != request.password:`
+   — unknown username **and** wrong password rendaiyum inga dhan land
+   aagum, rendaiyum exact same `401`, exact same message-oda. "andha
+   username illa" nu (vs "password wrong") solradhu, real system leak
+   panna koodadha information.
+4. `raise HTTPException(status_code=401, ...)` — "indha credentials
+   velai seiyala" nu solla `401 Unauthorized` dhan correct status,
+   `404` (edhuvum kidaikala) illa `400` (malformed request) alla.
+5. `return {"message": f"Welcome, {request.username}!"}` — mela irukra
+   check raise pannama irundha mattum dhan reach aagum.
+
+**Enna missing, purpose-a:** real login systems password-ah store panna
+munnadi hash pannum (plain text compare ippadi never pannadhu), success-la
+oru message-ku pathila token (eg JWT) return pannum. Idhu version login
+check-oda shape-ah, extra moving parts illama kaamikkum.
+
+## Try it
+
+```bash
+cd example/3/f
+uvicorn main:app --reload
+```
+
+```bash
+curl -i -X POST http://127.0.0.1:8000/login -H "Content-Type: application/json" -d "{\"username\": \"admin\", \"password\": \"password123\"}"
+```
+
+**Output:** `200 OK`
+
+```json
+{"message": "Welcome, admin!"}
+```
+
+Ippo wrong password:
+
+```bash
+curl -i -X POST http://127.0.0.1:8000/login -H "Content-Type: application/json" -d "{\"username\": \"admin\", \"password\": \"wrong\"}"
+```
+
+**Output:** `401 Unauthorized`
+
+```json
+{"detail": "Invalid username or password"}
+```
+
+Mattrum full-a illatha username:
+
+```bash
+curl -i -X POST http://127.0.0.1:8000/login -H "Content-Type: application/json" -d "{\"username\": \"nobody\", \"password\": \"x\"}"
+```
+
+**Output:** `401 Unauthorized` — mela irukra wrong password-oda exact
+same response:
+
+```json
+{"detail": "Invalid username or password"}
+```
+
+Indha section-ku idhu dhan — FastAPI fundamentals ellame covered
+aayiduchu: app run pannurathu, path operations, aaru hands-on drills.
+Idhukku apparam, official
+[FastAPI tutorial](https://fastapi.tiangolo.com/tutorial/) query
+parameters, request bodies, mattrum baaki ellathayum continue pannum.
