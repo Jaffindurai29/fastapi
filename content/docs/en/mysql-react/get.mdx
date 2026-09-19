@@ -20,10 +20,14 @@ def get_item(item_id: int, db: Session = Depends(get_db)):
     return {"id": row.id, "value": row.value}
 ```
 
-Same two routes as [MySQL + CRUD's GET](/en/docs/mysql-crud/get) — see
-that page for the line-by-line breakdown, and its [diff against
-Array + CRUD](/en/docs/mysql-crud/get#diff-from-array--crud) for how
-this differs from the plain-array backend.
+1. `db: Session = Depends(get_db)` — FastAPI calls `get_db()` before
+   this route runs, opening a session, and closes it afterward
+   automatically, even if the route raises an error.
+2. `db.query(ItemModel).order_by(ItemModel.id).all()` — every row in
+   the table, in a predictable order.
+3. `db.get(ItemModel, item_id)` — SQLAlchemy's shortcut for "fetch by
+   primary key," returning `None` if nothing matches — the same
+   404-if-missing pattern as the array version.
 
 ## Frontend
 
@@ -50,6 +54,17 @@ ID is this number," regardless of where it currently sits in the list.
 `loadItems` itself doesn't change at all — the backend returns objects
 instead of plain strings, but this function just stores whatever JSON
 comes back either way.
+
+## Line by line
+
+1. `reachItem(id)` is the array version's `reachItem(index)`, with
+   `index` renamed to `id` everywhere — the URL, the error message, and
+   the parameter itself.
+2. `loadItems()` is untouched — it just stores whatever JSON comes
+   back, whether that's plain strings or `{ id, value }` objects.
+3. The URL pattern `/items/<something>` doesn't change; only what that
+   `<something>` identifies does — a database ID instead of an array
+   position.
 
 Next: [POST](/en/docs/mysql-react/post) — the add form.
 

@@ -19,8 +19,13 @@ def update_item(item_index: int, patch: ItemPatch):
     return {"index": item_index, "value": data[item_index]}
 ```
 
-Same route as [Array + CRUD's PATCH](/en/docs/array-crud/patch) — see
-that page for the line-by-line breakdown.
+1. **`ItemPatch`'s field is optional** (`value: Optional[str] = None`)
+   — unlike PUT's `ItemRequest`, where `value` is required. That's the
+   whole difference between `PUT` and `PATCH`: `PUT` demands the full
+   representation, `PATCH` lets you send only what changed.
+2. **`if patch.value is not None:`** only overwrites the slot if the
+   client actually sent a value — an empty body (`{}`) leaves the item
+   untouched.
 
 ## Frontend
 
@@ -55,6 +60,18 @@ is just cosmetic.
   </>
 )}
 ```
+
+## Line by line
+
+1. No separate `savePatch` function exists — `saveEdit` already takes
+   `method` as a parameter.
+2. The **"Save (PATCH)"** button just calls `saveEdit(index, "PATCH")`
+   — same function, same body, a different string.
+3. That one string (`"PUT"` vs `"PATCH"`) is the only frontend
+   difference between the two buttons — the component, request body,
+   and `fetch` call are all identical.
+4. Both buttons sit side by side in edit mode, next to a **"Cancel"**
+   button that just sets `editingIndex` back to `null` without saving.
 
 Next: [DELETE](/en/docs/react/delete) — removing an item, and how the
 whole list renders.

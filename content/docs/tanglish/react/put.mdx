@@ -14,8 +14,13 @@ def replace_item(item_index: int, item: ItemRequest):
     return {"index": item_index, "value": data[item_index]}
 ```
 
-[Array + CRUD's PUT](/tanglish/docs/array-crud/put)-oda same route —
-line-by-line breakdown-ku andha page paarunga.
+1. **Index irukka-nu first-a check pannunga** — GET mathiri same
+   bounds check, so out-of-range `PUT` clean `404` return pannum,
+   crash aagama.
+2. **`data[item_index] = item.value`** andha slot-ah completely
+   overwrite pannum. `PUT` nu solradhu "idhu dhan indha resource-oda
+   complete pudhu representation" — client full value anuppanum,
+   maari irukra part mattum illa.
 
 ## Frontend
 
@@ -62,6 +67,20 @@ maathum.
 ```jsx
 <button onClick={() => saveEdit(index, "PUT")}>Save (PUT)</button>
 ```
+
+## Line by line
+
+1. `startEditing(index, currentValue)` — `editingIndex`-ah andha
+   row-oda position-a set pannum, `editValue`-ah current text-oda
+   pre-fill pannum.
+2. `editingIndex` set panradhu dhan exact-a oru row-ah input box-a
+   maathum — baaki ellame same value check panradhala plain text-a
+   irukum.
+3. `saveEdit(index, method)` purpose-a `method`-ah parameter-a
+   edukkum, so same function `PUT` illana `PATCH` rendaiyum anuppalam.
+4. Success aana, `setEditingIndex(null)` edit mode-ah exit pannum,
+   apparam `loadItems()` list-ah refresh pannum.
+5. **"Save (PUT)"** button `saveEdit(index, "PUT")` call pannum.
 
 Adutha step: [PATCH](/tanglish/docs/react/patch) — same function,
 vera verb-oda call pannudhu.

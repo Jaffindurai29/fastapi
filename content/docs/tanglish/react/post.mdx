@@ -16,8 +16,14 @@ def create_item(item: ItemRequest):
     return {"index": len(data) - 1, "value": item.value}
 ```
 
-[Array + CRUD's POST](/tanglish/docs/array-crud/post)-oda same route —
-line-by-line breakdown-ku andha page paarunga.
+1. Decorator-la `status_code=status.HTTP_201_CREATED` — `POST`
+   routes default-a `200` return pannum; `201` dhan "pudhu resource
+   create aachu" nu solla correct-a irukra code.
+2. `data.append(item.value)` pudhu value-ah shared array-oda
+   end-la add pannum.
+3. `return {"index": len(data) - 1, "value": item.value}` — pudhu
+   item enga landed aachu nu caller-ku exact-a solludhu, so adutha
+   GET, PUT, illana DELETE edhu index use pannanum nu therium.
 
 ## Frontend
 
@@ -55,6 +61,20 @@ response-la irundhu dhan varudhu, guess pannama.
   <button type="submit">Add</button>
 </form>
 ```
+
+## Line by line
+
+1. `event.preventDefault()` browser-oda default full-page reload-ah
+   form submit pannum pothu stop pannum.
+2. `if (value.trim() === "") return;` — empty illana whitespace-mattum
+   irukra input-ku request-ah completely skip pannum.
+3. `fetch(... method: "POST" ...)` — `{ value }`-ah JSON-a anuppum,
+   `Content-Type: application/json` header-oda.
+4. Success aana, `setValue("")` input-ah clear pannum, apparam
+   `loadItems()` list-ah refresh pannum — pudhu item server-oda
+   response-la irundhu dhan varudhu, guess panna index-la irundhu illa.
+5. `<form onSubmit={addItem}>` idha muzhukka Add button-oda mattrum
+   Enter key-oda wire pannudhu.
 
 Adutha step: [PUT](/tanglish/docs/react/put) — "Save (PUT)" edit
 button.

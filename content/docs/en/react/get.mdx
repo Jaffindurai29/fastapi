@@ -18,10 +18,15 @@ def get_item(item_index: int):
     return {"index": item_index, "value": data[item_index]}
 ```
 
-Same two routes as [Array + CRUD's GET](/en/docs/array-crud/get) — see
-that page for the line-by-line breakdown. Nothing about them changes
-for React; only `CORSMiddleware` was added so the browser is allowed to
-call them at all.
+1. `GET /items` returns the whole array as-is.
+2. `GET /items/{item_index}` reaches one entry by its position, with a
+   bounds check before indexing.
+3. Skipping that bounds check would let an out-of-range index raise
+   Python's own `IndexError`, which turns into a generic `500` instead
+   of a clean `404`.
+4. Nothing here is React-specific — the only addition for this topic
+   is `CORSMiddleware`, registered once right after `app = FastAPI()`,
+   so the browser is allowed to call these routes at all.
 
 ## Frontend
 
@@ -66,6 +71,22 @@ async function reachItem(index) {
 Stored in its own `reached` state, separate from `items` — so it's
 visibly a fresh fetch, not just re-reading something already on the
 page. Wired to a **"Reach"** button next to each row.
+
+## Line by line
+
+1. `useEffect(() => { loadItems(); }, [])` — the empty dependency array
+   means this runs exactly once, right after the first render, loading
+   the starting list.
+2. `loadItems()` calls `GET /items`; on failure it sets `error` instead
+   of throwing, so the page shows a message instead of crashing.
+3. `loadItems()` runs again after every create/update/delete elsewhere
+   in the app, so the page always reflects what the server actually
+   has, not just an optimistic guess.
+4. `reachItem(index)` calls `GET /items/{index}` and stores the result
+   in its own `reached` state, separate from `items` — so it's visibly
+   a fresh fetch, not just something already on the page.
+5. The **"Reach"** button next to each row calls `reachItem(index)`
+   with that row's position.
 
 Next: [POST](/en/docs/react/post) — the add form.
 

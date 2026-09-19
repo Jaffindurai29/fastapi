@@ -14,8 +14,12 @@ def replace_item(item_index: int, item: ItemRequest):
     return {"index": item_index, "value": data[item_index]}
 ```
 
-Same route as [Array + CRUD's PUT](/en/docs/array-crud/put) — see that
-page for the line-by-line breakdown.
+1. **Check the index exists first** — same bounds check as GET, so an
+   out-of-range `PUT` returns a clean `404` instead of crashing.
+2. **`data[item_index] = item.value`** overwrites that slot entirely.
+   `PUT` means "here is the complete new representation of this
+   resource" — the client sends the whole value, not just the part
+   that changed.
 
 ## Frontend
 
@@ -60,6 +64,19 @@ method actually gets sent.
 ```jsx
 <button onClick={() => saveEdit(index, "PUT")}>Save (PUT)</button>
 ```
+
+## Line by line
+
+1. `startEditing(index, currentValue)` sets `editingIndex` to that
+   row's position and pre-fills `editValue` with its current text.
+2. Setting `editingIndex` is what turns exactly one row into an input
+   box — every other row stays plain text, since they all check the
+   same value.
+3. `saveEdit(index, method)` takes `method` as a parameter on purpose,
+   so the same function can send either `PUT` or `PATCH`.
+4. On success, `setEditingIndex(null)` exits edit mode, then
+   `loadItems()` refreshes the list.
+5. The **"Save (PUT)"** button calls `saveEdit(index, "PUT")`.
 
 Next: [PATCH](/en/docs/react/patch) — the same function, called with a
 different verb.

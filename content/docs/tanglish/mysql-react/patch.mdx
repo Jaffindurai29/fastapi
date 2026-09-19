@@ -22,8 +22,11 @@ def update_item(item_id: int, patch: ItemPatch, db: Session = Depends(get_db)):
     return {"id": row.id, "value": row.value}
 ```
 
-[MySQL + CRUD's PATCH](/tanglish/docs/mysql-crud/patch)-oda same route
-— line-by-line breakdown-ku andha page paarunga.
+1. **`ItemPatch.value` optional** — PUT-oda `ItemRequest`-la
+   `value` required, idhu vidhyasam.
+2. **`if patch.value is not None: row.value = patch.value`** —
+   client real-a oru value anuppina mattum dhan row-ah update
+   pannum.
 
 ## Frontend
 
@@ -43,6 +46,13 @@ def update_item(item_id: int, patch: ItemPatch, db: Session = Depends(get_db)):
 relationship — oru shared `saveEdit` function, oru string argument
 HTTP method-ah decide pannum. Array version-ku vidhyasam mattum,
 `index`-ku pathila `item.id` first argument-a irukradhu.
+
+## Line by line
+
+1. Array version-oda same relationship: oru shared `saveEdit`
+   function, oru string argument HTTP method-ah decide pannum.
+2. Array version-ku vidhyasam mattum, `index`-ku pathila `item.id`
+   first argument-a irukradhu.
 
 Adutha step: [DELETE](/tanglish/docs/mysql-react/delete) — oru row-ah
 remove pannurathu, mattrum IDs yeandhukku shift aagadhu.

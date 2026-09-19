@@ -19,8 +19,14 @@ def update_item(item_index: int, patch: ItemPatch):
     return {"index": item_index, "value": data[item_index]}
 ```
 
-[Array + CRUD's PATCH](/tanglish/docs/array-crud/patch)-oda same route
-— line-by-line breakdown-ku andha page paarunga.
+1. **`ItemPatch`-oda field optional** (`value: Optional[str] = None`)
+   — PUT-oda `ItemRequest`-la `value` required, idhu vidhyasam.
+   `PUT` vs `PATCH`-oda whole difference idhu dhan: `PUT` full
+   representation kekkum, `PATCH` maari irukradha mattum anuppa
+   vidum.
+2. **`if patch.value is not None:`** client real-a oru value
+   anuppina mattum dhan slot-ah overwrite pannum — empty body (`{}`)
+   item-ah untouched-a vidum.
 
 ## Frontend
 
@@ -55,6 +61,19 @@ kaamikkum.
   </>
 )}
 ```
+
+## Line by line
+
+1. Separate-a `savePatch` function edhuvum illa — `saveEdit` already
+   `method`-ah parameter-a edukkum.
+2. **"Save (PATCH)"** button `saveEdit(index, "PATCH")` call pannum
+   mattum dhan — same function, same body, vera string.
+3. Andha oru string (`"PUT"` vs `"PATCH"`) dhan frontend-la rendu
+   buttons-ku vidhyasam — component, request body, `fetch` call ellame
+   identical.
+4. Rendu buttons-um edit mode-la side-by-side irukum, oru
+   **"Cancel"** button-oda — adhu save pannama `editingIndex`-ah
+   `null`-ku thirumba set pannum.
 
 Adutha step: [DELETE](/tanglish/docs/react/delete) — oru item-ah
 remove pannurathu, mattrum full list eppadi render aagum.

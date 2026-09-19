@@ -15,8 +15,14 @@ def delete_item(item_id: int, db: Session = Depends(get_db)):
     db.commit()
 ```
 
-[MySQL + CRUD's DELETE](/tanglish/docs/mysql-crud/delete)-oda same
-route — line-by-line breakdown-ku andha page paarunga.
+1. **Row-ah first-a look up pannunga** — indha topic-la irukra ella
+   route-um same 404-if-missing pattern.
+2. **`db.delete(row)` apparam `db.commit()`** — deletion-ah stage
+   pannum, apparam write pannum.
+3. **Array topic-ku vidhyasam-a**, inga oru row-ah delete panna,
+   vera edhavadhu row-oda `id` shift aagadhu — MySQL-oda
+   auto-increment `id` oru stable identity dhan, list-la position
+   illa.
 
 ## Frontend
 
@@ -65,6 +71,18 @@ irukanum, position shift aagra onnu vida database ID dhan better.
 
 Idhu just rename illa. Database topics-oda practical payoff idhu dhan:
 move aagadha identities.
+
+## Line by line
+
+1. `deleteItem(id)` — array version-oda same shape,
+   `DELETE /items/{index}`-ku pathila `DELETE /items/{id}`.
+2. `.map((item) => ...)` — `.map()`-la irundhu `index`-ah edukka
+   vendam ippo, UI-ku venum ella vishayamum already `item`-la irukku.
+3. `key={item.id}`, `key={index}`-ku pathila — React-oda `key`
+   eppovum stable identity-a irukanum, database ID never shift
+   aagadhu, position mathiri illa.
+4. Practical payoff: inga oru row-ah delete panna vera edhavadhu
+   row-um never renumber aagadhu.
 
 ## Full code
 

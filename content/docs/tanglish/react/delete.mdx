@@ -13,8 +13,15 @@ def delete_item(item_index: int):
     data.pop(item_index)
 ```
 
-[Array + CRUD's DELETE](/tanglish/docs/array-crud/delete)-oda same
-route — line-by-line breakdown-ku andha page paarunga.
+1. **Index irukka-nu first-a check pannunga** — indha topic-la
+   irukra vera ella route-um same bounds check.
+2. **`status_code=status.HTTP_204_NO_CONTENT`** — `204` nu solradhu
+   "work aachu, anuppa edhuvum illa." Function edhuvum `return`
+   pannadhu; `204` response convention-a body illama irukum.
+3. **`data.pop(item_index)`** andha entry-ah remove pannum, apparam
+   irukra ellame oru position keezha shift aagum — array indexes
+   stable identifiers illa nu solra reason idhu dhan, database ID
+   mathiri illa.
 
 ## Frontend
 
@@ -71,6 +78,22 @@ Idhu dhan full app: [GET](/tanglish/docs/react/get),
 [POST](/tanglish/docs/react/post), [PUT](/tanglish/docs/react/put),
 [PATCH](/tanglish/docs/react/patch), mattrum DELETE, ovoru row-kum oru
 list of buttons-oda wired.
+
+## Line by line
+
+1. `deleteItem(index)` aaru-la irundhu simplest — body edhuvum illa,
+   `DELETE` method mattrum URL mattum.
+2. Success aana `loadItems()` call pannum list-ah refresh panna — vera
+   ella mutation-um follow panra same pattern.
+3. `.map((item, index) => ...)` array-oda ovoru entry-kum oru `<li>`
+   render pannum.
+4. `editingIndex === index ? (...) : (...)` — andha row-oda index
+   `editingIndex`-oda match aaguthaa nu paathu, oru row-ah input box
+   mattrum plain text-kum switch panra ternary.
+5. Edit-mode illatha `<li>`-la irukra ovoru button-um — Reach, Edit,
+   Delete — munnadi naalu pages-oda function-la edhavadhu onna call
+   pannum; edit-mode `<li>` Save (PUT), Save (PATCH), Cancel add
+   pannum.
 
 Adutha step: [React + MySQL + CRUD](/tanglish/docs/mysql-react) — same
 frontend, array-ku pathila real database mela point pannudhu.

@@ -17,8 +17,15 @@ def replace_item(item_id: int, item: ItemRequest, db: Session = Depends(get_db))
     return {"id": row.id, "value": row.value}
 ```
 
-Same route as [MySQL + CRUD's PUT](/en/docs/mysql-crud/put) — see that
-page for the line-by-line breakdown.
+1. **Look the row up first** — `db.get(ItemModel, item_id)` returns
+   `None` if that ID doesn't exist, so a clean `404` goes out instead
+   of silently doing nothing.
+2. **`row.value = item.value`** looks like a plain attribute
+   assignment because it is one — SQLAlchemy's ORM tracks the change
+   automatically; nothing needs to be re-added to the session.
+3. **`db.commit()`** writes the change; **`db.refresh(row)`** makes
+   sure `row` reflects exactly what's now in the database before it's
+   returned.
 
 ## Frontend
 
@@ -61,6 +68,15 @@ async function saveEdit(id, method) {
 
 Same function, same idea as the array version — `index` renamed to
 `id` throughout, nothing else.
+
+## Line by line
+
+1. `startEditing(id, currentValue)` — `setEditingIndex` renamed to
+   `setEditingId`, storing a database id instead of a position.
+2. `saveEdit(id, method)` — same function shape as the array version,
+   just addressed by `id` instead of `index`.
+3. The **"Save (PUT)"** button now calls `saveEdit(item.id, "PUT")` —
+   reading `id` off the item object instead of a loop index.
 
 Next: [PATCH](/en/docs/mysql-react/patch) — the same function, called
 with a different verb.

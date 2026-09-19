@@ -20,8 +20,14 @@ def get_item(item_id: int, db: Session = Depends(get_db)):
     return {"id": row.id, "value": row.value}
 ```
 
-[MySQL + CRUD's GET](/tanglish/docs/mysql-crud/get)-oda same rendu
-routes — line-by-line breakdown-ku andha page paarunga.
+1. `db: Session = Depends(get_db)` — indha route run aaguradhukku
+   munnadi FastAPI `get_db()`-ah call pannum, session open pannum,
+   apparam automatic-a close pannum, route-la error vandhalum.
+2. `db.query(ItemModel).order_by(ItemModel.id).all()` — table-la
+   irukra ovoru row-um, predictable order-la.
+3. `db.get(ItemModel, item_id)` — SQLAlchemy-oda "primary key vachi
+   fetch pannu" shortcut, edhuvum match aagalana `None` return
+   pannum — array version-oda same 404-if-missing pattern.
 
 ## Frontend
 
@@ -48,6 +54,17 @@ Inga, "database ID indha number-oda irukra row" nu — list-la ippo enga
 irukku nu paakadha. `loadItems` idhu maari maaradhu — backend plain
 string-ku pathila objects return pannudhu, aana indha function
 vandha JSON-ah adha maadhiri dhan store pannum.
+
+## Line by line
+
+1. `reachItem(id)` array version-oda `reachItem(index)` dhan,
+   `index`-ku pathila `id` engum rename pannirukom — URL, error
+   message, mattrum parameter.
+2. `loadItems()` maaradhu — vandha JSON edhuvaagilum (plain strings
+   illana `{ id, value }` objects) adha maadhiri dhan store pannum.
+3. URL pattern `/items/<something>` maaradhu; andha `<something>`
+   enna identify pannudho adhu mattum maarudhu — array position-ku
+   pathila database ID.
 
 Adutha step: [POST](/tanglish/docs/mysql-react/post) — add form.
 

@@ -16,8 +16,14 @@ def create_item(item: ItemRequest):
     return {"index": len(data) - 1, "value": item.value}
 ```
 
-Same route as [Array + CRUD's POST](/en/docs/array-crud/post) — see
-that page for the line-by-line breakdown.
+1. `status_code=status.HTTP_201_CREATED` on the decorator — `POST`
+   routes default to `200`; `201` is the more correct code for "a new
+   resource was created."
+2. `data.append(item.value)` adds the new value onto the end of the
+   shared array.
+3. `return {"index": len(data) - 1, "value": item.value}` tells the
+   caller exactly where the new item landed, so a follow-up GET, PUT,
+   or DELETE knows which index to use.
 
 ## Frontend
 
@@ -55,6 +61,20 @@ and reloads the list — the new item comes from the server's response to
   <button type="submit">Add</button>
 </form>
 ```
+
+## Line by line
+
+1. `event.preventDefault()` stops the browser's default full-page
+   reload on form submit.
+2. `if (value.trim() === "") return;` skips the request entirely for
+   an empty or whitespace-only input.
+3. `fetch(... method: "POST" ...)` sends `{ value }` as JSON, with a
+   `Content-Type: application/json` header.
+4. On success, `setValue("")` clears the input, then `loadItems()`
+   refreshes the list — the new item comes from the server's response,
+   not a guessed index.
+5. `<form onSubmit={addItem}>` wires the whole thing to the Add button
+   and the Enter key.
 
 Next: [PUT](/en/docs/react/put) — the "Save (PUT)" edit button.
 

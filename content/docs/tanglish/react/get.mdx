@@ -18,10 +18,16 @@ def get_item(item_index: int):
     return {"index": item_index, "value": data[item_index]}
 ```
 
-[Array + CRUD's GET](/tanglish/docs/array-crud/get)-oda same rendu
-routes — line-by-line breakdown-ku andha page paarunga. Idhu React-ku
-edhuvum maaradhu; browser call panna `CORSMiddleware` mattum add
-pannirukom.
+1. `GET /items` full array-ah adha maadhiri dhan return pannum.
+2. `GET /items/{item_index}` oru entry-ah adhoda position vachi
+   reach pannum, indexing-ku munnadi bounds check-oda.
+3. Andha bounds check skip pannina, out-of-range index Python-oda
+   own `IndexError`-ah raise pannum, adhu clean `404`-ku pathila
+   generic `500`-a maarum.
+4. Inga edhuvum React-ku specific illa — indha topic-ku add aana
+   onnu mattum `CORSMiddleware` dhan, `app = FastAPI()` apparam
+   odane once register pannirukom, so browser indha routes-ah call
+   panna allow pannum.
 
 ## Frontend
 
@@ -66,6 +72,22 @@ async function reachItem(index) {
 `items`-la irundhu separate-a, `reached` state-la store pannirukom —
 so idhu clear-a fresh fetch nu therium. Ovoru row-kum irukra
 **"Reach"** button-oda wired.
+
+## Line by line
+
+1. `useEffect(() => { loadItems(); }, [])` — empty dependency array
+   nu solradhu idhu exact-a oru thadava dhan run aagum, first render
+   aana odane, starting list-ah load panna.
+2. `loadItems()` `GET /items` call pannum; fail aana `error` set
+   pannum, throw pannama — so page crash aagama message kaatum.
+3. `loadItems()` keezha irukra ovoru create/update/delete-kum apparam
+   thirumba call aagum, so page eppovum server-la real-a irukradha
+   dhan reflect pannum.
+4. `reachItem(index)` `GET /items/{index}` call pannum, result-ah
+   `reached`-nu thani state-la store pannum, `items`-la irundhu
+   separate-a — so idhu clear-a fresh fetch nu therium.
+5. Ovoru row-kum irukra **"Reach"** button andha row-oda position-oda
+   `reachItem(index)`-ah call pannum.
 
 Adutha step: [POST](/tanglish/docs/react/post) — add form.
 

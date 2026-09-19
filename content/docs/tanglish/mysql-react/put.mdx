@@ -17,8 +17,15 @@ def replace_item(item_id: int, item: ItemRequest, db: Session = Depends(get_db))
     return {"id": row.id, "value": row.value}
 ```
 
-[MySQL + CRUD's PUT](/tanglish/docs/mysql-crud/put)-oda same route —
-line-by-line breakdown-ku andha page paarunga.
+1. **Row-ah first-a look up pannunga** — `db.get(ItemModel, item_id)`
+   andha ID illa-na `None` return pannum, so silent-a edhuvum
+   pannama clean `404` varum.
+2. **`row.value = item.value`** plain attribute assignment mathiri
+   kaamikkum, idhu dhan adhu — SQLAlchemy-oda ORM change-ah
+   automatic-a track pannikum.
+3. **`db.commit()`** change-ah write pannum; **`db.refresh(row)`**
+   `row` database-la ippo enna irukko adha exact-a reflect
+   pannum-nu confirm pannum.
 
 ## Frontend
 
@@ -61,6 +68,16 @@ async function saveEdit(id, method) {
 
 Array version-oda same function, same idea — `index` engum `id`-a
 maari, vera edhuvum maaradhu.
+
+## Line by line
+
+1. `startEditing(id, currentValue)` — `setEditingIndex`,
+   `setEditingId`-a rename aagirukku, position-ku pathila database id
+   store pannudhu.
+2. `saveEdit(id, method)` — array version-oda same function shape,
+   `index`-ku pathila `id` vachi address panni.
+3. **"Save (PUT)"** button ippo `saveEdit(item.id, "PUT")` call
+   pannum — loop index-ku pathila item object-la irundhu `id` edukkum.
 
 Adutha step: [PATCH](/tanglish/docs/mysql-react/patch) — same
 function, vera verb-oda call pannudhu.

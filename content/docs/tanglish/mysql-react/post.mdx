@@ -19,8 +19,13 @@ def create_item(item: ItemRequest, db: Session = Depends(get_db)):
     return {"id": row.id, "value": row.value}
 ```
 
-[MySQL + CRUD's POST](/tanglish/docs/mysql-crud/post)-oda same route —
-line-by-line breakdown-ku andha page paarunga.
+1. `row = ItemModel(value=item.value)` — memory-la pudhu ORM object
+   build pannudhu; database-la edhuvum ippa write aagala.
+2. `db.add(row)` insert panna stage pannudhu; `db.commit()` real-a
+   write pannudhu — idhu dhan MySQL real auto-incrementing `id`-ah
+   assign panra point.
+3. `db.refresh(row)` — database-la irundhu generate aana `id`-ah
+   `row`-ku thirumba edukkum, so function adha return pannalam.
 
 ## Frontend
 
@@ -52,6 +57,14 @@ body rendu pakkamum same `{ value }` shape. **Maari irukra oru
 vishayam backend-la nadandhuchu, inga illa:** database ippo pudhu
 row-ku real `id`-ah assign pannudhu, frontend `items.length`-la
 landed aachu-nu assume pannradhukku pathila.
+
+## Line by line
+
+1. `addItem` array version-oda byte-for-byte identical dhan — same
+   `{ value }` body shape, same `fetch` call.
+2. Real-a maari irukra vishayam backend-la nadandhuchu: database
+   pudhu row-ku real `id`-ah assign pannudhu, frontend
+   `items.length`-la landed aachu-nu assume pannradhukku pathila.
 
 Adutha step: [PUT](/tanglish/docs/mysql-react/put) — oru row-ah edit
 pannurathu, ID vachi address panni.

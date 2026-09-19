@@ -13,8 +13,14 @@ def delete_item(item_index: int):
     data.pop(item_index)
 ```
 
-Same route as [Array + CRUD's DELETE](/en/docs/array-crud/delete) —
-see that page for the line-by-line breakdown.
+1. **Check the index exists first** — the same bounds check as every
+   other route in this topic.
+2. **`status_code=status.HTTP_204_NO_CONTENT`** — `204` means "it
+   worked, and there's nothing to send back." The function doesn't
+   `return` anything; a `204` response has no body by convention.
+3. **`data.pop(item_index)`** removes that entry, shifting everything
+   after it down by one position — why array indexes aren't stable
+   identifiers, unlike a database ID.
 
 ## Frontend
 
@@ -70,6 +76,20 @@ That's the complete app: [GET](/en/docs/react/get),
 [POST](/en/docs/react/post), [PUT](/en/docs/react/put),
 [PATCH](/en/docs/react/patch), and DELETE, all wired to one list of
 buttons per row.
+
+## Line by line
+
+1. `deleteItem(index)` is the simplest of the five — no body, just a
+   `DELETE` method and a URL.
+2. On success it calls `loadItems()` to refresh the list, the same
+   pattern as every other mutation.
+3. `.map((item, index) => ...)` renders one `<li>` per array entry.
+4. `editingIndex === index ? (...) : (...)` is the ternary that
+   switches one row between an input box and plain text, based solely
+   on whether that row's index matches `editingIndex`.
+5. Every button in the non-edit `<li>` — Reach, Edit, Delete — calls a
+   function from one of the previous four pages; the edit-mode `<li>`
+   adds Save (PUT), Save (PATCH), and Cancel.
 
 Next: [React + MySQL + CRUD](/en/docs/mysql-react) — the same frontend, pointed
 at a real database instead of an array.

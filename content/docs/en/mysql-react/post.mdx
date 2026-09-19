@@ -19,8 +19,13 @@ def create_item(item: ItemRequest, db: Session = Depends(get_db)):
     return {"id": row.id, "value": row.value}
 ```
 
-Same route as [MySQL + CRUD's POST](/en/docs/mysql-crud/post) — see
-that page for the line-by-line breakdown.
+1. `row = ItemModel(value=item.value)` — builds a new ORM object in
+   memory; nothing is written to the database yet.
+2. `db.add(row)` stages it for insertion; `db.commit()` actually writes
+   it — this is the point where MySQL assigns the real
+   auto-incrementing `id`.
+3. `db.refresh(row)` pulls that generated `id` back into `row` from
+   the database, so the function can return it.
 
 ## Frontend
 
@@ -52,6 +57,14 @@ the same `{ value }` shape either way. **The one thing that changed
 happened on the backend, not here:** the database now assigns a real
 `id` to the new row, instead of the frontend assuming it landed at
 `items.length`.
+
+## Line by line
+
+1. `addItem` is byte-for-byte identical to the array version — same
+   `{ value }` body shape, same `fetch` call.
+2. The only real change happened on the backend: the database assigns
+   a real `id`, instead of the frontend assuming the new item landed
+   at `items.length`.
 
 Next: [PUT](/en/docs/mysql-react/put) — editing a row, addressed by ID.
 
