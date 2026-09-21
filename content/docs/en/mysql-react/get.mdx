@@ -20,6 +20,8 @@ def get_item(item_id: int, db: Session = Depends(get_db)):
     return {"id": row.id, "value": row.value}
 ```
 
+## Line by line
+
 1. `db: Session = Depends(get_db)` — FastAPI calls `get_db()` before
    this route runs, opening a session, and closes it afterward
    automatically, even if the route raises an error.

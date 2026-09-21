@@ -22,6 +22,8 @@ def update_item(item_id: int, patch: ItemPatch, db: Session = Depends(get_db)):
     return {"id": row.id, "value": row.value}
 ```
 
+## Line by line
+
 1. **Check the row exists first** — `db.get(ItemModel, item_id)`
    returns the `ItemModel` object if that ID exists, or `None` if it
    doesn't.

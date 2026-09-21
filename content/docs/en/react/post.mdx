@@ -16,6 +16,8 @@ def create_item(item: ItemRequest):
     return {"index": len(data) - 1, "value": item.value}
 ```
 
+## Line by line
+
 1. `status_code=status.HTTP_201_CREATED` on the decorator — `POST`
    routes default to `200`; `201` is the more correct code for "a new
    resource was created."

@@ -19,6 +19,8 @@ def create_item(item: ItemRequest, db: Session = Depends(get_db)):
     return {"id": row.id, "value": row.value}
 ```
 
+## Line by line
+
 1. `row = ItemModel(value=item.value)` — builds a new ORM object in
    memory; nothing is written to the database yet.
 2. `db.add(row)` stages it for insertion; `db.commit()` actually writes

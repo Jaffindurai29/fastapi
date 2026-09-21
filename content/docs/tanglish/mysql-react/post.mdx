@@ -19,6 +19,8 @@ def create_item(item: ItemRequest, db: Session = Depends(get_db)):
     return {"id": row.id, "value": row.value}
 ```
 
+## Line by line
+
 1. `row = ItemModel(value=item.value)` — memory-la pudhu ORM object
    build pannudhu; database-la edhuvum ippa write aagala.
 2. `db.add(row)` insert panna stage pannudhu; `db.commit()` real-a

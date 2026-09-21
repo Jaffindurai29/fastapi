@@ -19,6 +19,8 @@ def update_item(item_index: int, patch: ItemPatch):
     return {"index": item_index, "value": data[item_index]}
 ```
 
+## Line by line
+
 1. **Check the index exists first** — same bounds check as GET and
    PUT: `item_index < 0` rejects negative numbers,
    `item_index >= len(data)` rejects anything past the end, and either

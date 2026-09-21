@@ -14,6 +14,8 @@ def replace_item(item_index: int, item: ItemRequest):
     return {"index": item_index, "value": data[item_index]}
 ```
 
+## Line by line
+
 1. **Check the index exists first** — same bounds check as GET:
    - `item_index < 0` blocks negative numbers, so `/items/-1` can't
      quietly hit Python's negative-indexing behavior and overwrite the

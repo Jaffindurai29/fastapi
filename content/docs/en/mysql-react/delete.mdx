@@ -15,6 +15,8 @@ def delete_item(item_id: int, db: Session = Depends(get_db)):
     db.commit()
 ```
 
+## Line by line
+
 1. **Look the row up first** — `db.get(ItemModel, item_id)` returns the
    `ItemModel` object if that ID exists, or `None` if it doesn't.
    - `if row is None: raise HTTPException(status_code=404, ...)` sends

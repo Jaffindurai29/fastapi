@@ -18,6 +18,8 @@ def get_item(item_index: int):
     return {"index": item_index, "value": data[item_index]}
 ```
 
+## Line by line
+
 1. `GET /items` returns the whole array as-is.
 2. `GET /items/{item_index}` reaches one entry by its position, guarded
    by a bounds check before indexing:

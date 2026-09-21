@@ -17,6 +17,8 @@ def replace_item(item_id: int, item: ItemRequest, db: Session = Depends(get_db))
     return {"id": row.id, "value": row.value}
 ```
 
+## Line by line
+
 1. **Look the row up first** — `db.get(ItemModel, item_id)` is
    SQLAlchemy's fetch-by-primary-key shortcut: it returns the
    `ItemModel` object if that ID exists, or `None` if it doesn't,

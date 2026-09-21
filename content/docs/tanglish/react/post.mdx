@@ -16,6 +16,8 @@ def create_item(item: ItemRequest):
     return {"index": len(data) - 1, "value": item.value}
 ```
 
+## Line by line
+
 1. Decorator-la `status_code=status.HTTP_201_CREATED` — `POST`
    routes default-a `200` return pannum; `201` dhan "pudhu resource
    create aachu" nu solla correct-a irukra code.

@@ -5,7 +5,7 @@
     "installation",
     "first-steps",
     "path-parameters",
-    "post",
+    "pydantic",
     "array-crud",
     "react",
     "mysql-crud",

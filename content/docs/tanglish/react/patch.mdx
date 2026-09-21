@@ -19,6 +19,8 @@ def update_item(item_index: int, patch: ItemPatch):
     return {"index": item_index, "value": data[item_index]}
 ```
 
+## Line by line
+
 1. **Index irukka-nu first-a check pannunga** — GET mattrum PUT-la
    irukra same bounds check: `item_index < 0` negative numbers-ah
    reject pannum, `item_index >= len(data)` end-ah kadandha

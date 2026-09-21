@@ -17,6 +17,8 @@ def replace_item(item_id: int, item: ItemRequest, db: Session = Depends(get_db))
     return {"id": row.id, "value": row.value}
 ```
 
+## Line by line
+
 1. **Row-ah first-a look up pannunga** — `db.get(ItemModel, item_id)`
    SQLAlchemy-oda primary-key-vachi fetch shortcut: andha ID irundha
    `ItemModel` object return pannum, illa-na `None` return pannum,

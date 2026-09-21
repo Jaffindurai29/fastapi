@@ -14,6 +14,8 @@ def replace_item(item_index: int, item: ItemRequest):
     return {"index": item_index, "value": data[item_index]}
 ```
 
+## Line by line
+
 1. **Index irukka-nu first-a check pannunga** — GET mathiri same
    bounds check:
    - `item_index < 0` negative numbers-ah block pannum, so `/items/-1`
