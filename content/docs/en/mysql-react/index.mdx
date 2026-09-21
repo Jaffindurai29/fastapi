@@ -20,6 +20,23 @@ app.add_middleware(
 )
 ```
 
+## Line by line
+
+1. `app.add_middleware(CORSMiddleware, ...)` — registers middleware
+   that runs on every request/response, adding the HTTP headers
+   browsers require before letting JavaScript on one origin read a
+   response from another.
+2. `allow_origins=[...]` — the only two origins allowed to make
+   cross-origin requests to this API: the Vite dev server on
+   `localhost`/`127.0.0.1`, port `5173`. Anything else is blocked by
+   the browser itself before the request even reaches this backend.
+3. `allow_credentials=True` — permits cookies/auth headers to be sent
+   cross-origin. Not used by this example, but required if you later
+   add authentication.
+4. `allow_methods=["*"]` / `allow_headers=["*"]` — allow every HTTP
+   method and header, instead of listing `GET`, `POST`,
+   `Content-Type`, etc. individually.
+
 Nothing else changes — CORS doesn't care what's behind the routes it's
 protecting.
 
@@ -39,6 +56,23 @@ const [editingId, setEditingId] = useState(null); // which row's id is being edi
 actually holds now — a database ID, not a position in an array. `items`
 also changed shape: each entry is `{ id, value }` instead of a plain
 string.
+
+## Line by line
+
+1. `const [items, setItems] = useState([]);` — same state as the array
+   version, but now holding `{ id, value }` objects instead of plain
+   strings, since that's the shape every MySQL-backed route returns.
+2. `const [editingId, setEditingId] = useState(null);` — the array
+   version's `editingIndex`/`setEditingIndex`, renamed throughout this
+   topic to `editingId`/`setEditingId` to match what it stores: a
+   database ID rather than a position in the array.
+3. Every place the array version compared `editingIndex === index` or
+   passed a `.map()` loop index around, this topic instead compares
+   `editingId === item.id` and passes `item.id` — reading the
+   identifier off the row object itself, not off its position in the
+   list.
+
+## Pages in this topic
 
 1. [GET](/en/docs/mysql-react/get) — loading rows, and reaching one by ID.
 2. [POST](/en/docs/mysql-react/post) — the add form (unchanged).

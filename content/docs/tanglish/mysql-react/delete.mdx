@@ -17,7 +17,11 @@ def delete_item(item_id: int, db: Session = Depends(get_db)):
 
 ## Line by line
 
-1. **Row-ah first-a look up pannunga** — `db.get(ItemModel, item_id)`
+1. `db: Session = Depends(get_db)` — indha topic-oda vera ella route
+   mathiri same `get_db()` dependency: FastAPI route run aaguradhukku
+   munnadi pudhu session-ah kudukkum, apparam automatic-a close
+   pannum.
+2. **Row-ah first-a look up pannunga** — `db.get(ItemModel, item_id)`
    andha ID irundha `ItemModel` object return pannum, illa-na `None`
    return pannum.
    - `if row is None: raise HTTPException(status_code=404, ...)`
@@ -26,9 +30,14 @@ def delete_item(item_id: int, db: Session = Depends(get_db)):
      adhoda sontha error-ah raise pannum, edhuvum delete pannama —
      adha FastAPI generic `500 Internal Server Error`-a maathidum,
      missing ID-ku venum clean `404`-ku pathila.
-2. **`db.delete(row)` apparam `db.commit()`** — deletion-ah stage
-   pannum, apparam write pannum.
-3. **Array topic-ku vidhyasam-a**, inga oru row-ah delete panna,
+3. **`db.delete(row)`** andha already-loaded object-ah session-la
+   delete panna mark pannum — POST route-la `db.add()` mathiri, idhu
+   mattum stage pannudhu; MySQL-la row-ku innum edhuvum real-a
+   nadakala.
+4. **`db.commit()`** dhan real `DELETE FROM ... WHERE id = ...`
+   statement-ah anuppi commit pannum — indha line dhan row-ah real-a
+   remove pannudhu.
+5. **Array topic-ku vidhyasam-a**, inga oru row-ah delete panna,
    vera edhavadhu row-oda `id` shift aagadhu — MySQL-oda
    auto-increment `id` oru stable identity dhan, list-la position
    illa.

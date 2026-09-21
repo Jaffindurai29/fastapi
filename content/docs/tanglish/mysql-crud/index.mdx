@@ -62,6 +62,30 @@ engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 ```
 
+## Line by line: connection
+
+1. `os.getenv("DATABASE_URL", f"mysql+pymysql://...")` — `DATABASE_URL`
+   environment variable set-a irundha adha read pannum (mela irukra
+   SQLite override maadhiri), illa-na individual `MYSQL_*`
+   variables-la irundhu MySQL connection string build pannum.
+   `mysql+pymysql://` nu solradhu, SQLAlchemy MySQL-oda pesa yentha
+   driver — `pymysql` — use pannanum-nu therivikkudhu.
+2. `create_engine(DATABASE_URL, pool_pre_ping=True)` — `engine`
+   nu solradhu indha database-ku SQLAlchemy-oda connection factory;
+   odane connect aagadhu, oru session real-a venumnu kekkumbodhu dhan
+   connect aagum. `pool_pre_ping=True` vachu, pool-la irukra oru
+   connection-ah reuse panna munnadi light-a ping pannum, so MySQL
+   silent-a drop pannitta connection (idle-a irundhu) replace aagum,
+   apparam confusing error varadhu.
+3. `sessionmaker(autocommit=False, autoflush=False, bind=engine)` —
+   indha engine-oda bind aana `Session` objects create panna oru
+   factory. `autocommit=False` na, neenga explicit-a `db.commit()`
+   call pannalaam varaikkum edhuvum database-ku write aagadhu;
+   `autoflush=False` na, pending changes ovoru query-kum munnadi
+   silent-a database-ku poogadhu, flush illa commit pannumbodhu
+   mattum dhan — rendum sethu, exact-a eppo SQL run aagum-nu ovoru
+   route-um full control vachurukkum.
+
 **Table, Python class-a** — real, stable, auto-incrementing `id`-oda,
 array topic-oda position-based index illa:
 
@@ -73,6 +97,25 @@ class ItemModel(Base):
 
 Base.metadata.create_all(bind=engine)
 ```
+
+## Line by line: table
+
+1. `class ItemModel(Base):` — oru ORM model declare pannudhu. `Base`-la
+   irundhu inherit pannuradhu dhan (SQLAlchemy-oda declarative base)
+   indha class-ah plain Python class-a irukradhukku pathila, real
+   database table-ku map panna vaikkudhu.
+2. `__tablename__ = "items"` — MySQL-la create aagra actual table
+   name.
+3. `id = Column(Integer, primary_key=True, autoincrement=True)` —
+   real, stable, auto-incrementing integer primary key, ovoru
+   insert-um MySQL-ah dhan assign pannum.
+4. `value = Column(String(255), nullable=False)` — required
+   `VARCHAR(255)` column; `nullable=False` na, idha leave out panni
+   insert pannina MySQL reject pannidum.
+5. `Base.metadata.create_all(bind=engine)` — `Base`-la irundhu
+   inherit panra ovoru model-kum, table already illainaa create
+   pannum. App start aaguna ovoru thadavayum call panna safe —
+   table already irundha idhu no-op.
 
 **Ovoru request-kum oru session, `Depends` vachi** — munnadi topics-la
 paartha same dependency-injection pattern dhan, ippo real database
@@ -86,6 +129,18 @@ def get_db():
     finally:
         db.close()
 ```
+
+## Line by line: dependency
+
+1. `db = SessionLocal()` — oru pudhu database session open pannum.
+2. `yield db` — andha session-ah `db: Session = Depends(get_db)` nu
+   declare panna edhavadhu route-kum kudukkum; andha route function
+   mudiyara varaikkum execution inga pause aagum.
+3. `finally: db.close()` — route return aana appuram illa raise aana
+   appuram run aagum, so session (adhoda connection) eppovum pool-ku
+   thirumba release aagum, success-a irundhalum fail aana.
+
+## Indha topic-la irukra pages
 
 1. [GET](/tanglish/docs/mysql-crud/get) — ovoru row-um list pannunga, illana ID vachi oru row-ah reach pannunga.
 2. [POST](/tanglish/docs/mysql-crud/post) — pudhu row insert pannunga.

@@ -24,7 +24,11 @@ def update_item(item_id: int, patch: ItemPatch, db: Session = Depends(get_db)):
 
 ## Line by line
 
-1. **Row-ah first-a check pannunga** — `db.get(ItemModel, item_id)`
+1. `db: Session = Depends(get_db)` — indha topic-oda vera ella route
+   mathiri same session-per-request pattern: FastAPI adha `get_db()`
+   vachi function run aaguradhukku munnadi kudukkum, function mudinja
+   appuram automatic-a close pannum, error vandhalum sari.
+2. **Row-ah first-a check pannunga** — `db.get(ItemModel, item_id)`
    andha ID irundha `ItemModel` object return pannum, illa-na `None`
    return pannum.
    - `if row is None: raise HTTPException(status_code=404, ...)`
@@ -34,11 +38,24 @@ def update_item(item_id: int, patch: ItemPatch, db: Session = Depends(get_db)):
      'NoneType' object has no attribute 'value'`-ah raise pannum —
      FastAPI adha proper `404`-ku pathila generic `500 Internal Server
      Error`-a maathidum.
-2. **`ItemPatch.value` optional** — PUT-oda `ItemRequest`-la
+3. **`ItemPatch.value` optional** — PUT-oda `ItemRequest`-la
    `value` required, idhu vidhyasam.
-3. **`if patch.value is not None: row.value = patch.value`** —
+4. **`if patch.value is not None: row.value = patch.value`** —
    client real-a oru value anuppina mattum dhan row-ah update
-   pannum.
+   pannum. [PUT](/tanglish/docs/mysql-react/put)-la mathiri, andha
+   assignment mattum podhum SQLAlchemy notice pannradhukku: `row`
+   indha same session-la munnadi `db.get(...)`-la irundhu vandhadhu,
+   so adhoda "unit of work" already track pannikittu irukku —
+   change-ah register panna `db.add(row)` venaam.
+5. **`db.commit()`** — edhavadhu tracked change-ah `UPDATE`
+   statement-a flush pannum, transaction-ah commit pannum. Client
+   `{}` anuppi, `patch.value` `None`-a irundha, edhuvum assign
+   aagalaye, so indha commit-ku pudhusa edhuvum write panna illa —
+   harmless no-op.
+6. **`db.refresh(row)`** — apparam database-la irundhu `row`-ah
+   thirumba query pannudhu, so return pannura `{"id": row.id, "value":
+   row.value}` MySQL-la ippo enna irukko adha exact-a reflect pannum,
+   indha request edhavadhu maathi irundhalum illainalum.
 
 ## Frontend
 
@@ -61,10 +78,20 @@ HTTP method-ah decide pannum. Array version-ku vidhyasam mattum,
 
 ## Line by line
 
-1. Array version-oda same relationship: oru shared `saveEdit`
-   function, oru string argument HTTP method-ah decide pannum.
-2. Array version-ku vidhyasam mattum, `index`-ku pathila `item.id`
-   first argument-a irukradhu.
+1. Inga kooda thani `savePatch` function edhuvum illa — `saveEdit`
+   already `method`-ah parameter-a edukkum, array version mathiri dhan.
+2. **"Save (PATCH)"** button `saveEdit(item.id, "PATCH")` call
+   pannum — same function, same request body, HTTP method string
+   mattum vidhyasam. Array version-ku vidhyasam, `item.id`-ah row
+   object-la irundhu neraa edukkuradhu, `.map()` loop index-ah anuppa
+   pathila.
+3. Andha oru string (`"PUT"` vs `"PATCH"`) dhan rendu button-ku
+   idaiyila real vidhyasam — component, request body, `saveEdit`-oda
+   `fetch` call ellame rendu pakkamum same dhan.
+4. Rendu button-um edit mode-la side-by-side irukkum, **"Cancel"**
+   button-oda pakkathula — save pannama `editingId`-ah `null`-ku
+   reset pannum — array version-oda same layout dhan, `editingIndex`,
+   `editingId`-a rename aachu.
 
 Adutha step: [DELETE](/tanglish/docs/mysql-react/delete) — oru row-ah
 remove pannurathu, mattrum IDs yeandhukku shift aagadhu.

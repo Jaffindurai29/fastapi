@@ -6,14 +6,56 @@ description: Replacing a row's value entirely, by ID.
 ## The code
 
 ```python title="main.py"
+import os
+
 from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel
-from sqlalchemy.orm import Session
+from sqlalchemy import Column, Integer, String, create_engine
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
+MYSQL_USER = os.getenv("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
+
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
+)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+class ItemModel(Base):
+    __tablename__ = "crud_put_items"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    value = Column(String(255), nullable=False)
+
+
+Base.metadata.create_all(bind=engine)
+
+with SessionLocal() as db:
+    if db.query(ItemModel).count() == 0:
+        db.add_all([ItemModel(value="first"), ItemModel(value="second")])
+        db.commit()
 
 app = FastAPI()
 
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
 class ItemRequest(BaseModel):
     value: str
+
 
 @app.put("/items/{item_id}")
 def replace_item(item_id: int, item: ItemRequest, db: Session = Depends(get_db)):
@@ -28,7 +70,17 @@ def replace_item(item_id: int, item: ItemRequest, db: Session = Depends(get_db))
 
 ## Line by line
 
-1. **Look the row up first** — `db.get(ItemModel, item_id)` is
+The `MYSQL_*`/`DATABASE_URL` setup, `engine`/`SessionLocal`/`Base`, the
+`ItemModel` table, `Base.metadata.create_all(...)`, and the seed block above
+are the same shared pieces every page in this topic uses — see the
+[index page](/en/docs/mysql-crud) for those explained line by line. Below
+covers what's specific to this page.
+
+1. `db: Session = Depends(get_db)` — same dependency injection as
+   [GET](/en/docs/mysql-crud/get): FastAPI opens a fresh session via
+   `get_db()` before this route runs and closes it automatically
+   afterward, whether the route succeeds or raises.
+2. **Look the row up first** — `db.get(ItemModel, item_id)` is
    SQLAlchemy's fetch-by-primary-key shortcut: it returns the
    `ItemModel` object if that ID exists, or `None` if it doesn't,
    without raising an exception either way.
@@ -40,12 +92,20 @@ def replace_item(item_id: int, item: ItemRequest, db: Session = Depends(get_db))
      `AttributeError: 'NoneType' object has no attribute 'value'` —
      which FastAPI turns into a generic `500 Internal Server Error`
      instead of the `404` a missing ID should produce.
-2. **`row.value = item.value`** — looks like a plain attribute
-   assignment because it is one. SQLAlchemy's ORM tracks the change
-   automatically; nothing needs to be re-added to the session.
-3. **`db.commit()`** writes the change; **`db.refresh(row)`** makes sure
-   `row` reflects exactly what's now in the database before it's
-   returned.
+3. **`row.value = item.value`** looks like a plain attribute assignment
+   because it is one — but since `row` came from `db.get(...)` earlier
+   in this same session, SQLAlchemy's "unit of work" is already
+   tracking that object, so the change is picked up automatically.
+   - Nothing needs to be re-added to the session (no `db.add(row)`
+     here) — that's the real difference from POST, where `row` is a
+     brand-new object the session doesn't know about yet.
+4. **`db.commit()`** is what turns that tracked in-memory change into
+   an actual `UPDATE ... SET value = ... WHERE id = ...` statement sent
+   to MySQL — nothing reaches the database before this line runs.
+5. **`db.refresh(row)`** re-queries `row` from the database afterward,
+   so the returned `{"id": row.id, "value": row.value}` reflects
+   exactly what MySQL now has, rather than just echoing back the input
+   the client already sent.
 
 ## Try it
 

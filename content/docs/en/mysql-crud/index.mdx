@@ -61,6 +61,28 @@ engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 ```
 
+## Line by line: the connection
+
+1. `os.getenv("DATABASE_URL", f"mysql+pymysql://...")` — reads the
+   `DATABASE_URL` environment variable if it's set (e.g. the SQLite
+   override above), otherwise builds a MySQL connection string from the
+   individual `MYSQL_*` variables. `mysql+pymysql://` tells SQLAlchemy
+   which driver — `pymysql` — to actually speak to MySQL with.
+2. `create_engine(DATABASE_URL, pool_pre_ping=True)` — the `engine` is
+   SQLAlchemy's connection factory for this database; it doesn't open a
+   connection immediately, only once a session actually needs one.
+   `pool_pre_ping=True` makes it test a pooled connection with a
+   lightweight ping before reusing it, so a connection MySQL silently
+   dropped (after sitting idle, for example) gets replaced instead of
+   failing with a confusing error later.
+3. `sessionmaker(autocommit=False, autoflush=False, bind=engine)` — a
+   factory for creating `Session` objects bound to this engine.
+   `autocommit=False` means nothing is written to the database until
+   you explicitly call `db.commit()`; `autoflush=False` means pending
+   changes aren't silently sent to the database before every query,
+   only when you flush or commit — together they give every route full
+   control over exactly when SQL actually runs.
+
 **The table, as a Python class** — with a real, stable, auto-incrementing
 `id`, unlike the array topic's position-based index:
 
@@ -73,6 +95,23 @@ class ItemModel(Base):
 Base.metadata.create_all(bind=engine)
 ```
 
+## Line by line: the table
+
+1. `class ItemModel(Base):` — declares an ORM model. Inheriting from
+   `Base` (SQLAlchemy's declarative base) is what makes this class map
+   to a real database table instead of being a plain Python class.
+2. `__tablename__ = "items"` — the actual table name created in MySQL.
+3. `id = Column(Integer, primary_key=True, autoincrement=True)` — a
+   real, stable, auto-incrementing integer primary key, assigned by
+   MySQL itself on every insert.
+4. `value = Column(String(255), nullable=False)` — a required
+   `VARCHAR(255)` column; `nullable=False` means MySQL rejects any
+   insert that leaves it out.
+5. `Base.metadata.create_all(bind=engine)` — creates the table in the
+   database if it doesn't already exist, for every model that inherits
+   from `Base`. Safe to call every time the app starts — it's a no-op
+   once the table is already there.
+
 **A session per request, via `Depends`** — the same dependency-injection
 pattern from earlier topics, now managing a real database connection:
 
@@ -84,6 +123,18 @@ def get_db():
     finally:
         db.close()
 ```
+
+## Line by line: the dependency
+
+1. `db = SessionLocal()` — opens one fresh database session.
+2. `yield db` — hands that session to whichever route declares
+   `db: Session = Depends(get_db)`; execution pauses right here until
+   that route function finishes running.
+3. `finally: db.close()` — runs after the route returns or raises,
+   guaranteeing the session (and its underlying connection) is always
+   released back to the pool, success or failure.
+
+## Pages in this topic
 
 1. [GET](/en/docs/mysql-crud/get) — list every row, or reach one by ID.
 2. [POST](/en/docs/mysql-crud/post) — insert a new row.

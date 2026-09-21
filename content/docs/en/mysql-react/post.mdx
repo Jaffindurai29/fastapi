@@ -21,13 +21,22 @@ def create_item(item: ItemRequest, db: Session = Depends(get_db)):
 
 ## Line by line
 
-1. `row = ItemModel(value=item.value)` — builds a new ORM object in
+1. `db: Session = Depends(get_db)` — same dependency injection as
+   [GET](/en/docs/mysql-react/get): FastAPI runs `get_db()` up to its
+   `yield` before this route body executes, hands over the freshly
+   created session as `db`, and closes that session automatically once
+   this route finishes, success or failure.
+2. `row = ItemModel(value=item.value)` — builds a new ORM object in
    memory; nothing is written to the database yet.
-2. `db.add(row)` stages it for insertion; `db.commit()` actually writes
-   it — this is the point where MySQL assigns the real
-   auto-incrementing `id`.
-3. `db.refresh(row)` pulls that generated `id` back into `row` from
-   the database, so the function can return it.
+3. `db.add(row)` — only stages the new object in the session's pending
+   state; nothing is sent to MySQL yet.
+4. `db.commit()` — flushes that pending `INSERT` and commits the
+   transaction. This is the moment MySQL actually assigns the
+   auto-increment `id`.
+5. `db.refresh(row)` — re-queries `row` from the database so `row.id`
+   reflects the real generated value. Skip it and `row.id` could still
+   be stale or `None`, since SQLAlchemy doesn't know the
+   database-generated value without asking for it back.
 
 ## Frontend
 
@@ -62,11 +71,25 @@ happened on the backend, not here:** the database now assigns a real
 
 ## Line by line
 
-1. `addItem` is byte-for-byte identical to the array version — same
-   `{ value }` body shape, same `fetch` call.
-2. The only real change happened on the backend: the database assigns
-   a real `id`, instead of the frontend assuming the new item landed
-   at `items.length`.
+1. `addItem` is byte-for-byte identical to the array version's
+   function — same `event.preventDefault()`, same empty-value guard,
+   same `fetch` call and body shape. None of this code deals with item
+   identity (`index` vs `id`) at all, which is exactly why nothing here
+   needed to change.
+2. `event.preventDefault()` still stops the browser's default
+   full-page reload on submit — unrelated to MySQL, unaffected by
+   swapping the backend.
+3. `if (value.trim() === "") return;` still skips the request entirely
+   for an empty or whitespace-only input.
+4. On success, `setValue("")` clears the input, then `await
+   loadItems()` refetches the full list from the backend — this is
+   actually where the new row's `id` shows up on the frontend: it
+   arrives through this refetch, not from anything the frontend
+   computed. Contrast with the array version, where the frontend could
+   already guess the new item's index would be `items.length`.
+5. The one real change lives entirely on the backend: MySQL assigns a
+   real auto-incrementing `id` to the new row, instead of the frontend
+   assuming a computed array position.
 
 Next: [PUT](/en/docs/mysql-react/put) — editing a row, addressed by ID.
 

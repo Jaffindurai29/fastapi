@@ -22,11 +22,37 @@ def get_item(item_id: int, db: Session = Depends(get_db)):
 
 ## Line by line
 
-1. `db: Session = Depends(get_db)` — indha route run aaguradhukku
-   munnadi FastAPI `get_db()`-ah call pannum, session open pannum,
-   apparam automatic-a close pannum, route-la error vandhalum.
-2. `db.query(ItemModel).order_by(ItemModel.id).all()` — table-la
-   irukra ovoru row-um, predictable order-la.
+1. `db: Session = Depends(get_db)` — idhu FastAPI-oda dependency
+   injection dhan: route body run aaguradhukku munnadi FastAPI thaan
+   `get_db()`-ah call pannum.
+   - `get_db` oru generator function — adhula `yield` irukku
+     paarunga — so FastAPI adha andha `yield` varaikkum run pannum,
+     adhu yield panra value (pudhusa create panna `SessionLocal()`
+     instance) dhan inga `db` parameter-ku bind aagum.
+   - Route return aana appuram (illa raise pannalum), FastAPI
+     `get_db()`-ah `yield`-ku apparam resume pannum, `finally:
+     db.close()`-ah run pannum — so session eppovum close aagum,
+     success-a irundhalum failure-a irundhalum, indha route-ku thani
+     `try`/`finally` venaam.
+   - `Depends` illama irundha, ovoru route-um thanoda session-ah
+     manually open pannanum, close pannanum-nu ninaichukanum —
+     exception vandha appuram `close()` marandhuduna, database
+     connection quietly leak aagidum.
+2. `db.query(ItemModel).order_by(ItemModel.id).all()` — moonu thani
+   steps chain aagi irukku, kadaisi step varaikkum MySQL-ku edhuvum
+   pogadhu:
+   - `db.query(ItemModel)` — `ItemModel` map panra table-ku scoped-a
+     oru SELECT build pannum.
+   - `.order_by(ItemModel.id)` — `ORDER BY id` add pannum, so rows
+     stable-a, predictable order-la varum — idha skip pannina, MySQL
+     rows-ah edho oru order-la return pannalam, request-ku request
+     shuffle aagalam.
+   - `.all()` dhan real-a query-ah execute pannum, match aana ella
+     row-um `ItemModel` objects list-a memory-ku load pannum.
+   - Idha suthi irukra `{"id": row.id, "value": row.value}`
+     comprehension, ovoru ORM object-ayum plain dict-a convert pannum —
+     FastAPI-oda JSON encoder plain Python types-ah dhan serialize
+     pannum, `ItemModel` instance-ah neraa pannadhu.
 3. `db.get(ItemModel, item_id)` — SQLAlchemy-oda "primary key vachi
    fetch pannu" shortcut. Andha ID-oda row irundha `ItemModel` object
    return pannum, illa-na `None` return pannum — miss aana exception

@@ -6,14 +6,56 @@ description: ID vachi oru row-oda value-ah full-a replace pannurathu.
 ## Code
 
 ```python title="main.py"
+import os
+
 from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel
-from sqlalchemy.orm import Session
+from sqlalchemy import Column, Integer, String, create_engine
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
+MYSQL_USER = os.getenv("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
+
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
+)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+class ItemModel(Base):
+    __tablename__ = "crud_put_items"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    value = Column(String(255), nullable=False)
+
+
+Base.metadata.create_all(bind=engine)
+
+with SessionLocal() as db:
+    if db.query(ItemModel).count() == 0:
+        db.add_all([ItemModel(value="first"), ItemModel(value="second")])
+        db.commit()
 
 app = FastAPI()
 
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
 class ItemRequest(BaseModel):
     value: str
+
 
 @app.put("/items/{item_id}")
 def replace_item(item_id: int, item: ItemRequest, db: Session = Depends(get_db)):
@@ -28,7 +70,19 @@ def replace_item(item_id: int, item: ItemRequest, db: Session = Depends(get_db))
 
 ## Line by line
 
-1. **Row-ah first-a look up pannunga** — `db.get(ItemModel, item_id)`
+Mela irukra `MYSQL_*`/`DATABASE_URL` setup, `engine`/`SessionLocal`/`Base`,
+`ItemModel` table, `Base.metadata.create_all(...)`, mattrum seed block —
+indha topic-la irukra ella page-um share panra same pieces dhan — adha
+line-by-line explain panradha [index page](/tanglish/docs/mysql-crud)-la
+paarunga. Keezha, indha page-ku specific-a enna irukko adha mattum
+paarpom.
+
+1. `db: Session = Depends(get_db)` — [GET](/tanglish/docs/mysql-crud/get)-la
+   paartha same dependency injection dhan: FastAPI `get_db()` vachi
+   pudhu session-ah indha route run aaguradhukku munnadi open pannum,
+   apparam automatic-a close pannum, route success-a irundhalum
+   raise pannalum.
+2. **Row-ah first-a look up pannunga** — `db.get(ItemModel, item_id)`
    SQLAlchemy-oda primary-key-vachi fetch shortcut: andha ID irundha
    `ItemModel` object return pannum, illa-na `None` return pannum,
    rendu case-layum exception edhuvum raise pannama.
@@ -40,12 +94,22 @@ def replace_item(item_id: int, item: ItemRequest, db: Session = Depends(get_db))
      object has no attribute 'value'`-ah raise pannum — adha FastAPI
      generic `500 Internal Server Error`-a maathidum, missing ID-ku
      venum `404`-ku pathila.
-2. **`row.value = item.value`** — plain attribute assignment mathiri
-   kaamikkum, idhu dhan adhu. SQLAlchemy-oda ORM change-ah automatic-a
-   track pannikum; session-ku thirumba edhuvum add pannanum illa.
-3. **`db.commit()`** change-ah write pannum; **`db.refresh(row)`**
-   `row` database-la ippo enna irukko adha exact-a reflect pannum-nu
-   confirm pannum, return pannuradhukku munnadi.
+3. **`row.value = item.value`** plain attribute assignment mathiri
+   kaamikkum, idhu dhan adhu — aana `row`, indha same session-la
+   munnadi `db.get(...)`-la irundhu vandhadhu-nala, SQLAlchemy-oda
+   "unit of work" andha object-ah already track pannikittu irukku, so
+   change-ah automatic-a pick up pannikum.
+   - Session-ku thirumba edhuvum add pannanum illa (`db.add(row)`
+     inga venaam) — POST-la irundhu real vidhyasam idhu dhan, POST-la
+     `row` pudhu object, session-ku andha object gurichi theriyaadhu.
+4. **`db.commit()`** dhan andha tracked in-memory change-ah real
+   `UPDATE ... SET value = ... WHERE id = ...` statement-a maathi
+   MySQL-ku anuppum — indha line run aaguradhukku munnadi database-ku
+   edhuvum pogadhu.
+5. **`db.refresh(row)`** apparam database-la irundhu `row`-ah
+   thirumba query pannudhu, so return pannura `{"id": row.id, "value":
+   row.value}` MySQL-la ippo enna irukko adha exact-a reflect pannum —
+   client anuppina input-ah mattum echo pannradhukku pathila.
 
 ## Try it
 

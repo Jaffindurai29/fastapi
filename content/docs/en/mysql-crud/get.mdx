@@ -6,16 +6,61 @@ description: Reading rows from MySQL — the whole table, and one row by ID.
 ## The code
 
 ```python title="main.py"
+import os
+
 from fastapi import Depends, FastAPI, HTTPException
-from sqlalchemy.orm import Session
-# ...engine/Base/ItemModel/get_db from the setup on the index page
+from sqlalchemy import Column, Integer, String, create_engine
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
+MYSQL_USER = os.getenv("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
+
+# Set DATABASE_URL directly to override everything above (e.g. to point
+# at SQLite for a quick local test with no MySQL server at all).
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
+)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+class ItemModel(Base):
+    __tablename__ = "crud_get_items"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    value = Column(String(255), nullable=False)
+
+
+Base.metadata.create_all(bind=engine)
+
+# Seed two rows once, so this is testable on its own. Only runs if the
+# table is currently empty, so restarting the app doesn't keep adding more.
+with SessionLocal() as db:
+    if db.query(ItemModel).count() == 0:
+        db.add_all([ItemModel(value="first"), ItemModel(value="second")])
+        db.commit()
 
 app = FastAPI()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
 
 @app.get("/items")
 def list_items(db: Session = Depends(get_db)):
     rows = db.query(ItemModel).order_by(ItemModel.id).all()
     return [{"id": row.id, "value": row.value} for row in rows]
+
 
 @app.get("/items/{item_id}")
 def get_item(item_id: int, db: Session = Depends(get_db)):
@@ -27,11 +72,39 @@ def get_item(item_id: int, db: Session = Depends(get_db)):
 
 ## Line by line
 
-1. `db: Session = Depends(get_db)` — FastAPI calls `get_db()` before
-   this route runs, opening a session, and closes it afterward
-   automatically, even if the route raises an error.
-2. `db.query(ItemModel).order_by(ItemModel.id).all()` — every row in
-   the table, in a predictable order.
+The `MYSQL_*`/`DATABASE_URL` setup, `engine`/`SessionLocal`/`Base`, the
+`ItemModel` table, `Base.metadata.create_all(...)`, and the seed block above
+are the same shared pieces every page in this topic uses — see the
+[index page](/en/docs/mysql-crud) for those explained line by line. Below
+covers what's specific to this page.
+
+1. `db: Session = Depends(get_db)` — this is FastAPI's dependency
+   injection at work: FastAPI calls `get_db()` itself before the route
+   body runs.
+   - `get_db` is a generator function — notice the `yield` inside it —
+     so FastAPI runs it up to that `yield`, and the value it yields (a
+     fresh `SessionLocal()` instance) becomes whatever gets bound to
+     the `db` parameter here.
+   - Once the route returns (or raises), FastAPI resumes `get_db()`
+     right after the `yield`, running its `finally: db.close()` — so
+     the session always gets closed, success or failure, without this
+     route needing its own `try`/`finally`.
+   - Without `Depends`, every route would have to open and remember to
+     close its own session by hand — and a forgotten `close()` after an
+     exception quietly leaks a database connection.
+2. `db.query(ItemModel).order_by(ItemModel.id).all()` — three chained
+   steps, and nothing reaches MySQL until the last one:
+   - `db.query(ItemModel)` builds a SELECT scoped to whatever table
+     `ItemModel` maps to.
+   - `.order_by(ItemModel.id)` adds `ORDER BY id`, so rows come back in
+     a stable, predictable order — skip it and MySQL is free to return
+     rows in any order it likes, which could shuffle between requests.
+   - `.all()` is what actually executes the query and loads every
+     matching row into memory as a list of `ItemModel` objects.
+   - The `{"id": row.id, "value": row.value}` comprehension around it
+     converts each ORM object into a plain dict — FastAPI's JSON
+     encoder can serialize plain Python types, not an `ItemModel`
+     instance directly.
 3. `db.get(ItemModel, item_id)` — SQLAlchemy's shortcut for "fetch by
    primary key." It returns the matching `ItemModel` object if a row
    with that ID exists, or plain `None` if it doesn't — it does **not**

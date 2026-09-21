@@ -24,7 +24,11 @@ def update_item(item_id: int, patch: ItemPatch, db: Session = Depends(get_db)):
 
 ## Line by line
 
-1. **Check the row exists first** — `db.get(ItemModel, item_id)`
+1. `db: Session = Depends(get_db)` — same session-per-request pattern
+   as every other route in this topic: FastAPI supplies it via
+   `get_db()` before the function runs and closes it automatically once
+   the function is done, even on an error.
+2. **Check the row exists first** — `db.get(ItemModel, item_id)`
    returns the `ItemModel` object if that ID exists, or `None` if it
    doesn't.
    - `if row is None: raise HTTPException(status_code=404, ...)` sends
@@ -33,10 +37,22 @@ def update_item(item_id: int, patch: ItemPatch, db: Session = Depends(get_db)):
      would raise `AttributeError: 'NoneType' object has no attribute
      'value'` on a missing ID — FastAPI turns that into a generic `500
      Internal Server Error` instead of a proper `404`.
-2. **`ItemPatch.value` is optional** — unlike PUT's `ItemRequest`,
+3. **`ItemPatch.value` is optional** — unlike PUT's `ItemRequest`,
    where `value` is required.
-3. **`if patch.value is not None: row.value = patch.value`** — only
-   updates the row if the client actually sent a value.
+4. **`if patch.value is not None: row.value = patch.value`** — only
+   updates the row if the client actually sent a value. Just like in
+   [PUT](/en/docs/mysql-react/put), that plain assignment alone is
+   enough for SQLAlchemy to notice: `row` came from `db.get(...)`
+   earlier in this same session, so its "unit of work" is already
+   tracking it, and no `db.add(row)` is needed to register the change.
+5. **`db.commit()`** flushes that tracked change (if any) as an
+   `UPDATE` statement and commits the transaction. If the client sent
+   `{}` and `patch.value` stayed `None`, nothing was ever assigned, so
+   this commit has nothing new to write — a harmless no-op.
+6. **`db.refresh(row)`** re-queries `row` from the database afterward,
+   so the returned `{"id": row.id, "value": row.value}` reflects
+   exactly what's in MySQL right now, whether or not this particular
+   request actually changed anything.
 
 ## Frontend
 
@@ -59,10 +75,22 @@ HTTP method. The only thing different here versus the array version is
 
 ## Line by line
 
-1. Same relationship as the array version: one shared `saveEdit`
-   function, one string argument deciding the HTTP method.
-2. The only change versus the array version is `item.id` replacing
-   `index` as the first argument.
+1. No separate `savePatch` function exists here either — `saveEdit`
+   already takes `method` as a parameter, exactly like the array
+   version.
+2. The **"Save (PATCH)"** button calls `saveEdit(item.id, "PATCH")` —
+   same function, same request body, only the HTTP method string
+   differs. The one difference from the array version is reading
+   `item.id` straight off the row object, instead of passing a
+   `.map()` loop index.
+3. That one string (`"PUT"` vs `"PATCH"`) is still the only real
+   difference between the two buttons — the component, the request
+   body, and the `fetch` call inside `saveEdit` are identical either
+   way.
+4. Both buttons sit side by side in edit mode, next to a **"Cancel"**
+   button that just sets `editingId` back to `null` without saving —
+   same layout as the array version, `editingIndex` renamed to
+   `editingId`.
 
 Next: [DELETE](/en/docs/mysql-react/delete) — removing a row, and why
 IDs don't shift.

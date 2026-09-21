@@ -6,16 +6,61 @@ description: MySQL-la irundhu rows padikkurathu — full table, mattrum ID vachi
 ## Code
 
 ```python title="main.py"
+import os
+
 from fastapi import Depends, FastAPI, HTTPException
-from sqlalchemy.orm import Session
-# ...engine/Base/ItemModel/get_db, index page-la irukra setup-la irundhu
+from sqlalchemy import Column, Integer, String, create_engine
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
+MYSQL_USER = os.getenv("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
+
+# Set DATABASE_URL directly to override everything above (e.g. to point
+# at SQLite for a quick local test with no MySQL server at all).
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
+)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+class ItemModel(Base):
+    __tablename__ = "crud_get_items"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    value = Column(String(255), nullable=False)
+
+
+Base.metadata.create_all(bind=engine)
+
+# Seed two rows once, so this is testable on its own. Only runs if the
+# table is currently empty, so restarting the app doesn't keep adding more.
+with SessionLocal() as db:
+    if db.query(ItemModel).count() == 0:
+        db.add_all([ItemModel(value="first"), ItemModel(value="second")])
+        db.commit()
 
 app = FastAPI()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
 
 @app.get("/items")
 def list_items(db: Session = Depends(get_db)):
     rows = db.query(ItemModel).order_by(ItemModel.id).all()
     return [{"id": row.id, "value": row.value} for row in rows]
+
 
 @app.get("/items/{item_id}")
 def get_item(item_id: int, db: Session = Depends(get_db)):
@@ -27,11 +72,44 @@ def get_item(item_id: int, db: Session = Depends(get_db)):
 
 ## Line by line
 
-1. `db: Session = Depends(get_db)` — indha route run aaguradhukku
-   munnadi FastAPI `get_db()`-ah call pannum, session open pannum,
-   apparam automatic-a close pannum, route-la error vandhalum.
-2. `db.query(ItemModel).order_by(ItemModel.id).all()` — table-la irukra
-   ovoru row-um, predictable order-la.
+Mela irukra `MYSQL_*`/`DATABASE_URL` setup, `engine`/`SessionLocal`/`Base`,
+`ItemModel` table, `Base.metadata.create_all(...)`, mattrum seed block —
+indha topic-la irukra ella page-um share panra same pieces dhan — adha
+line-by-line explain panradha [index page](/tanglish/docs/mysql-crud)-la
+paarunga. Keezha, indha page-ku specific-a enna irukko adha mattum
+paarpom.
+
+1. `db: Session = Depends(get_db)` — idhu FastAPI-oda dependency
+   injection dhan: route body run aaguradhukku munnadi FastAPI thaan
+   `get_db()`-ah call pannum.
+   - `get_db` oru generator function — adhula `yield` irukku
+     paarunga — so FastAPI adha andha `yield` varaikkum run pannum,
+     adhu yield panra value (pudhusa create panna `SessionLocal()`
+     instance) dhan inga `db` parameter-ku bind aagum.
+   - Route return aana appuram (illa raise pannalum), FastAPI
+     `get_db()`-ah `yield`-ku apparam resume pannum, `finally:
+     db.close()`-ah run pannum — so session eppovum close aagum,
+     success-a irundhalum failure-a irundhalum, indha route-ku thani
+     `try`/`finally` venaam.
+   - `Depends` illama irundha, ovoru route-um thanoda session-ah
+     manually open pannanum, close pannanum-nu ninaichukanum —
+     exception vandha appuram `close()` marandhuduna, database
+     connection quietly leak aagidum.
+2. `db.query(ItemModel).order_by(ItemModel.id).all()` — moonu thani
+   steps chain aagi irukku, kadaisi step varaikkum MySQL-ku edhuvum
+   pogadhu:
+   - `db.query(ItemModel)` — `ItemModel` map panra table-ku scoped-a
+     oru SELECT build pannum.
+   - `.order_by(ItemModel.id)` — `ORDER BY id` add pannum, so rows
+     stable-a, predictable order-la varum — idha skip pannina, MySQL
+     rows-ah edho oru order-la return pannalam, request-ku request
+     shuffle aagalam.
+   - `.all()` dhan real-a query-ah execute pannum, match aana ella
+     row-um `ItemModel` objects list-a memory-ku load pannum.
+   - Idha suthi irukra `{"id": row.id, "value": row.value}`
+     comprehension, ovoru ORM object-ayum plain dict-a convert pannum —
+     FastAPI-oda JSON encoder plain Python types-ah dhan serialize
+     pannum, `ItemModel` instance-ah neraa pannadhu.
 3. `db.get(ItemModel, item_id)` — SQLAlchemy-oda "primary key vachi
    fetch pannu" shortcut. Andha ID-oda row irundha `ItemModel` object
    return pannum, illa-na plain `None` return pannum — miss aana

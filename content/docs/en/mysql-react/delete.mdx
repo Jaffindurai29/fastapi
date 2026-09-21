@@ -17,7 +17,10 @@ def delete_item(item_id: int, db: Session = Depends(get_db)):
 
 ## Line by line
 
-1. **Look the row up first** — `db.get(ItemModel, item_id)` returns the
+1. `db: Session = Depends(get_db)` — same `get_db()` dependency as the
+   rest of this topic: FastAPI supplies a fresh session before the
+   route runs and closes it automatically afterward.
+2. **Look the row up first** — `db.get(ItemModel, item_id)` returns the
    `ItemModel` object if that ID exists, or `None` if it doesn't.
    - `if row is None: raise HTTPException(status_code=404, ...)` sends
      back a clean `404` before `db.delete(row)` ever runs.
@@ -25,9 +28,14 @@ def delete_item(item_id: int, db: Session = Depends(get_db)):
      instead, and SQLAlchemy raises its own error rather than deleting
      anything — which FastAPI turns into a generic `500 Internal
      Server Error`, not the clean `404` a missing ID should produce.
-2. **`db.delete(row)` then `db.commit()`** — stages the deletion, then
-   writes it.
-3. **Unlike the array topic**, deleting a row here never shifts any
+3. **`db.delete(row)`** marks that already-loaded object for deletion
+   in the session — like `db.add()` on the POST route, this only
+   stages the change; nothing has actually happened to the row in
+   MySQL yet.
+4. **`db.commit()`** is what sends the actual
+   `DELETE FROM ... WHERE id = ...` statement and commits it — this is
+   the line that really removes the row.
+5. **Unlike the array topic**, deleting a row here never shifts any
    other row's `id` — MySQL's auto-increment `id` is a stable
    identity, not a position in a list.
 

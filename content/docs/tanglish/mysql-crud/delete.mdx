@@ -6,10 +6,51 @@ description: ID vachi oru row-ah remove pannurathu.
 ## Code
 
 ```python title="main.py"
+import os
+
 from fastapi import Depends, FastAPI, HTTPException, status
-from sqlalchemy.orm import Session
+from sqlalchemy import Column, Integer, String, create_engine
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
+MYSQL_USER = os.getenv("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
+
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
+)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+class ItemModel(Base):
+    __tablename__ = "crud_delete_items"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    value = Column(String(255), nullable=False)
+
+
+Base.metadata.create_all(bind=engine)
+
+with SessionLocal() as db:
+    if db.query(ItemModel).count() == 0:
+        db.add_all([ItemModel(value="first"), ItemModel(value="second")])
+        db.commit()
 
 app = FastAPI()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
 
 @app.delete("/items/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_item(item_id: int, db: Session = Depends(get_db)):
@@ -22,7 +63,18 @@ def delete_item(item_id: int, db: Session = Depends(get_db)):
 
 ## Line by line
 
-1. **Row-ah first-a look up pannunga** — `db.get(ItemModel, item_id)`
+Mela irukra `MYSQL_*`/`DATABASE_URL` setup, `engine`/`SessionLocal`/`Base`,
+`ItemModel` table, `Base.metadata.create_all(...)`, mattrum seed block —
+indha topic-la irukra ella page-um share panra same pieces dhan — adha
+line-by-line explain panradha [index page](/tanglish/docs/mysql-crud)-la
+paarunga. Keezha, indha page-ku specific-a enna irukko adha mattum
+paarpom.
+
+1. `db: Session = Depends(get_db)` — indha topic-oda vera ella route
+   mathiri same `get_db()` dependency: FastAPI route run aaguradhukku
+   munnadi pudhu session-ah kudukkum, apparam automatic-a close
+   pannum.
+2. **Row-ah first-a look up pannunga** — `db.get(ItemModel, item_id)`
    andha ID irundha `ItemModel` object return pannum, illa-na `None`
    return pannum.
    - `if row is None: raise HTTPException(status_code=404, ...)`
@@ -31,9 +83,14 @@ def delete_item(item_id: int, db: Session = Depends(get_db)):
      adhoda sontha error-ah raise pannum, edhuvum delete pannama —
      adha FastAPI generic `500 Internal Server Error`-a maathidum,
      missing ID-ku venum clean `404`-ku pathila.
-2. **`db.delete(row)` apparam `db.commit()`** — deletion-ah stage
-   pannum, apparam write pannum.
-3. **Array topic-ku vidhyasam-a**, inga oru row-ah delete panna, vera
+3. **`db.delete(row)`** andha already-loaded object-ah session-la
+   delete panna mark pannum — POST route-la `db.add()` mathiri, idhu
+   mattum stage pannudhu; MySQL-la row-ku innum edhuvum real-a
+   nadakala.
+4. **`db.commit()`** dhan real `DELETE FROM ... WHERE id = ...`
+   statement-ah anuppi commit pannum — indha line dhan row-ah real-a
+   remove pannudhu.
+5. **Array topic-ku vidhyasam-a**, inga oru row-ah delete panna, vera
    edhavadhu row-oda `id` shift aagadhu — MySQL-oda auto-increment `id`
    oru stable identity dhan, list-la position illa. Deletions-ah
    predictable-a survive panna, in-memory array-ku vida database-oda

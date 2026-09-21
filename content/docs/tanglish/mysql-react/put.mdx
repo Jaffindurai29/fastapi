@@ -19,7 +19,12 @@ def replace_item(item_id: int, item: ItemRequest, db: Session = Depends(get_db))
 
 ## Line by line
 
-1. **Row-ah first-a look up pannunga** — `db.get(ItemModel, item_id)`
+1. `db: Session = Depends(get_db)` — [GET](/tanglish/docs/mysql-react/get)-la
+   paartha same dependency injection dhan: FastAPI `get_db()` vachi
+   pudhu session-ah indha route run aaguradhukku munnadi open pannum,
+   apparam automatic-a close pannum, route success-a irundhalum
+   raise pannalum.
+2. **Row-ah first-a look up pannunga** — `db.get(ItemModel, item_id)`
    SQLAlchemy-oda primary-key-vachi fetch shortcut: andha ID irundha
    `ItemModel` object return pannum, illa-na `None` return pannum,
    rendu case-layum exception edhuvum raise pannama.
@@ -31,12 +36,22 @@ def replace_item(item_id: int, item: ItemRequest, db: Session = Depends(get_db))
      object has no attribute 'value'`-ah raise pannum — adha FastAPI
      generic `500 Internal Server Error`-a maathidum, clean `404`-ku
      pathila.
-2. **`row.value = item.value`** plain attribute assignment mathiri
-   kaamikkum, idhu dhan adhu — SQLAlchemy-oda ORM change-ah
-   automatic-a track pannikum.
-3. **`db.commit()`** change-ah write pannum; **`db.refresh(row)`**
-   `row` database-la ippo enna irukko adha exact-a reflect
-   pannum-nu confirm pannum.
+3. **`row.value = item.value`** plain attribute assignment mathiri
+   kaamikkum, idhu dhan adhu — aana `row`, indha same session-la
+   munnadi `db.get(...)`-la irundhu vandhadhu-nala, SQLAlchemy-oda
+   "unit of work" andha object-ah already track pannikittu irukku, so
+   change-ah automatic-a pick up pannikum.
+   - Session-ku thirumba edhuvum add pannanum illa (`db.add(row)`
+     inga venaam) — POST-la irundhu real vidhyasam idhu dhan, POST-la
+     `row` pudhu object, session-ku andha object gurichi theriyaadhu.
+4. **`db.commit()`** dhan andha tracked in-memory change-ah real
+   `UPDATE ... SET value = ... WHERE id = ...` statement-a maathi
+   MySQL-ku anuppum — indha line run aaguradhukku munnadi database-ku
+   edhuvum pogadhu.
+5. **`db.refresh(row)`** apparam database-la irundhu `row`-ah
+   thirumba query pannudhu, so return pannura `{"id": row.id, "value":
+   row.value}` MySQL-la ippo enna irukko adha exact-a reflect pannum —
+   client anuppina input-ah mattum echo pannradhukku pathila.
 
 ## Frontend
 

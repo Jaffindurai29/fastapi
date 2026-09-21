@@ -20,6 +20,23 @@ app.add_middleware(
 )
 ```
 
+## Line by line
+
+1. `app.add_middleware(CORSMiddleware, ...)` — ovoru request/response-kum
+   run aagra middleware register pannudhu, oru origin-la irukra
+   JavaScript vera origin-oda response-ah padikkanumna, browser
+   kekkura HTTP headers add pannum.
+2. `allow_origins=[...]` — indha API-ku cross-origin request anuppa
+   allow panna rendu origins mattum: Vite dev server, `localhost`/
+   `127.0.0.1`, port `5173`. Vera edhuvum request indha backend-ku
+   vara munnadiye browser dhan block pannidum.
+3. `allow_credentials=True` — cookies/auth headers cross-origin
+   anuppa allow pannum. Indha example use pannala, aana aprom
+   authentication add panna vendumna venum.
+4. `allow_methods=["*"]` / `allow_headers=["*"]` — `GET`, `POST`,
+   `Content-Type` nu ovonna ovonna-a list pannuradhukku pathila, ella
+   HTTP method-um header-um allow pannudhu.
+
 Vera edhuvum maaradhu — CORS-ku, protect panra routes-oda pinnadi enna
 irukku nu kavalai illa.
 
@@ -38,6 +55,24 @@ const [editingId, setEditingId] = useState(null); // edit aagra row-oda id
 `editingIndex` → `editingId`. Same idea, ippo enna hold pannudho adha
 match panna rename pannirukom — array-la position illa, database ID.
 `items`-oda shape-um maari, ovoru entry-um `{ id, value }`.
+
+## Line by line
+
+1. `const [items, setItems] = useState([]);` — array version-oda
+   same state, ippo `{ id, value }` objects hold pannudhu, plain
+   string illa — MySQL-backed route ovonnum indha shape-la dhan
+   return pannum.
+2. `const [editingId, setEditingId] = useState(null);` — array
+   version-oda `editingIndex`/`setEditingIndex`, indha topic full-a
+   `editingId`/`setEditingId`-a rename aachu, adhu enna hold
+   pannudho adha match panna — array position illa, database ID.
+3. Array version-la `editingIndex === index` compare pannina illana
+   `.map()` loop index anuppina edhavadhu idam-la, indha topic
+   `editingId === item.id` compare pannum, `item.id`-ah anuppum —
+   identifier-ah row object-la irundhu neraa edukkuradhu, list-la
+   adhoda position-la irundhu illa.
+
+## Indha topic-la irukra pages
 
 1. [GET](/tanglish/docs/mysql-react/get) — rows load pannurathu, ID vachi oru row reach pannurathu.
 2. [POST](/tanglish/docs/mysql-react/post) — add form (maaradhu).

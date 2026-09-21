@@ -21,13 +21,24 @@ def create_item(item: ItemRequest, db: Session = Depends(get_db)):
 
 ## Line by line
 
-1. `row = ItemModel(value=item.value)` — memory-la pudhu ORM object
+1. `db: Session = Depends(get_db)` — [GET](/tanglish/docs/mysql-react/get)-la
+   paartha same dependency injection: indha route body run
+   aaguradhukku munnadi FastAPI `get_db()`-ah adhoda `yield`
+   varaikkum run pannum, pudhusa create panna session-ah `db`-a
+   kudukkum, route mudinja appuram (success-a irundhalum failure-a
+   irundhalum) andha session-ah automatic-a close pannum.
+2. `row = ItemModel(value=item.value)` — memory-la pudhu ORM object
    build pannudhu; database-la edhuvum ippa write aagala.
-2. `db.add(row)` insert panna stage pannudhu; `db.commit()` real-a
-   write pannudhu — idhu dhan MySQL real auto-incrementing `id`-ah
-   assign panra point.
-3. `db.refresh(row)` — database-la irundhu generate aana `id`-ah
-   `row`-ku thirumba edukkum, so function adha return pannalam.
+3. `db.add(row)` — pudhu object-ah session-oda pending state-la stage
+   pannudhu mattum; MySQL-ku edhuvum ippa anuppala.
+4. `db.commit()` — andha pending `INSERT`-ah flush pannum,
+   transaction-ah commit pannum. Idhu dhan MySQL real-a
+   auto-increment `id`-ah assign panra point.
+5. `db.refresh(row)` — `row.id` real generated value-ah reflect
+   panradhukku, database-la irundhu `row`-ah thirumba query pannudhu.
+   Idha skip pannina `row.id` innum stale-a illa `None`-a irukalam —
+   SQLAlchemy-ku andha database-generated value thirumba kekkama
+   theriyadhu.
 
 ## Frontend
 
@@ -62,11 +73,25 @@ landed aachu-nu assume pannradhukku pathila.
 
 ## Line by line
 
-1. `addItem` array version-oda byte-for-byte identical dhan — same
-   `{ value }` body shape, same `fetch` call.
-2. Real-a maari irukra vishayam backend-la nadandhuchu: database
-   pudhu row-ku real `id`-ah assign pannudhu, frontend
-   `items.length`-la landed aachu-nu assume pannradhukku pathila.
+1. `addItem` array version-oda function-oda byte-for-byte identical
+   dhan — same `event.preventDefault()`, same empty-value guard, same
+   `fetch` call mattrum body shape. Indha code-la item identity
+   (`index` vs `id`) gurichi edhuvum illa, so inga edhuvum maara
+   vendiya aavasiyam illa.
+2. `event.preventDefault()` innum browser-oda default full-page
+   reload-ah submit-la stop pannum — MySQL-oda relation illa, backend
+   maarina kooda idhu maaradhu.
+3. `if (value.trim() === "") return;` innum empty illa
+   whitespace-only input-ku request-ah skip pannum.
+4. Success aana appuram, `setValue("")` input-ah clear pannum, apparam
+   `await loadItems()` backend-la irundhu full list-ah thirumba fetch
+   pannum — inga dhan pudhu row-oda `id` frontend-la varum: idhu indha
+   refetch moolama dhan varum, frontend calculate panradhu illa. Array
+   version-oda vidhyasam, andha version-la frontend already
+   `items.length` dhan pudhu item-oda index-nu guess pannalam.
+5. Real-a maari irukra vishayam full-a backend-la dhan irukku: MySQL
+   pudhu row-ku real auto-incrementing `id`-ah assign pannudhu,
+   frontend computed array position assume pannradhukku pathila.
 
 Adutha step: [PUT](/tanglish/docs/mysql-react/put) — oru row-ah edit
 pannurathu, ID vachi address panni.

@@ -22,11 +22,33 @@ def get_item(item_id: int, db: Session = Depends(get_db)):
 
 ## Line by line
 
-1. `db: Session = Depends(get_db)` — FastAPI calls `get_db()` before
-   this route runs, opening a session, and closes it afterward
-   automatically, even if the route raises an error.
-2. `db.query(ItemModel).order_by(ItemModel.id).all()` — every row in
-   the table, in a predictable order.
+1. `db: Session = Depends(get_db)` — this is FastAPI's dependency
+   injection at work: FastAPI calls `get_db()` itself before the route
+   body runs.
+   - `get_db` is a generator function — notice the `yield` inside it —
+     so FastAPI runs it up to that `yield`, and the value it yields (a
+     fresh `SessionLocal()` instance) becomes whatever gets bound to
+     the `db` parameter here.
+   - Once the route returns (or raises), FastAPI resumes `get_db()`
+     right after the `yield`, running its `finally: db.close()` — so
+     the session always gets closed, success or failure, without this
+     route needing its own `try`/`finally`.
+   - Without `Depends`, every route would have to open and remember to
+     close its own session by hand — and a forgotten `close()` after an
+     exception quietly leaks a database connection.
+2. `db.query(ItemModel).order_by(ItemModel.id).all()` — three chained
+   steps, and nothing reaches MySQL until the last one:
+   - `db.query(ItemModel)` builds a SELECT scoped to whatever table
+     `ItemModel` maps to.
+   - `.order_by(ItemModel.id)` adds `ORDER BY id`, so rows come back in
+     a stable, predictable order — skip it and MySQL is free to return
+     rows in any order it likes, which could shuffle between requests.
+   - `.all()` is what actually executes the query and loads every
+     matching row into memory as a list of `ItemModel` objects.
+   - The `{"id": row.id, "value": row.value}` comprehension around it
+     converts each ORM object into a plain dict — FastAPI's JSON
+     encoder can serialize plain Python types, not an `ItemModel`
+     instance directly.
 3. `db.get(ItemModel, item_id)` — SQLAlchemy's shortcut for "fetch by
    primary key." It returns the `ItemModel` object if a row with that
    ID exists, or `None` if it doesn't, without raising an exception on
