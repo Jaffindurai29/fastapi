@@ -22,8 +22,14 @@ def delete_item(item_id: int, db: Session = Depends(get_db)):
 
 ## Line by line
 
-1. **Look the row up first** — same `404`-if-missing pattern as every
-   other route in this topic.
+1. **Look the row up first** — `db.get(ItemModel, item_id)` returns the
+   `ItemModel` object if that ID exists, or `None` if it doesn't.
+   - `if row is None: raise HTTPException(status_code=404, ...)` sends
+     back a clean `404` before `db.delete(row)` ever runs.
+   - Skip that check and call `db.delete(None)` on a missing ID
+     instead, and SQLAlchemy raises its own error rather than deleting
+     anything — which FastAPI turns into a generic `500 Internal
+     Server Error`, not the clean `404` a missing ID should produce.
 2. **`db.delete(row)` then `db.commit()`** — stages the deletion, then
    writes it.
 3. **Unlike the array topic**, deleting a row here never shifts any
@@ -36,6 +42,7 @@ def delete_item(item_id: int, db: Session = Depends(get_db)):
 
 ```bash
 curl -i -X DELETE http://127.0.0.1:8000/items/1
+curl -i -X DELETE http://127.0.0.1:8000/items/999  # 404
 ```
 
 Next: [React + MySQL + CRUD](/en/docs/mysql-react) — connecting a real

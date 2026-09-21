@@ -33,14 +33,24 @@ def get_item(item_id: int, db: Session = Depends(get_db)):
 2. `db.query(ItemModel).order_by(ItemModel.id).all()` — table-la irukra
    ovoru row-um, predictable order-la.
 3. `db.get(ItemModel, item_id)` — SQLAlchemy-oda "primary key vachi
-   fetch pannu" shortcut, edhuvum match aagalana `None` return pannum —
-   munnadi topics-la paartha same `404`-if-missing pattern.
+   fetch pannu" shortcut. Andha ID-oda row irundha `ItemModel` object
+   return pannum, illa-na plain `None` return pannum — miss aana
+   exception edhuvum raise pannadhu.
+   - `if row is None: raise HTTPException(status_code=404, ...)` dhan
+     andha `None`-ah real HTTP `404 Not Found` response-a maathum —
+     munnadi topics-la paartha same `404`-if-missing pattern.
+   - Idha check pannama `row.value`-ku neraa poirundha, `row` `None`-a
+     irundhaal Python `AttributeError: 'NoneType' object has no
+     attribute 'value'`-ah raise pannum — adha FastAPI generic `500
+     Internal Server Error`-a maathidum, missing ID-ku venum clean
+     `404`-ku pathila.
 
 ## Try it
 
 ```bash
 curl http://127.0.0.1:8000/items
 curl http://127.0.0.1:8000/items/1
+curl -i http://127.0.0.1:8000/items/999  # 404
 ```
 
 Adutha step: [POST](/tanglish/docs/mysql-crud/post) — pudhu row insert

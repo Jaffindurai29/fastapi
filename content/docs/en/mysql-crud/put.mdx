@@ -28,9 +28,18 @@ def replace_item(item_id: int, item: ItemRequest, db: Session = Depends(get_db))
 
 ## Line by line
 
-1. **Look the row up first** — `db.get(ItemModel, item_id)` returns
-   `None` if that ID doesn't exist, so a clean `404` goes out instead of
-   silently doing nothing.
+1. **Look the row up first** — `db.get(ItemModel, item_id)` is
+   SQLAlchemy's fetch-by-primary-key shortcut: it returns the
+   `ItemModel` object if that ID exists, or `None` if it doesn't,
+   without raising an exception either way.
+   - `if row is None: raise HTTPException(status_code=404, ...)` turns
+     that `None` into a clean `404 Not Found` before anything else
+     runs.
+   - Skip the check and jump straight to `row.value = item.value` when
+     `row` is `None`, and Python raises
+     `AttributeError: 'NoneType' object has no attribute 'value'` —
+     which FastAPI turns into a generic `500 Internal Server Error`
+     instead of the `404` a missing ID should produce.
 2. **`row.value = item.value`** — looks like a plain attribute
    assignment because it is one. SQLAlchemy's ORM tracks the change
    automatically; nothing needs to be re-added to the session.
@@ -42,6 +51,7 @@ def replace_item(item_id: int, item: ItemRequest, db: Session = Depends(get_db))
 
 ```bash
 curl -X PUT http://127.0.0.1:8000/items/1 -H "Content-Type: application/json" -d "{\"value\": \"replaced\"}"
+curl -i -X PUT http://127.0.0.1:8000/items/999 -H "Content-Type: application/json" -d "{\"value\": \"x\"}"  # 404
 ```
 
 Next: [PATCH](/en/docs/mysql-crud/patch) — partially updating a row.

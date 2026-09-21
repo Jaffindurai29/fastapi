@@ -27,8 +27,16 @@ def replace_item(item_index: int, item: ItemRequest):
 ## Line by line
 
 1. **Check the index exists first** — same bounds check as
-   [GET](/en/docs/array-crud/get), so an out-of-range `PUT` returns a
-   clean `404` instead of crashing.
+   [GET](/en/docs/array-crud/get):
+   - `item_index < 0` blocks negative numbers, so `/items/-1` can't
+     quietly hit Python's negative-indexing behavior and overwrite the
+     last item by accident.
+   - `item_index >= len(data)` blocks anything past the end of the
+     array.
+   - Either case raises `HTTPException(404)` before `data[item_index]`
+     ever runs, so an out-of-range `PUT` returns a clean `404 Not
+     Found` instead of crashing with an `IndexError` (which would
+     surface as a `500`).
 2. **`data[item_index] = item.value`** — overwrites that slot entirely.
    `PUT` means "here is the complete new representation of this
    resource" — the client sends the whole value, not just the part that
@@ -38,6 +46,7 @@ def replace_item(item_index: int, item: ItemRequest):
 
 ```bash
 curl -X PUT http://127.0.0.1:8000/items/0 -H "Content-Type: application/json" -d "{\"value\": \"replaced\"}"
+curl -i -X PUT http://127.0.0.1:8000/items/9 -H "Content-Type: application/json" -d "{\"value\": \"x\"}"  # 404
 ```
 
 Next: [PATCH](/en/docs/array-crud/patch) — same idea, but the field is

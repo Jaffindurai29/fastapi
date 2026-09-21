@@ -19,12 +19,21 @@ def get_item(item_index: int):
 ```
 
 1. `GET /items` full array-ah adha maadhiri dhan return pannum.
-2. `GET /items/{item_index}` oru entry-ah adhoda position vachi
-   reach pannum, indexing-ku munnadi bounds check-oda.
-3. Andha bounds check skip pannina, out-of-range index Python-oda
-   own `IndexError`-ah raise pannum, adhu clean `404`-ku pathila
-   generic `500`-a maarum.
-4. Inga edhuvum React-ku specific illa — indha topic-ku add aana
+2. `GET /items/{item_index}` oru entry-ah adhoda position vachi reach
+   pannum, indexing-ku munnadi bounds check-oda:
+   - `item_index < 0` negative numbers-ah block pannum — Python
+     lists-ku negative indexing support irukku (`data[-1]` na last
+     item), so idha check pannalana `/items/-1` silent-a last item-ah
+     return aagum, unknown index maadhiri fail aagadhu.
+   - `item_index >= len(data)` array-oda end-ah kadandha edhavadhum
+     block pannum.
+   - Rendulayum edhavadhu true-na, array-ah index panna munnadi
+     `raise HTTPException(status_code=404, detail="Item not found")`
+     run aagum.
+   - Idha check pannama vittutta, out-of-range index Python-oda own
+     `IndexError`-ah raise pannum, adha FastAPI generic `500 Internal
+     Server Error`-a maathidum, clean `404`-ku pathila.
+3. Inga edhuvum React-ku specific illa — indha topic-ku add aana
    onnu mattum `CORSMiddleware` dhan, `app = FastAPI()` apparam
    odane once register pannirukom, so browser indha routes-ah call
    panna allow pannum.

@@ -14,7 +14,11 @@ def delete_item(item_index: int):
 ```
 
 1. **Check the index exists first** — the same bounds check as every
-   other route in this topic.
+   other route in this topic: `item_index < 0` rejects negative
+   numbers, `item_index >= len(data)` rejects anything past the end,
+   and either one raises `HTTPException(404)` before `data.pop(...)`
+   ever runs — otherwise an out-of-range index would raise Python's
+   own `IndexError` and surface as a `500` instead of a clean `404`.
 2. **`status_code=status.HTTP_204_NO_CONTENT`** — `204` means "it
    worked, and there's nothing to send back." The function doesn't
    `return` anything; a `204` response has no body by convention.

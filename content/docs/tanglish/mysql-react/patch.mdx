@@ -22,9 +22,19 @@ def update_item(item_id: int, patch: ItemPatch, db: Session = Depends(get_db)):
     return {"id": row.id, "value": row.value}
 ```
 
-1. **`ItemPatch.value` optional** — PUT-oda `ItemRequest`-la
+1. **Row-ah first-a check pannunga** — `db.get(ItemModel, item_id)`
+   andha ID irundha `ItemModel` object return pannum, illa-na `None`
+   return pannum.
+   - `if row is None: raise HTTPException(status_code=404, ...)`
+     function `row`-ah touch panna munnadi clean `404`-ah anuppum.
+   - Idha check pannama vittutta, keezha irukra
+     `row.value = patch.value` line missing ID-ku `AttributeError:
+     'NoneType' object has no attribute 'value'`-ah raise pannum —
+     FastAPI adha proper `404`-ku pathila generic `500 Internal Server
+     Error`-a maathidum.
+2. **`ItemPatch.value` optional** — PUT-oda `ItemRequest`-la
    `value` required, idhu vidhyasam.
-2. **`if patch.value is not None: row.value = patch.value`** —
+3. **`if patch.value is not None: row.value = patch.value`** —
    client real-a oru value anuppina mattum dhan row-ah update
    pannum.
 

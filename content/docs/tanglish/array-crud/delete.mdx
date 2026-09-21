@@ -22,7 +22,12 @@ def delete_item(item_index: int):
 ## Line by line
 
 1. **Index irukka nu first check pannunga** — indha topic-la irukra
-   ella route-um same bounds check.
+   ella route-um same bounds check: `item_index < 0` negative
+   numbers-ah reject pannum, `item_index >= len(data)` end-ah kadandha
+   edhavadhum reject pannum, rendulayum true-na `data.pop(...)` run
+   aaguradhukku munnadi `HTTPException(404)` raise aagum — illainaa
+   out-of-range index Python-oda sontha `IndexError`-ah raise pannum,
+   clean `404`-ku pathila `500`-a maarum.
 2. **`status_code=status.HTTP_204_NO_CONTENT`** — `204` nu solradhu
    "velai aachu, thirumba anuppa edhuvum illa." Function edhuvum
    `return` pannadhu; `204` response-ku convention-a body irukadhu.
@@ -37,6 +42,7 @@ def delete_item(item_index: int):
 
 ```bash
 curl -i -X DELETE http://127.0.0.1:8000/items/0
+curl -i -X DELETE http://127.0.0.1:8000/items/9  # 404
 ```
 
 Adutha step: [React + Array + CRUD](/tanglish/docs/react) — indha aaru verbs-ku real

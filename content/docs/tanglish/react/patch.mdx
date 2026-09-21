@@ -19,12 +19,18 @@ def update_item(item_index: int, patch: ItemPatch):
     return {"index": item_index, "value": data[item_index]}
 ```
 
-1. **`ItemPatch`-oda field optional** (`value: Optional[str] = None`)
+1. **Index irukka-nu first-a check pannunga** — GET mattrum PUT-la
+   irukra same bounds check: `item_index < 0` negative numbers-ah
+   reject pannum, `item_index >= len(data)` end-ah kadandha
+   edhavadhum reject pannum, rendulayum edhavadhu true-na
+   `data[item_index]` touch pannuradhukku munnadi `HTTPException(404)`
+   raise aagum.
+2. **`ItemPatch`-oda field optional** (`value: Optional[str] = None`)
    — PUT-oda `ItemRequest`-la `value` required, idhu vidhyasam.
    `PUT` vs `PATCH`-oda whole difference idhu dhan: `PUT` full
    representation kekkum, `PATCH` maari irukradha mattum anuppa
    vidum.
-2. **`if patch.value is not None:`** client real-a oru value
+3. **`if patch.value is not None:`** client real-a oru value
    anuppina mattum dhan slot-ah overwrite pannum — empty body (`{}`)
    item-ah untouched-a vidum.
 

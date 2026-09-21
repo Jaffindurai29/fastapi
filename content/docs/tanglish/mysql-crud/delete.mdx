@@ -22,8 +22,15 @@ def delete_item(item_id: int, db: Session = Depends(get_db)):
 
 ## Line by line
 
-1. **Row-ah first-a look up pannunga** — indha topic-la irukra ella
-   route-um same `404`-if-missing pattern.
+1. **Row-ah first-a look up pannunga** — `db.get(ItemModel, item_id)`
+   andha ID irundha `ItemModel` object return pannum, illa-na `None`
+   return pannum.
+   - `if row is None: raise HTTPException(status_code=404, ...)`
+     `db.delete(row)` run aaguradhukku munnadi clean `404`-ah anuppum.
+   - Idha check pannama `db.delete(None)`-ah call pannina, SQLAlchemy
+     adhoda sontha error-ah raise pannum, edhuvum delete pannama —
+     adha FastAPI generic `500 Internal Server Error`-a maathidum,
+     missing ID-ku venum clean `404`-ku pathila.
 2. **`db.delete(row)` apparam `db.commit()`** — deletion-ah stage
    pannum, apparam write pannum.
 3. **Array topic-ku vidhyasam-a**, inga oru row-ah delete panna, vera
@@ -36,6 +43,7 @@ def delete_item(item_id: int, db: Session = Depends(get_db)):
 
 ```bash
 curl -i -X DELETE http://127.0.0.1:8000/items/1
+curl -i -X DELETE http://127.0.0.1:8000/items/999  # 404
 ```
 
 Adutha step: [React + MySQL + CRUD](/tanglish/docs/mysql-react) — indha

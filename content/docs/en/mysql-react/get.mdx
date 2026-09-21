@@ -26,8 +26,16 @@ def get_item(item_id: int, db: Session = Depends(get_db)):
 2. `db.query(ItemModel).order_by(ItemModel.id).all()` — every row in
    the table, in a predictable order.
 3. `db.get(ItemModel, item_id)` — SQLAlchemy's shortcut for "fetch by
-   primary key," returning `None` if nothing matches — the same
-   404-if-missing pattern as the array version.
+   primary key." It returns the `ItemModel` object if a row with that
+   ID exists, or `None` if it doesn't, without raising an exception on
+   a miss.
+   - `if row is None: raise HTTPException(status_code=404, ...)` turns
+     that `None` into a real HTTP `404 Not Found` response — the same
+     404-if-missing pattern as the array version.
+   - Skip that check and go straight to `row.value`, and a missing ID
+     raises `AttributeError: 'NoneType' object has no attribute
+     'value'` instead, which FastAPI turns into a generic `500
+     Internal Server Error`.
 
 ## Frontend
 

@@ -28,12 +28,18 @@ def update_item(item_index: int, patch: ItemPatch):
 
 ## Line by line
 
-1. **`ItemPatch`-oda field optional** (`value: Optional[str] = None`)
+1. **Index irukka nu first check pannunga** — [GET](/tanglish/docs/array-crud/get)
+   mattrum [PUT](/tanglish/docs/array-crud/put)-la irukra same bounds
+   check: `item_index < 0` negative numbers-ah reject pannum,
+   `item_index >= len(data)` end-ah kadandha edhavadhum reject pannum,
+   rendulayum edhavadhu true-na `data[item_index]` touch pannuradhukku
+   munnadi `HTTPException(404)` raise aagum.
+2. **`ItemPatch`-oda field optional** (`value: Optional[str] = None`)
    — [PUT](/tanglish/docs/array-crud/put)-oda `ItemRequest`-la `value`
    required-a irukum, idhu vidhyasam. `PUT` mattrum `PATCH`-kum idhu
    dhan entire difference: `PUT` full representation kekkum, `PATCH`
    maari irukradha mattum anuppa vidum.
-2. **`if patch.value is not None:`** — client real-a oru value
+3. **`if patch.value is not None:`** — client real-a oru value
    anuppina mattum dhan slot-ah overwrite pannum. Empty body (`{}`)
    item-ah touch pannadhu.
 
@@ -46,6 +52,7 @@ fields irundhu, ovonna mattum change panna vendumna dhan therium.
 ```bash
 curl -X PATCH http://127.0.0.1:8000/items/1 -H "Content-Type: application/json" -d "{\"value\": \"patched\"}"
 curl -X PATCH http://127.0.0.1:8000/items/0 -H "Content-Type: application/json" -d "{}"
+curl -i -X PATCH http://127.0.0.1:8000/items/9 -H "Content-Type: application/json" -d "{}"  # 404
 ```
 
 Adutha step: [DELETE](/tanglish/docs/array-crud/delete) — oru item-ah

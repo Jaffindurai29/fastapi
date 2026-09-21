@@ -22,9 +22,18 @@ def update_item(item_id: int, patch: ItemPatch, db: Session = Depends(get_db)):
     return {"id": row.id, "value": row.value}
 ```
 
-1. **`ItemPatch.value` is optional** — unlike PUT's `ItemRequest`,
+1. **Check the row exists first** — `db.get(ItemModel, item_id)`
+   returns the `ItemModel` object if that ID exists, or `None` if it
+   doesn't.
+   - `if row is None: raise HTTPException(status_code=404, ...)` sends
+     back a clean `404` before the function touches `row` at all.
+   - Skip that check and the later `row.value = patch.value` line
+     would raise `AttributeError: 'NoneType' object has no attribute
+     'value'` on a missing ID — FastAPI turns that into a generic `500
+     Internal Server Error` instead of a proper `404`.
+2. **`ItemPatch.value` is optional** — unlike PUT's `ItemRequest`,
    where `value` is required.
-2. **`if patch.value is not None: row.value = patch.value`** — only
+3. **`if patch.value is not None: row.value = patch.value`** — only
    updates the row if the client actually sent a value.
 
 ## Frontend

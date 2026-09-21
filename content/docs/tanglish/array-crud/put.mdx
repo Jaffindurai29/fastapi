@@ -27,8 +27,15 @@ def replace_item(item_index: int, item: ItemRequest):
 ## Line by line
 
 1. **Index irukka nu first check pannunga** — [GET](/tanglish/docs/array-crud/get)-la
-   irukra same bounds check dhan, out-of-range `PUT`-kum clean `404`
-   varum, crash aagadhu.
+   irukra same bounds check dhan:
+   - `item_index < 0` negative numbers-ah block pannum, so `/items/-1`
+     na Python-oda negative-indexing behaviour vachi silent-a last
+     item-ah overwrite pannadhu.
+   - `item_index >= len(data)` end-ah kadandha index-ah block pannum.
+   - Rendulayum edhavadhu true-na, `data[item_index]` run aaguradhukku
+     munnadi `HTTPException(404)` raise aagum — so out-of-range `PUT`
+     clean `404 Not Found` return pannum, `IndexError` vandhu `500`-a
+     maaradhu.
 2. **`data[item_index] = item.value`** — andha slot-ah full-a
    overwrite pannudhu. `PUT` nu solradhu "idhu dhan indha resource-oda
    complete pudhu representation" — client full value-ah anuppanum,
@@ -38,6 +45,7 @@ def replace_item(item_index: int, item: ItemRequest):
 
 ```bash
 curl -X PUT http://127.0.0.1:8000/items/0 -H "Content-Type: application/json" -d "{\"value\": \"replaced\"}"
+curl -i -X PUT http://127.0.0.1:8000/items/9 -H "Content-Type: application/json" -d "{\"value\": \"x\"}"  # 404
 ```
 
 Adutha step: [PATCH](/tanglish/docs/array-crud/patch) — same idea,

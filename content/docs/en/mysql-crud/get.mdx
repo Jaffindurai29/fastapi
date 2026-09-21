@@ -33,14 +33,25 @@ def get_item(item_id: int, db: Session = Depends(get_db)):
 2. `db.query(ItemModel).order_by(ItemModel.id).all()` — every row in
    the table, in a predictable order.
 3. `db.get(ItemModel, item_id)` — SQLAlchemy's shortcut for "fetch by
-   primary key," returning `None` if nothing matches — the same
-   `404`-if-missing pattern from every earlier topic.
+   primary key." It returns the matching `ItemModel` object if a row
+   with that ID exists, or plain `None` if it doesn't — it does **not**
+   raise an exception on a miss.
+   - `if row is None: raise HTTPException(status_code=404, ...)` is
+     what turns that `None` into an actual HTTP `404 Not Found`
+     response — the same `404`-if-missing pattern from every earlier
+     topic.
+   - Skip that check and go straight to `row.value` when `row` is
+     `None`, and Python raises `AttributeError: 'NoneType' object has
+     no attribute 'value'` instead — which FastAPI turns into a generic
+     `500 Internal Server Error`, not the clean `404` a missing ID
+     deserves.
 
 ## Try it
 
 ```bash
 curl http://127.0.0.1:8000/items
 curl http://127.0.0.1:8000/items/1
+curl -i http://127.0.0.1:8000/items/999  # 404
 ```
 
 Next: [POST](/en/docs/mysql-crud/post) — inserting a new row.

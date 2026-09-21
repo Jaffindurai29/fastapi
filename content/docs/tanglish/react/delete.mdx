@@ -14,7 +14,13 @@ def delete_item(item_index: int):
 ```
 
 1. **Index irukka-nu first-a check pannunga** — indha topic-la
-   irukra vera ella route-um same bounds check.
+   irukra vera ella route-um same bounds check: `item_index < 0`
+   negative numbers-ah reject pannum, `item_index >= len(data)` end-ah
+   kadandha edhavadhum reject pannum, rendulayum true-na
+   `data.pop(...)` run aaguradhukku munnadi `HTTPException(404)`
+   raise aagum — illainaa out-of-range index Python-oda sontha
+   `IndexError`-ah raise pannum, clean `404`-ku pathila `500`-a
+   maarum.
 2. **`status_code=status.HTTP_204_NO_CONTENT`** — `204` nu solradhu
    "work aachu, anuppa edhuvum illa." Function edhuvum `return`
    pannadhu; `204` response convention-a body illama irukum.

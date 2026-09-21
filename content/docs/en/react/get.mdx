@@ -19,12 +19,20 @@ def get_item(item_index: int):
 ```
 
 1. `GET /items` returns the whole array as-is.
-2. `GET /items/{item_index}` reaches one entry by its position, with a
-   bounds check before indexing.
-3. Skipping that bounds check would let an out-of-range index raise
-   Python's own `IndexError`, which turns into a generic `500` instead
-   of a clean `404`.
-4. Nothing here is React-specific — the only addition for this topic
+2. `GET /items/{item_index}` reaches one entry by its position, guarded
+   by a bounds check before indexing:
+   - `item_index < 0` blocks negative numbers — Python lists support
+     negative indexing (`data[-1]` is the last item), so without this
+     check `/items/-1` would silently return the last item instead of
+     failing like an unknown index should.
+   - `item_index >= len(data)` blocks anything past the end of the
+     array.
+   - Either case raises `HTTPException(status_code=404, detail="Item not found")`
+     before the array is ever indexed.
+   - Skip the check entirely and an out-of-range index raises Python's
+     own `IndexError` instead, which FastAPI turns into a generic `500
+     Internal Server Error` instead of a clean `404`.
+3. Nothing here is React-specific — the only addition for this topic
    is `CORSMiddleware`, registered once right after `app = FastAPI()`,
    so the browser is allowed to call these routes at all.
 

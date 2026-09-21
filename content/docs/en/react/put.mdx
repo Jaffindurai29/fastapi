@@ -14,8 +14,16 @@ def replace_item(item_index: int, item: ItemRequest):
     return {"index": item_index, "value": data[item_index]}
 ```
 
-1. **Check the index exists first** — same bounds check as GET, so an
-   out-of-range `PUT` returns a clean `404` instead of crashing.
+1. **Check the index exists first** — same bounds check as GET:
+   - `item_index < 0` blocks negative numbers, so `/items/-1` can't
+     quietly hit Python's negative-indexing behavior and overwrite the
+     last item by accident.
+   - `item_index >= len(data)` blocks anything past the end of the
+     array.
+   - Either case raises `HTTPException(404)` before `data[item_index]`
+     ever runs, so an out-of-range `PUT` returns a clean `404 Not
+     Found` instead of crashing with an `IndexError` (which would
+     surface as a `500`).
 2. **`data[item_index] = item.value`** overwrites that slot entirely.
    `PUT` means "here is the complete new representation of this
    resource" — the client sends the whole value, not just the part

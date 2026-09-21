@@ -28,12 +28,18 @@ def update_item(item_index: int, patch: ItemPatch):
 
 ## Line by line
 
-1. **`ItemPatch`'s field is optional** (`value: Optional[str] = None`)
+1. **Check the index exists first** — same bounds check as
+   [GET](/en/docs/array-crud/get) and
+   [PUT](/en/docs/array-crud/put): `item_index < 0` rejects negative
+   numbers, `item_index >= len(data)` rejects anything past the end,
+   and either one raises `HTTPException(404)` before the function
+   touches `data[item_index]`.
+2. **`ItemPatch`'s field is optional** (`value: Optional[str] = None`)
    — unlike [PUT](/en/docs/array-crud/put)'s `ItemRequest`, where
    `value` is required. That's the whole difference between `PUT` and
    `PATCH`: `PUT` demands the full representation, `PATCH` lets you
    send only what changed.
-2. **`if patch.value is not None:`** — only overwrites the slot if the
+3. **`if patch.value is not None:`** — only overwrites the slot if the
    client actually sent a value. An empty body (`{}`) leaves the item
    untouched.
 
@@ -46,6 +52,7 @@ fields and you only want to change one of them.
 ```bash
 curl -X PATCH http://127.0.0.1:8000/items/1 -H "Content-Type: application/json" -d "{\"value\": \"patched\"}"
 curl -X PATCH http://127.0.0.1:8000/items/0 -H "Content-Type: application/json" -d "{}"
+curl -i -X PATCH http://127.0.0.1:8000/items/9 -H "Content-Type: application/json" -d "{}"  # 404
 ```
 
 Next: [DELETE](/en/docs/array-crud/delete) — removing an item.

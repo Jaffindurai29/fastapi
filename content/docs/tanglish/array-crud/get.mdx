@@ -32,15 +32,30 @@ def get_item(item_index: int):
    array-ah dhan padikkum.
 2. `GET /items` adha maadhiri return pannum — ellame kaamikkum.
 3. `GET /items/{item_index}` position vachi oru entry-ah reach pannum,
-   index panna munnadi bounds check-oda — idha skip pannina,
-   out-of-range index Python-oda sontha `IndexError`-ah raise pannum,
-   clean `404`-ku pathila generic `500`-a maathum.
+   index panna munnadi oru bounds check irukku:
+   - `item_index < 0` — negative numbers-ah block pannum. Python
+     lists-ku negative indexing support irukku (`data[-1]` na last
+     item), so idha check pannalana `/items/-1` na silent-ah
+     `"second"` return aagum, unknown index maadhiri fail aagadhu.
+   - `item_index >= len(data)` — end-ah kadandhu poi enna irundhalum
+     block pannum. `data`-la 2 items irukku, `0` mattrum `1` index-la,
+     so `len(data)` `2`, adhanaala index `2` already out of range.
+   - Rendulayum edhavadhu true-na, `raise HTTPException(status_code=404, ...)`
+     function-ah odane stop panni, FastAPI idha HTTP `404 Not Found`
+     response-a maathidum, body-la `{"detail": "Item not found"}`
+     varum.
+   - Idha check pannama vittutta, out-of-range index Python-oda
+     sontha `IndexError`-ah raise pannum, adha FastAPI generic
+     `500 Internal Server Error`-a maathidum — logic-la correct dhan,
+     aana wrong status code, client-ku use aagura message-um illa.
 
 ## Try it
 
 ```bash
 curl http://127.0.0.1:8000/items
 curl http://127.0.0.1:8000/items/0
+curl -i http://127.0.0.1:8000/items/5   # out of range -> 404
+curl -i http://127.0.0.1:8000/items/-1  # negative -> 404, "second" varaadhu
 ```
 
 Idhu CRUD-oda read half — baaki naalu verbs indha same array-ah mutate

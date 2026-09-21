@@ -30,16 +30,31 @@ def get_item(item_index: int):
 1. `data = ["first", "second"]` — seeded at module level, outside every
    route function, so every request reads the same array.
 2. `GET /items` returns it as-is — showing everything.
-3. `GET /items/{item_index}` reaches one entry by its position, with a
-   bounds check before indexing — skip that check and an out-of-range
-   index raises Python's own `IndexError`, which turns into a generic
-   `500` instead of a clean `404`.
+3. `GET /items/{item_index}` reaches one entry by its position, guarded
+   by a bounds check before indexing:
+   - `item_index < 0` blocks negative numbers. Python lists support
+     negative indexing (`data[-1]` is the last item), so without this
+     check `/items/-1` would quietly return `"second"` instead of
+     failing like an unknown index should.
+   - `item_index >= len(data)` blocks anything past the end. `data`
+     has 2 items, at indices `0` and `1`, so `len(data)` is `2` and
+     index `2` is already out of range.
+   - When either is true, `raise HTTPException(status_code=404, ...)`
+     stops the function immediately and FastAPI turns it into an HTTP
+     `404 Not Found` response with `{"detail": "Item not found"}` as
+     the body.
+   - Skip the check entirely and an out-of-range index raises Python's
+     own `IndexError` instead, which FastAPI turns into a generic
+     `500 Internal Server Error` — correct in spirit, but the wrong
+     status code and no useful message for the client.
 
 ## Try it
 
 ```bash
 curl http://127.0.0.1:8000/items
 curl http://127.0.0.1:8000/items/0
+curl -i http://127.0.0.1:8000/items/5   # out of range -> 404
+curl -i http://127.0.0.1:8000/items/-1  # negative -> 404, not "second"
 ```
 
 This is the read half of CRUD — the other four verbs mutate this same

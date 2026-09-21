@@ -15,8 +15,16 @@ def replace_item(item_index: int, item: ItemRequest):
 ```
 
 1. **Index irukka-nu first-a check pannunga** — GET mathiri same
-   bounds check, so out-of-range `PUT` clean `404` return pannum,
-   crash aagama.
+   bounds check:
+   - `item_index < 0` negative numbers-ah block pannum, so `/items/-1`
+     na Python-oda negative-indexing behaviour vachi silent-a last
+     item-ah overwrite pannadhu.
+   - `item_index >= len(data)` array-oda end-ah kadandha edhavadhum
+     block pannum.
+   - Rendulayum edhavadhu true-na, `data[item_index]` run aaguradhukku
+     munnadi `HTTPException(404)` raise aagum — so out-of-range `PUT`
+     clean `404 Not Found` return pannum, `IndexError` vandhu `500`-a
+     maaradhu.
 2. **`data[item_index] = item.value`** andha slot-ah completely
    overwrite pannum. `PUT` nu solradhu "idhu dhan indha resource-oda
    complete pudhu representation" — client full value anuppanum,
