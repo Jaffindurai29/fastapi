@@ -5,12 +5,17 @@ description: MySQL-la irundhu rows padikkurathu — full table, mattrum ID vachi
 
 ## Code
 
-```python title="main.py"
+**`database.py`** — env vars, `engine`/`SessionLocal`/`Base`, mattrum
+`get_db()` dependency:
+
+```python title="database.py"
 import os
 
-from fastapi import Depends, FastAPI, HTTPException
-from sqlalchemy import Column, Integer, String, create_engine
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+load_dotenv()
 
 MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
 MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
@@ -30,41 +35,77 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 
-class ItemModel(Base):
-    __tablename__ = "crud_get_items"
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    value = Column(String(255), nullable=False)
-
-
-Base.metadata.create_all(bind=engine)
-
-# Seed two rows once, so this is testable on its own. Only runs if the
-# table is currently empty, so restarting the app doesn't keep adding more.
-with SessionLocal() as db:
-    if db.query(ItemModel).count() == 0:
-        db.add_all([ItemModel(value="first"), ItemModel(value="second")])
-        db.commit()
-
-app = FastAPI()
-
-
 def get_db():
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
+```
+
+**`models.py`** — `ItemModel` table:
+
+```python title="models.py"
+from sqlalchemy import Column, Integer, String
+
+from database import Base
+
+
+class ItemModel(Base):
+    __tablename__ = "items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    value = Column(String(255), nullable=False)
+```
+
+**`crud.py`** — database-oda pesura plain functions, HTTP edhuvum
+theriyaadhu:
+
+```python title="crud.py"
+from sqlalchemy.orm import Session
+
+from models import ItemModel
+
+
+def get_items(db: Session) -> list[ItemModel]:
+    return db.query(ItemModel).order_by(ItemModel.id).all()
+
+
+def get_item(db: Session, item_id: int) -> ItemModel | None:
+    return db.get(ItemModel, item_id)
+
+
+def seed_items(db: Session) -> None:
+    if db.query(ItemModel).count() == 0:
+        db.add_all([ItemModel(value="first"), ItemModel(value="second")])
+        db.commit()
+```
+
+**`main.py`** — `FastAPI()` app mattrum rendu routes:
+
+```python title="main.py"
+from fastapi import Depends, FastAPI, HTTPException
+from sqlalchemy.orm import Session
+
+import crud
+from database import Base, SessionLocal, engine, get_db
+
+Base.metadata.create_all(bind=engine)
+
+with SessionLocal() as db:
+    crud.seed_items(db)
+
+app = FastAPI()
 
 
 @app.get("/items")
 def list_items(db: Session = Depends(get_db)):
-    rows = db.query(ItemModel).order_by(ItemModel.id).all()
-    return [{"id": row.id, "value": row.value} for row in rows]
+    return [{"id": row.id, "value": row.value} for row in crud.get_items(db)]
 
 
 @app.get("/items/{item_id}")
 def get_item(item_id: int, db: Session = Depends(get_db)):
-    row = db.get(ItemModel, item_id)
+    row = crud.get_item(db, item_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Item not found")
     return {"id": row.id, "value": row.value}
@@ -72,32 +113,18 @@ def get_item(item_id: int, db: Session = Depends(get_db)):
 
 ## Line by line
 
-Mela irukra `MYSQL_*`/`DATABASE_URL` setup, `engine`/`SessionLocal`/`Base`,
-`ItemModel` table, `Base.metadata.create_all(...)`, mattrum seed block —
-indha topic-la irukra ella page-um share panra same pieces dhan — adha
-line-by-line explain panradha [index page](/tanglish/docs/mysql-crud)-la
-paarunga. Keezha, indha page-ku specific-a enna irukko adha mattum
-paarpom.
+`database.py`-oda connection/session setup mattrum `models.py`-oda
+`ItemModel` table — indha topic-la irukra ella page-um share panra
+same pieces dhan, ippo ella verb-kum same `items` table (five thani
+tables illa) — adha line-by-line explain panradha
+[index page](/tanglish/docs/mysql-crud)-la paarunga. Keezha, indha
+page-ku specific-a `crud.py` mattrum `main.py`-la enna irukko adha
+mattum paarpom.
 
-1. `db: Session = Depends(get_db)` — idhu FastAPI-oda dependency
-   injection dhan: route body run aaguradhukku munnadi FastAPI thaan
-   `get_db()`-ah call pannum.
-   - `get_db` oru generator function — adhula `yield` irukku
-     paarunga — so FastAPI adha andha `yield` varaikkum run pannum,
-     adhu yield panra value (pudhusa create panna `SessionLocal()`
-     instance) dhan inga `db` parameter-ku bind aagum.
-   - Route return aana appuram (illa raise pannalum), FastAPI
-     `get_db()`-ah `yield`-ku apparam resume pannum, `finally:
-     db.close()`-ah run pannum — so session eppovum close aagum,
-     success-a irundhalum failure-a irundhalum, indha route-ku thani
-     `try`/`finally` venaam.
-   - `Depends` illama irundha, ovoru route-um thanoda session-ah
-     manually open pannanum, close pannanum-nu ninaichukanum —
-     exception vandha appuram `close()` marandhuduna, database
-     connection quietly leak aagidum.
-2. `db.query(ItemModel).order_by(ItemModel.id).all()` — moonu thani
-   steps chain aagi irukku, kadaisi step varaikkum MySQL-ku edhuvum
-   pogadhu:
+**`crud.py`:**
+
+1. `get_items(db)` — moonu thani steps chain aagi irukku, kadaisi step
+   varaikkum MySQL-ku edhuvum pogadhu:
    - `db.query(ItemModel)` — `ItemModel` map panra table-ku scoped-a
      oru SELECT build pannum.
    - `.order_by(ItemModel.id)` — `ORDER BY id` add pannum, so rows
@@ -106,22 +133,53 @@ paarpom.
      shuffle aagalam.
    - `.all()` dhan real-a query-ah execute pannum, match aana ella
      row-um `ItemModel` objects list-a memory-ku load pannum.
-   - Idha suthi irukra `{"id": row.id, "value": row.value}`
-     comprehension, ovoru ORM object-ayum plain dict-a convert pannum —
-     FastAPI-oda JSON encoder plain Python types-ah dhan serialize
-     pannum, `ItemModel` instance-ah neraa pannadhu.
-3. `db.get(ItemModel, item_id)` — SQLAlchemy-oda "primary key vachi
-   fetch pannu" shortcut. Andha ID-oda row irundha `ItemModel` object
-   return pannum, illa-na plain `None` return pannum — miss aana
-   exception edhuvum raise pannadhu.
+   - Indha function andha ORM objects list-ah adha madhiri-a return
+     pannudhu — dict-a reshape pannradhu inga nadakkaathu, `crud.py`
+     HTTP-agnostic-a irukkanum-nala.
+2. `get_item(db, item_id)` — `db.get(ItemModel, item_id)` SQLAlchemy-oda
+   "primary key vachi fetch pannu" shortcut. Andha ID-oda row irundha
+   `ItemModel` object return pannum, illa-na plain `None` return
+   pannum — miss aana exception edhuvum raise pannadhu, `get_item`-um
+   andha `None`-ah adha madhiri call panravanukku thirumba kudukkum.
+
+**`main.py`:**
+
+3. `db: Session = Depends(get_db)` — rendu route-layum FastAPI-oda
+   dependency injection dhan: rendu route body run aaguradhukkum
+   munnadi FastAPI thaan `get_db()`-ah call pannum.
+   - `get_db` oru generator function — adhula `yield` irukku
+     paarunga — so FastAPI adha andha `yield` varaikkum run pannum,
+     adhu yield panra value (pudhusa create panna `SessionLocal()`
+     instance) dhan inga `db` parameter-ku bind aagum.
+   - Route return aana appuram (illa raise pannalum), FastAPI
+     `get_db()`-ah `yield`-ku apparam resume pannum, `finally:
+     db.close()`-ah run pannum — so session eppovum close aagum,
+     success-a irundhalum failure-a irundhalum, rendu route-kum thani
+     `try`/`finally` venaam.
+   - `Depends` illama irundha, ovoru route-um thanoda session-ah
+     manually open pannanum, close pannanum-nu ninaichukanum —
+     exception vandha appuram `close()` marandhuduna, database
+     connection quietly leak aagidum.
+4. `list_items(db)` — `crud.get_items(db)`-ah call pannudhu, apparam
+   `[{"id": row.id, "value": row.value} for row in ...]` vachi
+   reshape pannudhu, ovoru ORM object-ayum plain dict-a convert
+   pannum — FastAPI-oda JSON encoder plain Python types-ah dhan
+   serialize pannum, `ItemModel` instance-ah neraa pannadhu. Andha
+   reshaping `main.py`-oda velai, `crud.py`-oda illa.
+5. `get_item(item_id, db)` — `crud.get_item(db, item_id)`-ah call
+   pannudhu, miss aana HTTP-la enna nadakkanum-nu therinjukra ore
+   idam idhu dhan:
    - `if row is None: raise HTTPException(status_code=404, ...)` dhan
-     andha `None`-ah real HTTP `404 Not Found` response-a maathum —
-     munnadi topics-la paartha same `404`-if-missing pattern.
+     `crud.get_item`-oda `None`-ah real HTTP `404 Not Found`
+     response-a maathum — munnadi topics-la paartha same
+     `404`-if-missing pattern.
    - Idha check pannama `row.value`-ku neraa poirundha, `row` `None`-a
      irundhaal Python `AttributeError: 'NoneType' object has no
      attribute 'value'`-ah raise pannum — adha FastAPI generic `500
      Internal Server Error`-a maathidum, missing ID-ku venum clean
-     `404`-ku pathila.
+     `404`-ku pathila. Indha check-ah `crud.py`-la illama `main.py`-la
+     vachurukradhu dhan, `crud.get_item`-ah indha oru HTTP route-ku
+     mattum illama, engayum reuse panna help pannum.
 
 ## Try it
 

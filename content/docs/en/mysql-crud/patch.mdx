@@ -5,14 +5,17 @@ description: Partially updating a row — the field is optional.
 
 ## The code
 
-```python title="main.py"
-import os
-from typing import Optional
+**`database.py`** — env vars, `engine`/`SessionLocal`/`Base`, and the
+`get_db()` dependency:
 
-from fastapi import Depends, FastAPI, HTTPException
-from pydantic import BaseModel
-from sqlalchemy import Column, Integer, String, create_engine
+```python title="database.py"
+import os
+
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+load_dotenv()
 
 MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
 MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
@@ -20,6 +23,8 @@ MYSQL_USER = os.getenv("MYSQL_USER", "root")
 MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
 MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
 
+# Set DATABASE_URL directly to override everything above (e.g. to point
+# at SQLite for a quick local test with no MySQL server at all).
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
     f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
@@ -30,85 +35,155 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 
-class ItemModel(Base):
-    __tablename__ = "crud_patch_items"
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    value = Column(String(255), nullable=False)
-
-
-Base.metadata.create_all(bind=engine)
-
-with SessionLocal() as db:
-    if db.query(ItemModel).count() == 0:
-        db.add_all([ItemModel(value="first"), ItemModel(value="second")])
-        db.commit()
-
-app = FastAPI()
-
-
 def get_db():
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
+```
+
+**`models.py`** — the `ItemModel` table:
+
+```python title="models.py"
+from sqlalchemy import Column, Integer, String
+
+from database import Base
+
+
+class ItemModel(Base):
+    __tablename__ = "items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    value = Column(String(255), nullable=False)
+```
+
+**`schemas.py`** — the request body, with the field optional:
+
+```python title="schemas.py"
+from typing import Optional
+
+from pydantic import BaseModel
 
 
 class ItemPatch(BaseModel):
     value: Optional[str] = None
+```
+
+**`crud.py`** — plain functions that talk to the database, no HTTP:
+
+```python title="crud.py"
+from sqlalchemy.orm import Session
+
+from models import ItemModel
+from schemas import ItemPatch
 
 
-@app.patch("/items/{item_id}")
-def update_item(item_id: int, patch: ItemPatch, db: Session = Depends(get_db)):
-    row = db.get(ItemModel, item_id)
+def get_item(db: Session, item_id: int) -> ItemModel | None:
+    return db.get(ItemModel, item_id)
+
+
+def update_item(db: Session, item_id: int, patch: ItemPatch) -> ItemModel | None:
+    row = get_item(db, item_id)
     if row is None:
-        raise HTTPException(status_code=404, detail="Item not found")
+        return None
     if patch.value is not None:
         row.value = patch.value
     db.commit()
     db.refresh(row)
+    return row
+
+
+def seed_items(db: Session) -> None:
+    if db.query(ItemModel).count() == 0:
+        db.add_all([ItemModel(value="first"), ItemModel(value="second")])
+        db.commit()
+```
+
+**`main.py`** — the `FastAPI()` app and the route:
+
+```python title="main.py"
+from fastapi import Depends, FastAPI, HTTPException
+from sqlalchemy.orm import Session
+
+import crud
+from database import Base, SessionLocal, engine, get_db
+from schemas import ItemPatch
+
+Base.metadata.create_all(bind=engine)
+
+with SessionLocal() as db:
+    crud.seed_items(db)
+
+app = FastAPI()
+
+
+@app.patch("/items/{item_id}")
+def update_item(item_id: int, patch: ItemPatch, db: Session = Depends(get_db)):
+    row = crud.update_item(db, item_id, patch)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Item not found")
     return {"id": row.id, "value": row.value}
 ```
 
 ## Line by line
 
-The `MYSQL_*`/`DATABASE_URL` setup, `engine`/`SessionLocal`/`Base`, the
-`ItemModel` table, `Base.metadata.create_all(...)`, and the seed block above
-are the same shared pieces every page in this topic uses — see the
-[index page](/en/docs/mysql-crud) for those explained line by line. Below
-covers what's specific to this page.
+`database.py`'s connection/session setup and `models.py`'s `ItemModel`
+table are the same shared pieces every page in this topic uses — the
+same `items` table across every verb now — see the
+[index page](/en/docs/mysql-crud) for those explained line by line.
+Below covers what's specific to `schemas.py`, `crud.py`, and `main.py`
+on this page.
 
-1. `db: Session = Depends(get_db)` — same session-per-request pattern
+**`schemas.py`:**
+
+1. **`ItemPatch.value` is optional** — unlike
+   [PUT](/en/docs/mysql-crud/put)'s `ItemRequest`, where `value` is
+   required. Same distinction as the array topic's PATCH: `PUT`
+   demands the full representation, `PATCH` lets you send only what
+   changed.
+
+**`crud.py`:**
+
+2. `get_item(db, item_id)` — `db.get(ItemModel, item_id)`, the same
+   fetch-by-primary-key shortcut every verb in this topic uses:
+   returns the `ItemModel` object if that ID exists, or `None` if it
+   doesn't, without raising an exception either way.
+3. `update_item(db, item_id, patch)`:
+   - **Looks the row up first**, via `get_item`, and returns `None`
+     right back if it's missing — same "crud stays HTTP-agnostic,
+     main.py raises" split used everywhere in this topic.
+   - **`if patch.value is not None: row.value = patch.value`** — only
+     updates the row if the client actually sent a value. That plain
+     assignment alone is enough for SQLAlchemy to notice: `row` came
+     from `get_item` earlier in this same session, so its "unit of
+     work" is already tracking it, and no `db.add(row)` is needed to
+     register the change.
+   - **`db.commit()`** flushes that tracked change (if any) as an
+     `UPDATE` statement and commits the transaction. If the client
+     sent `{}` and `patch.value` stayed `None`, nothing was ever
+     assigned, so this commit has nothing new to write — a harmless
+     no-op.
+   - **`db.refresh(row)`** re-queries `row` from the database
+     afterward, so the object this function returns reflects exactly
+     what's in MySQL right now, whether or not this particular request
+     actually changed anything.
+
+**`main.py`:**
+
+4. `db: Session = Depends(get_db)` — same session-per-request pattern
    as every other route in this topic: FastAPI supplies it via
    `get_db()` before the function runs and closes it automatically once
    the function is done, even on an error.
-2. **Check the row exists first** — `db.get(ItemModel, item_id)`
-   returns the `ItemModel` object if that ID exists, or `None` if it
-   doesn't.
+5. `update_item(item_id, patch, db)` — calls `crud.update_item(db,
+   item_id, patch)`:
    - `if row is None: raise HTTPException(status_code=404, ...)` sends
-     back a clean `404` before the function touches `row` at all.
-   - Skip that check and the later `row.value = patch.value` line
-     would raise `AttributeError: 'NoneType' object has no attribute
-     'value'` on a missing ID — FastAPI turns that into a generic `500
-     Internal Server Error` instead of a proper `404`.
-3. **`ItemPatch.value` is optional** — unlike [PUT](/en/docs/mysql-crud/put)'s
-   `ItemRequest`, where `value` is required. Same distinction as the
-   array topic's PATCH: `PUT` demands the full representation, `PATCH`
-   lets you send only what changed.
-4. **`if patch.value is not None: row.value = patch.value`** — only
-   updates the row if the client actually sent a value. Just like in
-   [PUT](/en/docs/mysql-crud/put), that plain assignment alone is
-   enough for SQLAlchemy to notice: `row` came from `db.get(...)`
-   earlier in this same session, so its "unit of work" is already
-   tracking it, and no `db.add(row)` is needed to register the change.
-5. **`db.commit()`** flushes that tracked change (if any) as an
-   `UPDATE` statement and commits the transaction. If the client sent
-   `{}` and `patch.value` stayed `None`, nothing was ever assigned, so
-   this commit has nothing new to write — a harmless no-op.
-6. **`db.refresh(row)`** re-queries `row` from the database afterward,
-   so the returned `{"id": row.id, "value": row.value}` reflects
-   exactly what's in MySQL right now, whether or not this particular
-   request actually changed anything.
+     back a clean `404` when `crud.update_item` reports a miss.
+   - Skip that check and return `{"id": row.id, "value": row.value}`
+     straight from a `None` result, and Python raises
+     `AttributeError: 'NoneType' object has no attribute 'id'` on a
+     missing ID — FastAPI turns that into a generic `500 Internal
+     Server Error` instead of a proper `404`.
 
 ## Try it
 

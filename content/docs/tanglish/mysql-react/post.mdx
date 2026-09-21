@@ -5,40 +5,71 @@ description: Add form — array version-la irundhu maaradhu.
 
 ## Backend
 
-```python title="example/7/a/main.py"
+**`database.py`** mattrum **`models.py`** — [GET](/tanglish/docs/mysql-react/get)-la
+paartha same connection, session, `ItemModel` table, inga maaradhu.
+
+**`schemas.py`** — indha route validate panra request body:
+
+```python title="schemas.py"
 class ItemRequest(BaseModel):
     value: str
+```
 
+**`crud.py`** — insert function:
 
-@app.post("/items", status_code=status.HTTP_201_CREATED)
-def create_item(item: ItemRequest, db: Session = Depends(get_db)):
+```python title="crud.py"
+def create_item(db: Session, item: ItemRequest) -> ItemModel:
     row = ItemModel(value=item.value)
     db.add(row)
     db.commit()
     db.refresh(row)
+    return row
+```
+
+**`main.py`** — route:
+
+```python title="main.py"
+@app.post("/items", status_code=status.HTTP_201_CREATED)
+def create_item(item: ItemRequest, db: Session = Depends(get_db)):
+    row = crud.create_item(db, item)
     return {"id": row.id, "value": row.value}
 ```
 
 ## Line by line
 
-1. `db: Session = Depends(get_db)` — [GET](/tanglish/docs/mysql-react/get)-la
+`database.py`-oda connection/`get_db()`, `models.py`-oda `ItemModel` —
+shared setup, [index page](/tanglish/docs/mysql-react)-la oru thadava
+explain pannirukom. Keezha indha page-la pudhusa irukradhu:
+`schemas.py`-oda `ItemRequest`, `crud.py`-oda `create_item`, adha
+call panra `main.py`-oda route.
+
+1. `class ItemRequest(BaseModel):` — Pydantic model, FastAPI incoming
+   JSON body-ah validate panna use pannum; `value` illama vandha
+   request, illa wrong type vandhalum, indha route body run aaguradhukku
+   munnadi `422`-a reject aagum.
+2. `db: Session = Depends(get_db)` — [GET](/tanglish/docs/mysql-react/get)-la
    paartha same dependency injection: indha route body run
    aaguradhukku munnadi FastAPI `get_db()`-ah adhoda `yield`
    varaikkum run pannum, pudhusa create panna session-ah `db`-a
    kudukkum, route mudinja appuram (success-a irundhalum failure-a
    irundhalum) andha session-ah automatic-a close pannum.
-2. `row = ItemModel(value=item.value)` — memory-la pudhu ORM object
+3. `row = ItemModel(value=item.value)` — memory-la pudhu ORM object
    build pannudhu; database-la edhuvum ippa write aagala.
-3. `db.add(row)` — pudhu object-ah session-oda pending state-la stage
+4. `db.add(row)` — pudhu object-ah session-oda pending state-la stage
    pannudhu mattum; MySQL-ku edhuvum ippa anuppala.
-4. `db.commit()` — andha pending `INSERT`-ah flush pannum,
+5. `db.commit()` — andha pending `INSERT`-ah flush pannum,
    transaction-ah commit pannum. Idhu dhan MySQL real-a
    auto-increment `id`-ah assign panra point.
-5. `db.refresh(row)` — `row.id` real generated value-ah reflect
+6. `db.refresh(row)` — `row.id` real generated value-ah reflect
    panradhukku, database-la irundhu `row`-ah thirumba query pannudhu.
    Idha skip pannina `row.id` innum stale-a illa `None`-a irukalam —
    SQLAlchemy-ku andha database-generated value thirumba kekkama
    theriyadhu.
+7. `main.py`-la, `crud.create_item(db, item)` full `ItemModel` object
+   return pannum; route dhaan `row.id` mattrum `row.value` mattum
+   plain dict-a reshape pannum, FastAPI JSON-a serialize panradhukku —
+   indha topic-oda ella route-um same "database logic" vs "HTTP
+   response shape" split dhan.
 
 ## Frontend
 
@@ -98,16 +129,16 @@ pannurathu, ID vachi address panni.
 
 ## Ippo varaikkum code
 
-**Backend** — `example/7/a/main.py`, POST varaikkum:
+**Backend** — `example/7/a`, POST varaikkum:
 
-```python title="example/7/a/main.py"
+```python title="database.py"
 import os
 
-from fastapi import Depends, FastAPI, HTTPException, status
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from sqlalchemy import Column, Integer, String, create_engine
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+load_dotenv()
 
 MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
 MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
@@ -125,18 +156,71 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+```
+
+```python title="models.py"
+from sqlalchemy import Column, Integer, String
+
+from database import Base
+
+
 class ItemModel(Base):
     __tablename__ = "crud_react_items"
+
     id = Column(Integer, primary_key=True, autoincrement=True)
     value = Column(String(255), nullable=False)
+```
 
+```python title="schemas.py"
+from pydantic import BaseModel
+
+
+class ItemRequest(BaseModel):
+    value: str
+```
+
+```python title="crud.py"
+from sqlalchemy.orm import Session
+
+from models import ItemModel
+from schemas import ItemRequest
+
+
+def get_items(db: Session) -> list[ItemModel]:
+    return db.query(ItemModel).order_by(ItemModel.id).all()
+
+
+def get_item(db: Session, item_id: int) -> ItemModel | None:
+    return db.get(ItemModel, item_id)
+
+
+def create_item(db: Session, item: ItemRequest) -> ItemModel:
+    row = ItemModel(value=item.value)
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+```
+
+```python title="main.py"
+from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.orm import Session
+
+import crud
+from database import Base, SessionLocal, engine, get_db
+from schemas import ItemRequest
 
 Base.metadata.create_all(bind=engine)
 
 with SessionLocal() as db:
-    if db.query(ItemModel).count() == 0:
-        db.add_all([ItemModel(value="first"), ItemModel(value="second")])
-        db.commit()
+    crud.seed_items(db)
 
 app = FastAPI()
 
@@ -149,27 +233,14 @@ app.add_middleware(
 )
 
 
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-
-class ItemRequest(BaseModel):
-    value: str
-
-
 @app.get("/items")
 def list_items(db: Session = Depends(get_db)):
-    rows = db.query(ItemModel).order_by(ItemModel.id).all()
-    return [{"id": row.id, "value": row.value} for row in rows]
+    return [{"id": row.id, "value": row.value} for row in crud.get_items(db)]
 
 
 @app.get("/items/{item_id}")
 def get_item(item_id: int, db: Session = Depends(get_db)):
-    row = db.get(ItemModel, item_id)
+    row = crud.get_item(db, item_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Item not found")
     return {"id": row.id, "value": row.value}
@@ -177,10 +248,7 @@ def get_item(item_id: int, db: Session = Depends(get_db)):
 
 @app.post("/items", status_code=status.HTTP_201_CREATED)
 def create_item(item: ItemRequest, db: Session = Depends(get_db)):
-    row = ItemModel(value=item.value)
-    db.add(row)
-    db.commit()
-    db.refresh(row)
+    row = crud.create_item(db, item)
     return {"id": row.id, "value": row.value}
 ```
 

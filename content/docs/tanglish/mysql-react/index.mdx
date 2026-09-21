@@ -3,14 +3,146 @@ title: React + MySQL + CRUD
 description: Topic 5-oda same React frontend, real MySQL database mela point panni.
 ---
 
+## Files
+
+[MySQL + CRUD](/tanglish/docs/mysql-crud)-oda same layered structure —
+oru file-ku pathila `database.py`/`models.py`/`schemas.py`/`crud.py`/
+`main.py`:
+
+| File | Responsibility |
+|---|---|
+| `database.py` | env vars, `engine`, `SessionLocal`, `Base`, `get_db()` |
+| `models.py` | `ItemModel` — SQLAlchemy table, indha topic-oda sontha `crud_react_items` |
+| `schemas.py` | `ItemRequest` mattrum `ItemPatch` — indha app-ku rendum venum, body edukkura ovoru verb-kum onnu |
+| `crud.py` | aaru database functions-um — ovoru verb-kum onnu, plus `seed_items` |
+| `main.py` | `FastAPI()` app, `CORSMiddleware`, mattrum aaru routes-um |
+
+Indha topic-oda table adhoda sontha `crud_react_items` —
+[MySQL + CRUD](/tanglish/docs/mysql-crud)-oda shared `items` table-ku
+vera — indha topic run panna, andha topic-oda data-ah touch pannadhu,
+adhu maadhiri thirumbavum.
+
+## Shared setup
+
+**Connection, environment variables-la irundhu** —
+[MySQL + CRUD](/tanglish/docs/mysql-crud) mathiri dhan, plus
+`load_dotenv()` — so local `.env` (`.env.example`-la irundhu copy
+pannirundha) automatic-a pick up aagum:
+
+```python title="database.py"
+import os
+
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+load_dotenv()
+
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
+MYSQL_USER = os.getenv("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
+
+# Set DATABASE_URL directly to override everything above (e.g. to point
+# at SQLite for a quick local test with no MySQL server at all).
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
+)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+```
+
+## Line by line: connection
+
+1. `load_dotenv()` — keezha irukra `os.getenv(...)` call edhuvum run
+   aaguradhukku munnadi, local `.env` file irundha (`.env.example`-la
+   irundhu copy pannirundha) adha environment-ku load pannum. `.env`
+   create pannama vittutta, keezha irukra ella variable-um adhoda
+   default-ku fall back aagum.
+2. `os.getenv("DATABASE_URL", f"mysql+pymysql://...")` — `DATABASE_URL`
+   environment variable set aa irundha adha padikkum (e.g. SQLite
+   override), illa-na individual `MYSQL_*` variables-la irundhu MySQL
+   connection string build pannum. `mysql+pymysql://` SQLAlchemy-ku
+   edhu driver use pannanum-nu sollum — `pymysql` — real-a MySQL-oda
+   pesuradhukku.
+3. `create_engine(DATABASE_URL, pool_pre_ping=True)` — `engine`
+   SQLAlchemy-oda connection factory indha database-ku; session onnu
+   real-a connection venumnu kekkura varaikkum edhuvum open pannadhu.
+   `pool_pre_ping=True` pooled connection-ah reuse panna munnadi
+   lightweight ping vachi test pannum, so MySQL quietly drop panna
+   connection replace aagum, apparam confusing error varradhukku
+   pathila.
+4. `sessionmaker(autocommit=False, autoflush=False, bind=engine)` —
+   indha engine-oda bind panna `Session` objects create panna factory.
+   `autocommit=False` nu solla, `db.commit()` explicit-a call pannura
+   varaikkum database-ku edhuvum write aagadhu; `autoflush=False`
+   nu solla, pending changes ovoru query-kum munnadi silent-a
+   database-ku pogadhu, flush illa commit pannumbodhu mattum — rendum
+   sernthu ovoru route-kum SQL eppo real-a run aagumnu full control
+   kudukkum.
+5. `get_db()` — request-ku oru session open panra dependency, `yield`
+   vachi, apparam eppovum `finally: db.close()`-la close pannum, route
+   raise pannalum. Indha topic-oda ovoru route-um `db: Session =
+   Depends(get_db)` declare panni idha vaangum — edhavadhu verb
+   page-oda line-by-line section-la idha action-la paarunga.
+
+**Table, Python class-a** — real, stable, auto-incrementing `id` vachi,
+array topic-oda position-based index mathiri illama:
+
+```python title="models.py"
+from sqlalchemy import Column, Integer, String
+
+from database import Base
+
+
+class ItemModel(Base):
+    __tablename__ = "crud_react_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    value = Column(String(255), nullable=False)
+```
+
+## Line by line: table
+
+1. `class ItemModel(Base):` — oru ORM model declare pannudhu.
+   `Base`-la (indha `database.py`-la irundhu import panna) inherit
+   panradhu dhan indha class-ah real database table-a map pannudhu,
+   plain Python class mathiri illama.
+2. `__tablename__ = "crud_react_items"` — indha topic-oda sontha
+   table, [MySQL + CRUD](/tanglish/docs/mysql-crud)-oda shared `items`
+   table-la irundhu vera vachirukku, so indha topic run panna andha
+   topic-oda data-oda collide aagadhu.
+3. `id = Column(Integer, primary_key=True, autoincrement=True)` —
+   real, stable, auto-incrementing integer primary key, ovoru
+   insert-layum MySQL thanne assign pannum.
+4. `value = Column(String(255), nullable=False)` — required
+   `VARCHAR(255)` column; `nullable=False` nu solla, idha vittutta
+   panra insert-ah MySQL reject pannum.
+5. `main.py` startup-la `Base.metadata.create_all(bind=engine)` call
+   pannum, table illainaa create pannum — everytime app start aagum
+   pothu call panna safe, table already irundha no-op.
+
 ## Backend
 
 [MySQL + CRUD](/tanglish/docs/mysql-crud)-oda aaru routes-um, oru
 app-a sernthu — [Array + CRUD](/tanglish/docs/array-crud)-oda
 routes [React + Array + CRUD](/tanglish/docs/react)-kaga sernthadhu mathiri dhan —
-plus andha topic-oda same `CORSMiddleware`:
+plus andha topic-oda same `CORSMiddleware`, `app` create panna
+udane `main.py`-la register pannirukom:
 
-```python
+```python title="main.py"
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
@@ -89,7 +221,7 @@ vendum:
 1. **Oru thadava database setup** (andha topic-ku already pannirundha skip pannunga):
 
    ```bash
-   pip install sqlalchemy pymysql
+   pip install sqlalchemy pymysql python-dotenv
    ```
 
    ```sql
@@ -103,6 +235,10 @@ vendum:
    export MYSQL_PASSWORD=your-password
    export MYSQL_DB=fastapi_learn
    ```
+
+   ...illana `cp example/7/a/.env.example example/7/a/.env` panni
+   adha edit pannunga — `database.py` adha automatic-a load pannikum.
+   Rendayum skip pannalum sari; melera defaults already baked in.
 
    MySQL kaiyila illaya? Pathila `export DATABASE_URL="sqlite:///./test.db"` pannunga.
 
@@ -129,17 +265,17 @@ Full frontend code indha repo-la `example/7/react`-la irukku (adhoda
 
 ## Full code
 
-**Backend** — `example/7/a/main.py`, aaru verbs-um, MySQL, plus CORS:
+**Backend** — `example/7/a`, aaru files-a split aagi, aaru database
+functions-um, aaru routes-um, plus CORS:
 
-```python title="example/7/a/main.py"
+```python title="database.py"
 import os
-from typing import Optional
 
-from fastapi import Depends, FastAPI, HTTPException, status
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from sqlalchemy import Column, Integer, String, create_engine
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+load_dotenv()
 
 MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
 MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
@@ -159,18 +295,113 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+```
+
+```python title="models.py"
+from sqlalchemy import Column, Integer, String
+
+from database import Base
+
+
 class ItemModel(Base):
     __tablename__ = "crud_react_items"
+
     id = Column(Integer, primary_key=True, autoincrement=True)
     value = Column(String(255), nullable=False)
+```
 
+```python title="schemas.py"
+from typing import Optional
+
+from pydantic import BaseModel
+
+
+class ItemRequest(BaseModel):
+    value: str
+
+
+class ItemPatch(BaseModel):
+    value: Optional[str] = None
+```
+
+```python title="crud.py"
+from sqlalchemy.orm import Session
+
+from models import ItemModel
+from schemas import ItemPatch, ItemRequest
+
+
+def get_items(db: Session) -> list[ItemModel]:
+    return db.query(ItemModel).order_by(ItemModel.id).all()
+
+
+def get_item(db: Session, item_id: int) -> ItemModel | None:
+    return db.get(ItemModel, item_id)
+
+
+def create_item(db: Session, item: ItemRequest) -> ItemModel:
+    row = ItemModel(value=item.value)
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def replace_item(db: Session, item_id: int, item: ItemRequest) -> ItemModel | None:
+    row = get_item(db, item_id)
+    if row is None:
+        return None
+    row.value = item.value
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def update_item(db: Session, item_id: int, patch: ItemPatch) -> ItemModel | None:
+    row = get_item(db, item_id)
+    if row is None:
+        return None
+    if patch.value is not None:
+        row.value = patch.value
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def delete_item(db: Session, item_id: int) -> bool:
+    row = get_item(db, item_id)
+    if row is None:
+        return False
+    db.delete(row)
+    db.commit()
+    return True
+
+
+def seed_items(db: Session) -> None:
+    if db.query(ItemModel).count() == 0:
+        db.add_all([ItemModel(value="first"), ItemModel(value="second")])
+        db.commit()
+```
+
+```python title="main.py"
+from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.orm import Session
+
+import crud
+from database import Base, SessionLocal, engine, get_db
+from schemas import ItemPatch, ItemRequest
 
 Base.metadata.create_all(bind=engine)
 
 with SessionLocal() as db:
-    if db.query(ItemModel).count() == 0:
-        db.add_all([ItemModel(value="first"), ItemModel(value="second")])
-        db.commit()
+    crud.seed_items(db)
 
 app = FastAPI()
 
@@ -185,31 +416,14 @@ app.add_middleware(
 )
 
 
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-
-class ItemRequest(BaseModel):
-    value: str
-
-
-class ItemPatch(BaseModel):
-    value: Optional[str] = None
-
-
 @app.get("/items")
 def list_items(db: Session = Depends(get_db)):
-    rows = db.query(ItemModel).order_by(ItemModel.id).all()
-    return [{"id": row.id, "value": row.value} for row in rows]
+    return [{"id": row.id, "value": row.value} for row in crud.get_items(db)]
 
 
 @app.get("/items/{item_id}")
 def get_item(item_id: int, db: Session = Depends(get_db)):
-    row = db.get(ItemModel, item_id)
+    row = crud.get_item(db, item_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Item not found")
     return {"id": row.id, "value": row.value}
@@ -217,43 +431,31 @@ def get_item(item_id: int, db: Session = Depends(get_db)):
 
 @app.post("/items", status_code=status.HTTP_201_CREATED)
 def create_item(item: ItemRequest, db: Session = Depends(get_db)):
-    row = ItemModel(value=item.value)
-    db.add(row)
-    db.commit()
-    db.refresh(row)
+    row = crud.create_item(db, item)
     return {"id": row.id, "value": row.value}
 
 
 @app.put("/items/{item_id}")
 def replace_item(item_id: int, item: ItemRequest, db: Session = Depends(get_db)):
-    row = db.get(ItemModel, item_id)
+    row = crud.replace_item(db, item_id, item)
     if row is None:
         raise HTTPException(status_code=404, detail="Item not found")
-    row.value = item.value
-    db.commit()
-    db.refresh(row)
     return {"id": row.id, "value": row.value}
 
 
 @app.patch("/items/{item_id}")
 def update_item(item_id: int, patch: ItemPatch, db: Session = Depends(get_db)):
-    row = db.get(ItemModel, item_id)
+    row = crud.update_item(db, item_id, patch)
     if row is None:
         raise HTTPException(status_code=404, detail="Item not found")
-    if patch.value is not None:
-        row.value = patch.value
-    db.commit()
-    db.refresh(row)
     return {"id": row.id, "value": row.value}
 
 
 @app.delete("/items/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_item(item_id: int, db: Session = Depends(get_db)):
-    row = db.get(ItemModel, item_id)
-    if row is None:
+    deleted = crud.delete_item(db, item_id)
+    if not deleted:
         raise HTTPException(status_code=404, detail="Item not found")
-    db.delete(row)
-    db.commit()
 ```
 
 **Frontend** — `example/7/react/src/App.jsx`, full UI:

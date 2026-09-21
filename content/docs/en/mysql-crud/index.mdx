@@ -9,10 +9,34 @@ routes, same request/response shapes — but reading and writing a real
 [SQLAlchemy](https://www.sqlalchemy.org/) instead of a Python list. Data
 survives a restart; array positions become real, stable database IDs.
 
+## One folder, five files
+
+Each letter's code (`example/6/a` through `example/6/e`) is split into
+layers instead of one flat `main.py`:
+
+| File | Responsibility |
+|---|---|
+| `database.py` | env vars, `engine`, `SessionLocal`, `Base`, `get_db()` |
+| `models.py` | `ItemModel` — the SQLAlchemy table |
+| `schemas.py` | the Pydantic request body — only where a verb needs one (skipped for GET and DELETE) |
+| `crud.py` | plain functions that talk to the database, no HTTP |
+| `main.py` | the `FastAPI()` app and its route(s) |
+
+`database.py` and `models.py` are identical across all five folders —
+see "The pieces every page below shares" further down for those
+explained line by line. Each verb page below covers its own
+`crud.py`/`main.py` split in full.
+
+All five folders point at the same `items` table (not five separate
+tables), so they share state if run against the same database — if
+you've already run another lesson against the same database, run
+`GET /items` first to see which ids currently exist before trying a
+`curl`/Postman example below that references a specific id.
+
 ## Setup
 
 ```bash
-pip install sqlalchemy pymysql
+pip install sqlalchemy pymysql python-dotenv
 ```
 
 Create the database once, in your MySQL client:
@@ -29,6 +53,15 @@ export MYSQL_PORT=3306
 export MYSQL_USER=root
 export MYSQL_PASSWORD=your-password
 export MYSQL_DB=fastapi_learn
+```
+
+...or copy `.env.example` to `.env` and edit it there instead — either
+way works, since `database.py` loads `.env` automatically. Skipping
+both is also fine: the defaults above (`root`, no password, on
+`127.0.0.1`) are already baked in.
+
+```bash
+cp .env.example .env
 ```
 
 No MySQL handy? Point `DATABASE_URL` at a SQLite file instead — the same
@@ -50,7 +83,10 @@ uvicorn main:app --reload
 
 ## The pieces every page below shares
 
-**Connection, from environment variables:**
+These three pieces live in `database.py` and `models.py` in every
+folder, byte-for-byte the same from `6/a` through `6/e`.
+
+**Connection, from environment variables (in `database.py`):**
 
 ```python
 DATABASE_URL = os.getenv(
@@ -61,7 +97,7 @@ engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 ```
 
-## Line by line: the connection
+## Line by line: the connection (in database.py)
 
 1. `os.getenv("DATABASE_URL", f"mysql+pymysql://...")` — reads the
    `DATABASE_URL` environment variable if it's set (e.g. the SQLite
@@ -83,8 +119,8 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
    only when you flush or commit — together they give every route full
    control over exactly when SQL actually runs.
 
-**The table, as a Python class** — with a real, stable, auto-incrementing
-`id`, unlike the array topic's position-based index:
+**The table, as a Python class (in `models.py`)** — with a real, stable,
+auto-incrementing `id`, unlike the array topic's position-based index:
 
 ```python
 class ItemModel(Base):
@@ -95,7 +131,7 @@ class ItemModel(Base):
 Base.metadata.create_all(bind=engine)
 ```
 
-## Line by line: the table
+## Line by line: the table (in models.py)
 
 1. `class ItemModel(Base):` — declares an ORM model. Inheriting from
    `Base` (SQLAlchemy's declarative base) is what makes this class map
@@ -112,8 +148,9 @@ Base.metadata.create_all(bind=engine)
    from `Base`. Safe to call every time the app starts — it's a no-op
    once the table is already there.
 
-**A session per request, via `Depends`** — the same dependency-injection
-pattern from earlier topics, now managing a real database connection:
+**A session per request, via `Depends` (in `database.py`)** — the same
+dependency-injection pattern from earlier topics, now managing a real
+database connection:
 
 ```python
 def get_db():
@@ -124,7 +161,7 @@ def get_db():
         db.close()
 ```
 
-## Line by line: the dependency
+## Line by line: the dependency (in database.py)
 
 1. `db = SessionLocal()` — opens one fresh database session.
 2. `yield db` — hands that session to whichever route declares

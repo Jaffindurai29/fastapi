@@ -5,48 +5,74 @@ description: Editing a row, addressed by database ID.
 
 ## Backend
 
-```python title="example/7/a/main.py"
-@app.put("/items/{item_id}")
-def replace_item(item_id: int, item: ItemRequest, db: Session = Depends(get_db)):
-    row = db.get(ItemModel, item_id)
+**`database.py`** and **`models.py`** — same connection, session, and
+`ItemModel` table as [GET](/en/docs/mysql-react/get), unchanged here.
+
+**`schemas.py`** — `ItemRequest`, the same request body
+[POST](/en/docs/mysql-react/post) already validates against; PUT reuses
+it, since replacing a row's value needs the same shape as creating one.
+
+**`crud.py`** — the replace function:
+
+```python title="crud.py"
+def replace_item(db: Session, item_id: int, item: ItemRequest) -> ItemModel | None:
+    row = get_item(db, item_id)
     if row is None:
-        raise HTTPException(status_code=404, detail="Item not found")
+        return None
     row.value = item.value
     db.commit()
     db.refresh(row)
+    return row
+```
+
+**`main.py`** — the route:
+
+```python title="main.py"
+@app.put("/items/{item_id}")
+def replace_item(item_id: int, item: ItemRequest, db: Session = Depends(get_db)):
+    row = crud.replace_item(db, item_id, item)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Item not found")
     return {"id": row.id, "value": row.value}
 ```
 
 ## Line by line
 
+`database.py`'s connection/`get_db()` and `models.py`'s `ItemModel` are
+shared setup, explained once on the [index page](/en/docs/mysql-react).
+Below covers what's new on this page: `crud.py`'s `replace_item`, and
+the route in `main.py` that calls it.
+
 1. `db: Session = Depends(get_db)` — same dependency injection as
    [GET](/en/docs/mysql-react/get): FastAPI opens a fresh session via
    `get_db()` before this route runs and closes it automatically
    afterward, whether the route succeeds or raises.
-2. **Look the row up first** — `db.get(ItemModel, item_id)` is
-   SQLAlchemy's fetch-by-primary-key shortcut: it returns the
-   `ItemModel` object if that ID exists, or `None` if it doesn't,
+2. **`replace_item` looks the row up first** — `get_item(db, item_id)`
+   is `crud.py`'s own `db.get(ItemModel, item_id)` wrapper: it returns
+   the `ItemModel` object if that ID exists, or `None` if it doesn't,
    without raising an exception either way.
-   - `if row is None: raise HTTPException(status_code=404, ...)` turns
-     that `None` into a clean `404` before anything else runs.
-   - Skip the check and jump straight to `row.value = item.value` when
-     `row` is `None`, and Python raises `AttributeError: 'NoneType'
-     object has no attribute 'value'` — which FastAPI turns into a
-     generic `500 Internal Server Error` instead of a clean `404`.
+   - Back in `main.py`, `if row is None: raise
+     HTTPException(status_code=404, ...)` turns that `None` into a
+     clean `404` before anything else runs.
+   - If `crud.replace_item` itself skipped that check and jumped
+     straight to `row.value = item.value` when `row` is `None`, Python
+     would raise `AttributeError: 'NoneType' object has no attribute
+     'value'` — which FastAPI turns into a generic `500 Internal Server
+     Error` instead of a clean `404`.
 3. **`row.value = item.value`** looks like a plain attribute assignment
-   because it is one — but since `row` came from `db.get(...)` earlier
-   in this same session, SQLAlchemy's "unit of work" is already
+   because it is one — but since `row` came from `get_item(...)`
+   earlier in this same session, SQLAlchemy's "unit of work" is already
    tracking that object, so the change is picked up automatically.
    - Nothing needs to be re-added to the session (no `db.add(row)`
-     here) — that's the real difference from POST, where `row` is a
-     brand-new object the session doesn't know about yet.
+     here) — that's the real difference from `create_item`, where `row`
+     is a brand-new object the session doesn't know about yet.
 4. **`db.commit()`** is what turns that tracked in-memory change into
    an actual `UPDATE ... SET value = ... WHERE id = ...` statement sent
    to MySQL — nothing reaches the database before this line runs.
 5. **`db.refresh(row)`** re-queries `row` from the database afterward,
-   so the returned `{"id": row.id, "value": row.value}` reflects
-   exactly what MySQL now has, rather than just echoing back the input
-   the client already sent.
+   so the `{"id": row.id, "value": row.value}` `main.py` returns
+   reflects exactly what MySQL now has, rather than just echoing back
+   the input the client already sent.
 
 ## Frontend
 
@@ -104,16 +130,16 @@ with a different verb.
 
 ## Code so far
 
-**Backend** — `example/7/a/main.py`, up to PUT:
+**Backend** — `example/7/a`, up to PUT:
 
-```python title="example/7/a/main.py"
+```python title="database.py"
 import os
 
-from fastapi import Depends, FastAPI, HTTPException, status
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from sqlalchemy import Column, Integer, String, create_engine
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+load_dotenv()
 
 MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
 MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
@@ -131,18 +157,81 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+```
+
+```python title="models.py"
+from sqlalchemy import Column, Integer, String
+
+from database import Base
+
+
 class ItemModel(Base):
     __tablename__ = "crud_react_items"
+
     id = Column(Integer, primary_key=True, autoincrement=True)
     value = Column(String(255), nullable=False)
+```
 
+```python title="schemas.py"
+from pydantic import BaseModel
+
+
+class ItemRequest(BaseModel):
+    value: str
+```
+
+```python title="crud.py"
+from sqlalchemy.orm import Session
+
+from models import ItemModel
+from schemas import ItemRequest
+
+
+def get_items(db: Session) -> list[ItemModel]:
+    return db.query(ItemModel).order_by(ItemModel.id).all()
+
+
+def get_item(db: Session, item_id: int) -> ItemModel | None:
+    return db.get(ItemModel, item_id)
+
+
+def create_item(db: Session, item: ItemRequest) -> ItemModel:
+    row = ItemModel(value=item.value)
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def replace_item(db: Session, item_id: int, item: ItemRequest) -> ItemModel | None:
+    row = get_item(db, item_id)
+    if row is None:
+        return None
+    row.value = item.value
+    db.commit()
+    db.refresh(row)
+    return row
+```
+
+```python title="main.py"
+from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.orm import Session
+
+import crud
+from database import Base, SessionLocal, engine, get_db
+from schemas import ItemRequest
 
 Base.metadata.create_all(bind=engine)
 
 with SessionLocal() as db:
-    if db.query(ItemModel).count() == 0:
-        db.add_all([ItemModel(value="first"), ItemModel(value="second")])
-        db.commit()
+    crud.seed_items(db)
 
 app = FastAPI()
 
@@ -155,27 +244,14 @@ app.add_middleware(
 )
 
 
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-
-class ItemRequest(BaseModel):
-    value: str
-
-
 @app.get("/items")
 def list_items(db: Session = Depends(get_db)):
-    rows = db.query(ItemModel).order_by(ItemModel.id).all()
-    return [{"id": row.id, "value": row.value} for row in rows]
+    return [{"id": row.id, "value": row.value} for row in crud.get_items(db)]
 
 
 @app.get("/items/{item_id}")
 def get_item(item_id: int, db: Session = Depends(get_db)):
-    row = db.get(ItemModel, item_id)
+    row = crud.get_item(db, item_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Item not found")
     return {"id": row.id, "value": row.value}
@@ -183,21 +259,15 @@ def get_item(item_id: int, db: Session = Depends(get_db)):
 
 @app.post("/items", status_code=status.HTTP_201_CREATED)
 def create_item(item: ItemRequest, db: Session = Depends(get_db)):
-    row = ItemModel(value=item.value)
-    db.add(row)
-    db.commit()
-    db.refresh(row)
+    row = crud.create_item(db, item)
     return {"id": row.id, "value": row.value}
 
 
 @app.put("/items/{item_id}")
 def replace_item(item_id: int, item: ItemRequest, db: Session = Depends(get_db)):
-    row = db.get(ItemModel, item_id)
+    row = crud.replace_item(db, item_id, item)
     if row is None:
         raise HTTPException(status_code=404, detail="Item not found")
-    row.value = item.value
-    db.commit()
-    db.refresh(row)
     return {"id": row.id, "value": row.value}
 ```
 

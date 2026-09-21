@@ -5,13 +5,17 @@ description: MySQL-la pudhu row insert pannurathu.
 
 ## Code
 
-```python title="main.py"
+**`database.py`** — env vars, `engine`/`SessionLocal`/`Base`, mattrum
+`get_db()` dependency:
+
+```python title="database.py"
 import os
 
-from fastapi import Depends, FastAPI, status
-from pydantic import BaseModel
-from sqlalchemy import Column, Integer, String, create_engine
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+load_dotenv()
 
 MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
 MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
@@ -19,6 +23,8 @@ MYSQL_USER = os.getenv("MYSQL_USER", "root")
 MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
 MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
 
+# Set DATABASE_URL directly to override everything above (e.g. to point
+# at SQLite for a quick local test with no MySQL server at all).
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
     f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
@@ -29,70 +35,139 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 
-class ItemModel(Base):
-    __tablename__ = "crud_post_items"
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    value = Column(String(255), nullable=False)
-
-
-Base.metadata.create_all(bind=engine)
-
-with SessionLocal() as db:
-    if db.query(ItemModel).count() == 0:
-        db.add_all([ItemModel(value="first"), ItemModel(value="second")])
-        db.commit()
-
-app = FastAPI()
-
-
 def get_db():
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
+```
+
+**`models.py`** — `ItemModel` table:
+
+```python title="models.py"
+from sqlalchemy import Column, Integer, String
+
+from database import Base
+
+
+class ItemModel(Base):
+    __tablename__ = "items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    value = Column(String(255), nullable=False)
+```
+
+**`schemas.py`** — `POST`-ku venum request body:
+
+```python title="schemas.py"
+from pydantic import BaseModel
 
 
 class ItemRequest(BaseModel):
     value: str
+```
+
+**`crud.py`** — database-oda pesura plain functions, HTTP edhuvum
+theriyaadhu:
+
+```python title="crud.py"
+from sqlalchemy.orm import Session
+
+from models import ItemModel
+from schemas import ItemRequest
 
 
-@app.post("/items", status_code=status.HTTP_201_CREATED)
-def create_item(item: ItemRequest, db: Session = Depends(get_db)):
+def create_item(db: Session, item: ItemRequest) -> ItemModel:
     row = ItemModel(value=item.value)
     db.add(row)
     db.commit()
     db.refresh(row)
+    return row
+
+
+def seed_items(db: Session) -> None:
+    if db.query(ItemModel).count() == 0:
+        db.add_all([ItemModel(value="first"), ItemModel(value="second")])
+        db.commit()
+```
+
+**`main.py`** — `FastAPI()` app mattrum route:
+
+```python title="main.py"
+from fastapi import Depends, FastAPI, status
+from sqlalchemy.orm import Session
+
+import crud
+from database import Base, SessionLocal, engine, get_db
+from schemas import ItemRequest
+
+Base.metadata.create_all(bind=engine)
+
+with SessionLocal() as db:
+    crud.seed_items(db)
+
+app = FastAPI()
+
+
+@app.post("/items", status_code=status.HTTP_201_CREATED)
+def create_item(item: ItemRequest, db: Session = Depends(get_db)):
+    row = crud.create_item(db, item)
     return {"id": row.id, "value": row.value}
 ```
 
 ## Line by line
 
-Mela irukra `MYSQL_*`/`DATABASE_URL` setup, `engine`/`SessionLocal`/`Base`,
-`ItemModel` table, `Base.metadata.create_all(...)`, mattrum seed block —
-indha topic-la irukra ella page-um share panra same pieces dhan — adha
-line-by-line explain panradha [index page](/tanglish/docs/mysql-crud)-la
-paarunga. Keezha, indha page-ku specific-a enna irukko adha mattum
-paarpom.
+`database.py`-oda connection/session setup mattrum `models.py`-oda
+`ItemModel` table — indha topic-la irukra ella page-um share panra
+same pieces dhan, ippo ella verb-kum same `items` table (five thani
+tables illa) — adha line-by-line explain panradha
+[index page](/tanglish/docs/mysql-crud)-la paarunga. Keezha, indha
+page-ku specific-a `schemas.py`, `crud.py`, mattrum `main.py`-la enna
+irukko adha mattum paarpom.
 
-1. `db: Session = Depends(get_db)` — [GET](/tanglish/docs/mysql-crud/get)-la
+**`schemas.py`:**
+
+1. `ItemRequest(BaseModel)` — required `value: str` field. Route run
+   aaguradhukku munnadi FastAPI request body-ah indha model-ku parse
+   pannudhu, `value` missing-a irundha illa wrong type-a irundha
+   `422 Unprocessable Entity`-ah reject pannidum — route body odane
+   start aagave aagadhu.
+
+**`crud.py`:**
+
+2. `create_item(db, item)`:
+   - `row = ItemModel(value=item.value)` — memory-la pudhu ORM object
+     build pannudhu; database-la edhuvum ippa write aagala.
+   - `db.add(row)` — pudhu object-ah session-oda pending state-la
+     stage pannudhu mattum; MySQL-ku edhuvum ippa anuppala.
+   - `db.commit()` — andha pending `INSERT`-ah flush pannum,
+     transaction-ah commit pannum. Idhu dhan MySQL real-a
+     auto-increment `id`-ah assign panra point.
+   - `db.refresh(row)` — `row.id` real generated value-ah reflect
+     panradhukku, database-la irundhu `row`-ah thirumba query
+     pannudhu. Idha skip pannina `row.id` innum stale-a illa `None`-a
+     irukalam — SQLAlchemy-ku andha database-generated value thirumba
+     kekkama theriyadhu.
+   - `create_item` ORM object-ah adha madhiri return pannudhu, dict
+     illa — response-a shape panradhu call panravanukku left. `crud.py`
+     HTTP-shaped return value edhuvum illama vachurukradhu dhan idha
+     engayum reuse panna help pannum, indha oru route-ku mattum illa.
+
+**`main.py`:**
+
+3. `db: Session = Depends(get_db)` — [GET](/tanglish/docs/mysql-crud/get)-la
    paartha same dependency injection: indha route body run
    aaguradhukku munnadi FastAPI `get_db()`-ah adhoda `yield`
    varaikkum run pannum, pudhusa create panna session-ah `db`-a
    kudukkum, route mudinja appuram (success-a irundhalum failure-a
    irundhalum) andha session-ah automatic-a close pannum.
-2. `row = ItemModel(value=item.value)` — memory-la pudhu ORM object
-   build pannudhu; database-la edhuvum ippa write aagala.
-3. `db.add(row)` — pudhu object-ah session-oda pending state-la stage
-   pannudhu mattum; MySQL-ku edhuvum ippa anuppala.
-4. `db.commit()` — andha pending `INSERT`-ah flush pannum,
-   transaction-ah commit pannum. Idhu dhan MySQL real-a
-   auto-increment `id`-ah assign panra point.
-5. `db.refresh(row)` — `row.id` real generated value-ah reflect
-   panradhukku, database-la irundhu `row`-ah thirumba query pannudhu.
-   Idha skip pannina `row.id` innum stale-a illa `None`-a irukalam —
-   SQLAlchemy-ku andha database-generated value thirumba kekkama
-   theriyadhu.
+4. `create_item(item, db)` — `crud.create_item(db, item)`-ah call
+   pannudhu, return aana `ItemModel`-ah `{"id": row.id, "value":
+   row.value}`-a reshape pannudhu response-ku. Inga miss aagi handle
+   panradhukku edhuvum illa — `POST` eppovum edhavadhu create pannum —
+   so indha topic-oda vera ella verb mathiri illama, indha route-ku
+   raise panna `HTTPException` edhuvum illa.
 
 ## Try it
 

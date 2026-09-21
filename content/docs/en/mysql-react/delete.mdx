@@ -5,33 +5,56 @@ description: Removing a row, and why IDs don't shift.
 
 ## Backend
 
-```python title="example/7/a/main.py"
-@app.delete("/items/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_item(item_id: int, db: Session = Depends(get_db)):
-    row = db.get(ItemModel, item_id)
+**`database.py`** and **`models.py`** — same connection, session, and
+`ItemModel` table as [GET](/en/docs/mysql-react/get), unchanged here.
+
+**`crud.py`** — the delete function:
+
+```python title="crud.py"
+def delete_item(db: Session, item_id: int) -> bool:
+    row = get_item(db, item_id)
     if row is None:
-        raise HTTPException(status_code=404, detail="Item not found")
+        return False
     db.delete(row)
     db.commit()
+    return True
+```
+
+**`main.py`** — the route:
+
+```python title="main.py"
+@app.delete("/items/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_item(item_id: int, db: Session = Depends(get_db)):
+    deleted = crud.delete_item(db, item_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Item not found")
 ```
 
 ## Line by line
 
+`database.py`'s connection/`get_db()` and `models.py`'s `ItemModel` are
+shared setup, explained once on the [index page](/en/docs/mysql-react).
+Below covers what's new on this page: `crud.py`'s `delete_item`, and
+the route in `main.py` that calls it.
+
 1. `db: Session = Depends(get_db)` — same `get_db()` dependency as the
    rest of this topic: FastAPI supplies a fresh session before the
    route runs and closes it automatically afterward.
-2. **Look the row up first** — `db.get(ItemModel, item_id)` returns the
-   `ItemModel` object if that ID exists, or `None` if it doesn't.
-   - `if row is None: raise HTTPException(status_code=404, ...)` sends
-     back a clean `404` before `db.delete(row)` ever runs.
-   - Skip that check and call `db.delete(None)` on a missing ID
-     instead, and SQLAlchemy raises its own error rather than deleting
-     anything — which FastAPI turns into a generic `500 Internal
-     Server Error`, not the clean `404` a missing ID should produce.
+2. **`delete_item` looks the row up first** — `get_item(db, item_id)`
+   returns the `ItemModel` object if that ID exists, or `None` if it
+   doesn't, and returns `False` up to `main.py` in that case rather
+   than raising anything itself.
+   - Back in `main.py`, `if not deleted: raise
+     HTTPException(status_code=404, ...)` sends back a clean `404`
+     whenever `crud.delete_item` reports nothing was deleted.
+   - If `crud.delete_item` called `db.delete(None)` on a missing ID
+     instead of checking first, SQLAlchemy raises its own error rather
+     than deleting anything — which FastAPI turns into a generic `500
+     Internal Server Error`, not the clean `404` a missing ID should
+     produce.
 3. **`db.delete(row)`** marks that already-loaded object for deletion
-   in the session — like `db.add()` on the POST route, this only
-   stages the change; nothing has actually happened to the row in
-   MySQL yet.
+   in the session — like `db.add()` in `create_item`, this only stages
+   the change; nothing has actually happened to the row in MySQL yet.
 4. **`db.commit()`** is what sends the actual
    `DELETE FROM ... WHERE id = ...` statement and commits it — this is
    the line that really removes the row.
@@ -100,17 +123,17 @@ topics: identities that don't move.
 
 ## Full code
 
-**Backend** — `example/7/a/main.py`, all five verbs, MySQL, plus CORS:
+**Backend** — `example/7/a`, all five files, all six database
+functions, all five routes, plus CORS:
 
-```python title="example/7/a/main.py"
+```python title="database.py"
 import os
-from typing import Optional
 
-from fastapi import Depends, FastAPI, HTTPException, status
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from sqlalchemy import Column, Integer, String, create_engine
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+load_dotenv()
 
 MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
 MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
@@ -130,18 +153,113 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+```
+
+```python title="models.py"
+from sqlalchemy import Column, Integer, String
+
+from database import Base
+
+
 class ItemModel(Base):
     __tablename__ = "crud_react_items"
+
     id = Column(Integer, primary_key=True, autoincrement=True)
     value = Column(String(255), nullable=False)
+```
 
+```python title="schemas.py"
+from typing import Optional
+
+from pydantic import BaseModel
+
+
+class ItemRequest(BaseModel):
+    value: str
+
+
+class ItemPatch(BaseModel):
+    value: Optional[str] = None
+```
+
+```python title="crud.py"
+from sqlalchemy.orm import Session
+
+from models import ItemModel
+from schemas import ItemPatch, ItemRequest
+
+
+def get_items(db: Session) -> list[ItemModel]:
+    return db.query(ItemModel).order_by(ItemModel.id).all()
+
+
+def get_item(db: Session, item_id: int) -> ItemModel | None:
+    return db.get(ItemModel, item_id)
+
+
+def create_item(db: Session, item: ItemRequest) -> ItemModel:
+    row = ItemModel(value=item.value)
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def replace_item(db: Session, item_id: int, item: ItemRequest) -> ItemModel | None:
+    row = get_item(db, item_id)
+    if row is None:
+        return None
+    row.value = item.value
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def update_item(db: Session, item_id: int, patch: ItemPatch) -> ItemModel | None:
+    row = get_item(db, item_id)
+    if row is None:
+        return None
+    if patch.value is not None:
+        row.value = patch.value
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def delete_item(db: Session, item_id: int) -> bool:
+    row = get_item(db, item_id)
+    if row is None:
+        return False
+    db.delete(row)
+    db.commit()
+    return True
+
+
+def seed_items(db: Session) -> None:
+    if db.query(ItemModel).count() == 0:
+        db.add_all([ItemModel(value="first"), ItemModel(value="second")])
+        db.commit()
+```
+
+```python title="main.py"
+from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.orm import Session
+
+import crud
+from database import Base, SessionLocal, engine, get_db
+from schemas import ItemPatch, ItemRequest
 
 Base.metadata.create_all(bind=engine)
 
 with SessionLocal() as db:
-    if db.query(ItemModel).count() == 0:
-        db.add_all([ItemModel(value="first"), ItemModel(value="second")])
-        db.commit()
+    crud.seed_items(db)
 
 app = FastAPI()
 
@@ -156,31 +274,14 @@ app.add_middleware(
 )
 
 
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-
-class ItemRequest(BaseModel):
-    value: str
-
-
-class ItemPatch(BaseModel):
-    value: Optional[str] = None
-
-
 @app.get("/items")
 def list_items(db: Session = Depends(get_db)):
-    rows = db.query(ItemModel).order_by(ItemModel.id).all()
-    return [{"id": row.id, "value": row.value} for row in rows]
+    return [{"id": row.id, "value": row.value} for row in crud.get_items(db)]
 
 
 @app.get("/items/{item_id}")
 def get_item(item_id: int, db: Session = Depends(get_db)):
-    row = db.get(ItemModel, item_id)
+    row = crud.get_item(db, item_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Item not found")
     return {"id": row.id, "value": row.value}
@@ -188,43 +289,31 @@ def get_item(item_id: int, db: Session = Depends(get_db)):
 
 @app.post("/items", status_code=status.HTTP_201_CREATED)
 def create_item(item: ItemRequest, db: Session = Depends(get_db)):
-    row = ItemModel(value=item.value)
-    db.add(row)
-    db.commit()
-    db.refresh(row)
+    row = crud.create_item(db, item)
     return {"id": row.id, "value": row.value}
 
 
 @app.put("/items/{item_id}")
 def replace_item(item_id: int, item: ItemRequest, db: Session = Depends(get_db)):
-    row = db.get(ItemModel, item_id)
+    row = crud.replace_item(db, item_id, item)
     if row is None:
         raise HTTPException(status_code=404, detail="Item not found")
-    row.value = item.value
-    db.commit()
-    db.refresh(row)
     return {"id": row.id, "value": row.value}
 
 
 @app.patch("/items/{item_id}")
 def update_item(item_id: int, patch: ItemPatch, db: Session = Depends(get_db)):
-    row = db.get(ItemModel, item_id)
+    row = crud.update_item(db, item_id, patch)
     if row is None:
         raise HTTPException(status_code=404, detail="Item not found")
-    if patch.value is not None:
-        row.value = patch.value
-    db.commit()
-    db.refresh(row)
     return {"id": row.id, "value": row.value}
 
 
 @app.delete("/items/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_item(item_id: int, db: Session = Depends(get_db)):
-    row = db.get(ItemModel, item_id)
-    if row is None:
+    deleted = crud.delete_item(db, item_id)
+    if not deleted:
         raise HTTPException(status_code=404, detail="Item not found")
-    db.delete(row)
-    db.commit()
 ```
 
 **Frontend** — `example/7/react/src/App.jsx`, the whole UI:

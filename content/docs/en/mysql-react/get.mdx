@@ -5,22 +5,90 @@ description: Loading rows, and reaching one by database ID.
 
 ## Backend
 
-```python title="example/7/a/main.py"
+**`database.py`** — connection settings and the `get_db()` dependency, unchanged on every page in this topic:
+
+```python title="database.py"
+import os
+
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+load_dotenv()
+
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
+MYSQL_USER = os.getenv("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
+
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
+)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+```
+
+**`models.py`** — the `ItemModel` table:
+
+```python title="models.py"
+from sqlalchemy import Column, Integer, String
+
+from database import Base
+
+
+class ItemModel(Base):
+    __tablename__ = "crud_react_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    value = Column(String(255), nullable=False)
+```
+
+**`crud.py`** — the two read functions, kept HTTP-agnostic:
+
+```python title="crud.py"
+def get_items(db: Session) -> list[ItemModel]:
+    return db.query(ItemModel).order_by(ItemModel.id).all()
+
+
+def get_item(db: Session, item_id: int) -> ItemModel | None:
+    return db.get(ItemModel, item_id)
+```
+
+**`main.py`** — the two routes, calling into `crud.py`:
+
+```python title="main.py"
 @app.get("/items")
 def list_items(db: Session = Depends(get_db)):
-    rows = db.query(ItemModel).order_by(ItemModel.id).all()
-    return [{"id": row.id, "value": row.value} for row in rows]
+    return [{"id": row.id, "value": row.value} for row in crud.get_items(db)]
 
 
 @app.get("/items/{item_id}")
 def get_item(item_id: int, db: Session = Depends(get_db)):
-    row = db.get(ItemModel, item_id)
+    row = crud.get_item(db, item_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Item not found")
     return {"id": row.id, "value": row.value}
 ```
 
 ## Line by line
+
+`database.py`'s connection settings and `get_db()` dependency, and
+`models.py`'s `ItemModel` table, are the same on every page in this
+topic — see the [index page](/en/docs/mysql-react) for those explained
+line by line. Below covers what's specific to this page: `crud.py`'s
+two read functions, and the routes in `main.py` that call them.
 
 1. `db: Session = Depends(get_db)` — this is FastAPI's dependency
    injection at work: FastAPI calls `get_db()` itself before the route
@@ -36,7 +104,8 @@ def get_item(item_id: int, db: Session = Depends(get_db)):
    - Without `Depends`, every route would have to open and remember to
      close its own session by hand — and a forgotten `close()` after an
      exception quietly leaks a database connection.
-2. `db.query(ItemModel).order_by(ItemModel.id).all()` — three chained
+2. `crud.get_items(db)` runs
+   `db.query(ItemModel).order_by(ItemModel.id).all()` — three chained
    steps, and nothing reaches MySQL until the last one:
    - `db.query(ItemModel)` builds a SELECT scoped to whatever table
      `ItemModel` maps to.
@@ -45,21 +114,25 @@ def get_item(item_id: int, db: Session = Depends(get_db)):
      rows in any order it likes, which could shuffle between requests.
    - `.all()` is what actually executes the query and loads every
      matching row into memory as a list of `ItemModel` objects.
-   - The `{"id": row.id, "value": row.value}` comprehension around it
-     converts each ORM object into a plain dict — FastAPI's JSON
-     encoder can serialize plain Python types, not an `ItemModel`
-     instance directly.
-3. `db.get(ItemModel, item_id)` — SQLAlchemy's shortcut for "fetch by
-   primary key." It returns the `ItemModel` object if a row with that
-   ID exists, or `None` if it doesn't, without raising an exception on
-   a miss.
-   - `if row is None: raise HTTPException(status_code=404, ...)` turns
-     that `None` into a real HTTP `404 Not Found` response — the same
-     404-if-missing pattern as the array version.
-   - Skip that check and go straight to `row.value`, and a missing ID
-     raises `AttributeError: 'NoneType' object has no attribute
-     'value'` instead, which FastAPI turns into a generic `500
-     Internal Server Error`.
+   - Back in `main.py`, the `{"id": row.id, "value": row.value}`
+     comprehension around `crud.get_items(db)` converts each ORM object
+     into a plain dict — FastAPI's JSON encoder can serialize plain
+     Python types, not an `ItemModel` instance directly. That reshaping
+     lives in `main.py`, not `crud.py`, so `crud.py` stays
+     HTTP/JSON-agnostic and only ever hands back ORM objects.
+3. `crud.get_item(db, item_id)` runs `db.get(ItemModel, item_id)` —
+   SQLAlchemy's shortcut for "fetch by primary key." It returns the
+   matching `ItemModel` object if a row with that ID exists, or plain
+   `None` if it doesn't — it does **not** raise an exception on a miss.
+   - Back in `main.py`, `if row is None: raise
+     HTTPException(status_code=404, ...)` is what turns that `None`
+     into an actual HTTP `404 Not Found` response — the same
+     `404`-if-missing pattern from every earlier topic.
+   - Skip that check and go straight to `row.value` when `row` is
+     `None`, and Python raises `AttributeError: 'NoneType' object has
+     no attribute 'value'` instead — which FastAPI turns into a generic
+     `500 Internal Server Error`, not the clean `404` a missing ID
+     deserves.
 
 ## Frontend
 
@@ -102,15 +175,16 @@ Next: [POST](/en/docs/mysql-react/post) — the add form.
 
 ## Code so far
 
-**Backend** — `example/7/a/main.py`, up to GET:
+**Backend** — `example/7/a`, up to GET:
 
-```python title="example/7/a/main.py"
+```python title="database.py"
 import os
 
-from fastapi import Depends, FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import Column, Integer, String, create_engine
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+load_dotenv()
 
 MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
 MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
@@ -128,18 +202,53 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+```
+
+```python title="models.py"
+from sqlalchemy import Column, Integer, String
+
+from database import Base
+
+
 class ItemModel(Base):
     __tablename__ = "crud_react_items"
+
     id = Column(Integer, primary_key=True, autoincrement=True)
     value = Column(String(255), nullable=False)
+```
 
+```python title="crud.py"
+from sqlalchemy.orm import Session
+
+from models import ItemModel
+
+
+def get_items(db: Session) -> list[ItemModel]:
+    return db.query(ItemModel).order_by(ItemModel.id).all()
+
+
+def get_item(db: Session, item_id: int) -> ItemModel | None:
+    return db.get(ItemModel, item_id)
+```
+
+```python title="main.py"
+from fastapi import Depends, FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.orm import Session
+
+import crud
+from database import Base, SessionLocal, engine, get_db
 
 Base.metadata.create_all(bind=engine)
 
 with SessionLocal() as db:
-    if db.query(ItemModel).count() == 0:
-        db.add_all([ItemModel(value="first"), ItemModel(value="second")])
-        db.commit()
+    crud.seed_items(db)
 
 app = FastAPI()
 
@@ -152,23 +261,14 @@ app.add_middleware(
 )
 
 
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-
 @app.get("/items")
 def list_items(db: Session = Depends(get_db)):
-    rows = db.query(ItemModel).order_by(ItemModel.id).all()
-    return [{"id": row.id, "value": row.value} for row in rows]
+    return [{"id": row.id, "value": row.value} for row in crud.get_items(db)]
 
 
 @app.get("/items/{item_id}")
 def get_item(item_id: int, db: Session = Depends(get_db)):
-    row = db.get(ItemModel, item_id)
+    row = crud.get_item(db, item_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Item not found")
     return {"id": row.id, "value": row.value}

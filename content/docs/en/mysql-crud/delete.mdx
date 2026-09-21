@@ -5,12 +5,17 @@ description: Removing a row by ID.
 
 ## The code
 
-```python title="main.py"
+**`database.py`** — env vars, `engine`/`SessionLocal`/`Base`, and the
+`get_db()` dependency:
+
+```python title="database.py"
 import os
 
-from fastapi import Depends, FastAPI, HTTPException, status
-from sqlalchemy import Column, Integer, String, create_engine
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+load_dotenv()
 
 MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
 MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
@@ -18,6 +23,8 @@ MYSQL_USER = os.getenv("MYSQL_USER", "root")
 MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
 MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
 
+# Set DATABASE_URL directly to override everything above (e.g. to point
+# at SQLite for a quick local test with no MySQL server at all).
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
     f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
@@ -28,65 +35,124 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 
-class ItemModel(Base):
-    __tablename__ = "crud_delete_items"
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    value = Column(String(255), nullable=False)
-
-
-Base.metadata.create_all(bind=engine)
-
-with SessionLocal() as db:
-    if db.query(ItemModel).count() == 0:
-        db.add_all([ItemModel(value="first"), ItemModel(value="second")])
-        db.commit()
-
-app = FastAPI()
-
-
 def get_db():
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
+```
+
+**`models.py`** — the `ItemModel` table:
+
+```python title="models.py"
+from sqlalchemy import Column, Integer, String
+
+from database import Base
+
+
+class ItemModel(Base):
+    __tablename__ = "items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    value = Column(String(255), nullable=False)
+```
+
+No `schemas.py` here — `DELETE` has no request body.
+
+**`crud.py`** — plain functions that talk to the database, no HTTP:
+
+```python title="crud.py"
+from sqlalchemy.orm import Session
+
+from models import ItemModel
+
+
+def get_item(db: Session, item_id: int) -> ItemModel | None:
+    return db.get(ItemModel, item_id)
+
+
+def delete_item(db: Session, item_id: int) -> bool:
+    row = get_item(db, item_id)
+    if row is None:
+        return False
+    db.delete(row)
+    db.commit()
+    return True
+
+
+def seed_items(db: Session) -> None:
+    if db.query(ItemModel).count() == 0:
+        db.add_all([ItemModel(value="first"), ItemModel(value="second")])
+        db.commit()
+```
+
+**`main.py`** — the `FastAPI()` app and the route:
+
+```python title="main.py"
+from fastapi import Depends, FastAPI, HTTPException, status
+from sqlalchemy.orm import Session
+
+import crud
+from database import Base, SessionLocal, engine, get_db
+
+Base.metadata.create_all(bind=engine)
+
+with SessionLocal() as db:
+    crud.seed_items(db)
+
+app = FastAPI()
 
 
 @app.delete("/items/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_item(item_id: int, db: Session = Depends(get_db)):
-    row = db.get(ItemModel, item_id)
-    if row is None:
+    deleted = crud.delete_item(db, item_id)
+    if not deleted:
         raise HTTPException(status_code=404, detail="Item not found")
-    db.delete(row)
-    db.commit()
 ```
 
 ## Line by line
 
-The `MYSQL_*`/`DATABASE_URL` setup, `engine`/`SessionLocal`/`Base`, the
-`ItemModel` table, `Base.metadata.create_all(...)`, and the seed block above
-are the same shared pieces every page in this topic uses — see the
-[index page](/en/docs/mysql-crud) for those explained line by line. Below
-covers what's specific to this page.
+`database.py`'s connection/session setup and `models.py`'s `ItemModel`
+table are the same shared pieces every page in this topic uses — the
+same `items` table across every verb now — see the
+[index page](/en/docs/mysql-crud) for those explained line by line.
+Below covers what's specific to `crud.py` and `main.py` on this page.
 
-1. `db: Session = Depends(get_db)` — same `get_db()` dependency as the
+**`crud.py`:**
+
+1. `get_item(db, item_id)` — `db.get(ItemModel, item_id)`, the same
+   fetch-by-primary-key shortcut every verb in this topic uses:
+   returns the `ItemModel` object if that ID exists, or `None` if it
+   doesn't, without raising an exception either way.
+2. `delete_item(db, item_id)`:
+   - **Looks the row up first**, via `get_item`. Unlike every other
+     verb's `crud.py` function, there's no `row` left to hand back
+     after a delete, so a miss is reported by returning `False`
+     instead of `None`.
+   - **`db.delete(row)` then `db.commit()`** — stages the deletion,
+     then writes it. Like `db.add()` on the POST route, `db.delete()`
+     alone only stages the change; nothing has actually happened to
+     the row in MySQL until `db.commit()` runs.
+   - Returns `True` once the row is actually gone — `crud.py` still
+     never raises anything or knows about HTTP status codes.
+
+**`main.py`:**
+
+3. `db: Session = Depends(get_db)` — same `get_db()` dependency as the
    rest of this topic: FastAPI supplies a fresh session before the
    route runs and closes it automatically afterward.
-2. **Look the row up first** — `db.get(ItemModel, item_id)` returns the
-   `ItemModel` object if that ID exists, or `None` if it doesn't.
-   - `if row is None: raise HTTPException(status_code=404, ...)` sends
-     back a clean `404` before `db.delete(row)` ever runs.
-   - Skip that check and call `db.delete(None)` on a missing ID
-     instead, and SQLAlchemy raises its own error rather than deleting
-     anything — which FastAPI turns into a generic `500 Internal
-     Server Error`, not the clean `404` a missing ID should produce.
-3. **`db.delete(row)`** marks that already-loaded object for deletion
-   in the session — like `db.add()` on the POST route, this only
-   stages the change; nothing has actually happened to the row in
-   MySQL yet.
-4. **`db.commit()`** is what sends the actual
-   `DELETE FROM ... WHERE id = ...` statement and commits it — this is
-   the line that really removes the row.
+4. `delete_item(item_id, db)` — calls `crud.delete_item(db, item_id)`
+   and checks `if not deleted:` instead of `if row is None:`, since
+   there's no row to check here — `crud.delete_item`'s `False` is the
+   only signal a miss happened.
+   - `raise HTTPException(status_code=404, ...)` sends back a clean
+     `404` when that miss happens.
+   - Skip that check entirely, and a missing ID would just silently
+     return a `204 No Content` as if something had been deleted, since
+     `crud.delete_item` already handled the miss internally without
+     raising — the check in `main.py` is what turns that quiet `False`
+     into an actual `404` response.
 5. **Unlike the array topic**, deleting a row here never shifts any
    other row's `id` — MySQL's auto-increment `id` is a stable identity,
    not a position in a list. That's one of the real advantages of a

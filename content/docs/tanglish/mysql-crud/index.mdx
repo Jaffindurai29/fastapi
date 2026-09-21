@@ -10,10 +10,35 @@ list-ku pathila real [MySQL](https://www.mysql.com/) table-ah
 Data restart aana survive aagum; array positions real, stable database
 IDs-a maarum.
 
+## Oru folder-la five files
+
+Ovoru letter-oda code-um (`example/6/a` mudhal `example/6/e`
+varaikkum) oru flat `main.py`-ku pathila layers-a split pannirukku:
+
+| File | Responsibility |
+|---|---|
+| `database.py` | env vars, `engine`, `SessionLocal`, `Base`, `get_db()` |
+| `models.py` | `ItemModel` — SQLAlchemy table |
+| `schemas.py` | Pydantic request body — verb-ku body venumna mattum irukkum (GET, DELETE-ku skip) |
+| `crud.py` | database-oda pesura plain functions, HTTP edhuvum theriyaadhu |
+| `main.py` | `FastAPI()` app mattrum adhoda route(s) |
+
+`database.py` mattrum `models.py` aaru folder-layum exact same-a
+irukku — keezha irukra "Keezha irukra ovoru page-um share panra
+pieces"-la adha line-by-line paarunga. Ovoru verb page-um adhoda
+sontha `crud.py`/`main.py` split-ah full-a explain pannum.
+
+Aaru folder-um (`6/a`-la irundhu `6/e` varaikkum) same `items`
+table-ah dhan point pannudhu (five thani tables illa), so same
+database-ku run pannina state share aagum — vera lesson-ah already
+same database-ku run pannirundheenga na, specific id refer panra
+`curl`/Postman example try pannradhukku munnadi `GET /items` run panni
+enna ids ippo irukku-nu paarunga.
+
 ## Setup
 
 ```bash
-pip install sqlalchemy pymysql
+pip install sqlalchemy pymysql python-dotenv
 ```
 
 Indha database-ah once dhan create pannunga, MySQL client-la:
@@ -30,6 +55,16 @@ export MYSQL_PORT=3306
 export MYSQL_USER=root
 export MYSQL_PASSWORD=your-password
 export MYSQL_DB=fastapi_learn
+```
+
+...illana `.env.example`-ah `.env`-ku copy panni adhula edit pannunga —
+rendu vazhi-um work aagum, `database.py` `.env`-ah automatic-a load
+pannudhu-nala. Rendaiyum skip panna kuda problem illa: mela irukra
+defaults (`root`, password illama, `127.0.0.1`-la) already code-la
+baked-in irukku.
+
+```bash
+cp .env.example .env
 ```
 
 MySQL kaiyila illaya? `DATABASE_URL`-ah SQLite file-ku pathila podunga —
@@ -51,7 +86,10 @@ uvicorn main:app --reload
 
 ## Keezha irukra ovoru page-um share panra pieces
 
-**Connection, environment variables-la irundhu:**
+Indha moonu pieces `database.py` mattrum `models.py`-la dhan irukku,
+`6/a` mudhal `6/e` varaikkum ella folder-layum exact same-a.
+
+**Connection, environment variables-la irundhu (`database.py`-la):**
 
 ```python
 DATABASE_URL = os.getenv(
@@ -62,7 +100,7 @@ engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 ```
 
-## Line by line: connection
+## Line by line: connection (database.py-la)
 
 1. `os.getenv("DATABASE_URL", f"mysql+pymysql://...")` — `DATABASE_URL`
    environment variable set-a irundha adha read pannum (mela irukra
@@ -86,8 +124,8 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
    mattum dhan — rendum sethu, exact-a eppo SQL run aagum-nu ovoru
    route-um full control vachurukkum.
 
-**Table, Python class-a** — real, stable, auto-incrementing `id`-oda,
-array topic-oda position-based index illa:
+**Table, Python class-a (`models.py`-la)** — real, stable,
+auto-incrementing `id`-oda, array topic-oda position-based index illa:
 
 ```python
 class ItemModel(Base):
@@ -98,7 +136,7 @@ class ItemModel(Base):
 Base.metadata.create_all(bind=engine)
 ```
 
-## Line by line: table
+## Line by line: table (models.py-la)
 
 1. `class ItemModel(Base):` — oru ORM model declare pannudhu. `Base`-la
    irundhu inherit pannuradhu dhan (SQLAlchemy-oda declarative base)
@@ -117,9 +155,9 @@ Base.metadata.create_all(bind=engine)
    pannum. App start aaguna ovoru thadavayum call panna safe —
    table already irundha idhu no-op.
 
-**Ovoru request-kum oru session, `Depends` vachi** — munnadi topics-la
-paartha same dependency-injection pattern dhan, ippo real database
-connection manage pannudhu:
+**Ovoru request-kum oru session, `Depends` vachi (`database.py`-la)** —
+munnadi topics-la paartha same dependency-injection pattern dhan, ippo
+real database connection manage pannudhu:
 
 ```python
 def get_db():
@@ -130,7 +168,7 @@ def get_db():
         db.close()
 ```
 
-## Line by line: dependency
+## Line by line: dependency (database.py-la)
 
 1. `db = SessionLocal()` — oru pudhu database session open pannum.
 2. `yield db` — andha session-ah `db: Session = Depends(get_db)` nu
