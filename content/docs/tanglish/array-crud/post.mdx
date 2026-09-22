@@ -6,30 +6,27 @@ description: Array-oda end-la pudhu item add pannurathu.
 ## Code
 
 ```python title="main.py"
-from fastapi import FastAPI, status
-from pydantic import BaseModel
+from fastapi import FastAPI
 
 app = FastAPI()
 
 data = ["first", "second"]
 
-class ItemRequest(BaseModel):
-    value: str
-
-@app.post("/items", status_code=status.HTTP_201_CREATED)
-def create_item(item: ItemRequest):
-    data.append(item.value)
-    return {"index": len(data) - 1, "value": item.value}
+@app.post("/items")
+def create_item(value: str):
+    data.append(value)
+    return {"index": len(data) - 1, "value": value}
 ```
 
 ## Line by line
 
-1. Decorator-la `status_code=status.HTTP_201_CREATED` — `POST` routes
-   default-a `200`; "pudhu resource create aachu" nu solla `201` dhan
-   correct code.
-2. `data.append(item.value)` — shared array-oda end-la pudhu value
+1. `def create_item(value: str)` — `value` Pydantic model-um illa,
+   path parameter-um illa nu, FastAPI adha query parameter-ah
+   treat pannum — URL-la irundhu (`?value=third`) read pannum,
+   JSON body-la illa.
+2. `data.append(value)` — shared array-oda end-la pudhu value
    add pannudhu.
-3. `return {"index": len(data) - 1, "value": item.value}` — pudhu item
+3. `return {"index": len(data) - 1, "value": value}` — pudhu item
    engaya landed aachu nu caller-kku exact-a solradhu, so apparam
    [GET](/tanglish/docs/array-crud/get), [PUT](/tanglish/docs/array-crud/put),
    illana [DELETE](/tanglish/docs/array-crud/delete) panna, edhu index nu
@@ -38,10 +35,10 @@ def create_item(item: ItemRequest):
 ## Try it
 
 ```bash
-curl -i -X POST http://127.0.0.1:8000/items -H "Content-Type: application/json" -d "{\"value\": \"third\"}"
+curl -i -X POST "http://127.0.0.1:8000/items?value=third"
 ```
 
-Expected: `201 Created`, `{"index": 2, "value": "third"}`.
+Expected: `200 OK`, `{"index": 2, "value": "third"}`.
 
 Adutha step: [PUT](/tanglish/docs/array-crud/put) — oru item-ah full-a
 replace pannurathu.
