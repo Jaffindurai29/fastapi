@@ -1,6 +1,6 @@
 ---
 title: "4. PATCH"
-description: Partially updating an item — the field is optional.
+description: Partially updating an item — the field is optional, and merges instead of replacing.
 ---
 
 ## The code
@@ -18,7 +18,7 @@ def update_item(item_index: int, value: Optional[str] = None):
     if item_index < 0 or item_index >= len(data):
         raise HTTPException(status_code=404, detail="Item not found")
     if value is not None:
-        data[item_index] = value
+        data[item_index] += value
     return {"index": item_index, "value": data[item_index]}
 ```
 
@@ -32,23 +32,27 @@ def update_item(item_index: int, value: Optional[str] = None):
    touches `data[item_index]`.
 2. **`value: Optional[str] = None`** makes the query parameter optional
    — unlike [PUT](/en/docs/array-crud/put)'s `value: str`, which is
-   required. That's the whole difference between `PUT` and `PATCH`:
+   required. That's the first difference between `PUT` and `PATCH`:
    `PUT` demands the full representation, `PATCH` lets you send only
    what changed.
-3. **`if value is not None:`** — only overwrites the slot if the
-   client actually sent a value. Leaving `value` out of the request
-   leaves the item untouched.
+3. **`data[item_index] += value`** — merges onto the existing value
+   instead of overwriting it, and only runs at all if the client
+   actually sent a value. Leaving `value` out of the request leaves
+   the item untouched.
 
-With only one field on this item, `PUT` and `PATCH` behave almost
-identically — the real difference shows up once a resource has several
-fields and you only want to change one of them.
+With a single-field item, `PUT` and `PATCH` would otherwise set the
+same one field and look identical. Making `PATCH` merge instead of
+replace stands in for "update only part of the resource" — which is
+what `PATCH` means in real APIs, once a resource has several fields.
 
 ## Try it
 
 ```bash
-curl -X PATCH "http://127.0.0.1:8000/items/1?value=patched"
-curl -X PATCH http://127.0.0.1:8000/items/0
+curl -X PATCH "http://127.0.0.1:8000/items/0?value=-patched"
+curl -X PATCH http://127.0.0.1:8000/items/1
 curl -i -X PATCH http://127.0.0.1:8000/items/9  # 404
 ```
+
+Expected for the first call: `{"index": 0, "value": "first-patched"}`.
 
 Next: [DELETE](/en/docs/array-crud/delete) — removing an item.

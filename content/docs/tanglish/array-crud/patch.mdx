@@ -1,6 +1,6 @@
 ---
 title: "4. PATCH"
-description: Partially update panna oru item — field optional.
+description: Partially update panna oru item — field optional, replace pannadhu, merge pannum.
 ---
 
 ## Code
@@ -18,7 +18,7 @@ def update_item(item_index: int, value: Optional[str] = None):
     if item_index < 0 or item_index >= len(data):
         raise HTTPException(status_code=404, detail="Item not found")
     if value is not None:
-        data[item_index] = value
+        data[item_index] += value
     return {"index": item_index, "value": data[item_index]}
 ```
 
@@ -32,24 +32,27 @@ def update_item(item_index: int, value: Optional[str] = None):
    munnadi `HTTPException(404)` raise aagum.
 2. **`value: Optional[str] = None`** query parameter-ah optional-a
    pannudhu — [PUT](/tanglish/docs/array-crud/put)-oda `value: str`-la
-   required-a irukum, idhu vidhyasam. `PUT` mattrum `PATCH`-kum idhu
-   dhan entire difference: `PUT` full representation kekkum, `PATCH`
-   maari irukradha mattum anuppa vidum.
-3. **`if value is not None:`** — client real-a oru value
-   anuppina mattum dhan slot-ah overwrite pannum. `value` anuppama
-   vittal item touch aagadhu.
+   required-a irukum, idhu first vidhyasam. `PUT` full representation
+   kekkum, `PATCH` maari irukradha mattum anuppa vidum.
+3. **`data[item_index] += value`** — existing value-oda merge
+   pannudhu, overwrite pannadhu — client real-a oru value anuppina
+   mattum dhan run aagum. `value` anuppama vittal item touch aagadhu.
 
-Oru field mattum irukra indha item-ku, `PUT` mattrum `PATCH` almost
-same maadhiri dhan work pannum — real difference, resource-la palli
-fields irundhu, ovonna mattum change panna vendumna dhan therium.
+Oru field mattum irukra indha item-ku, `PUT` mattrum `PATCH` `=` vachi
+same maadhiri dhan irukum. `PATCH`-ah `+=` vachi merge panna vachadhu
+dhan "resource-la part mattum update pannurathu"-kku stand-in —
+real APIs-la resource-ku palli fields irundha, `PATCH` idha dhan
+pannum.
 
 ## Try it
 
 ```bash
-curl -X PATCH "http://127.0.0.1:8000/items/1?value=patched"
-curl -X PATCH http://127.0.0.1:8000/items/0
+curl -X PATCH "http://127.0.0.1:8000/items/0?value=-patched"
+curl -X PATCH http://127.0.0.1:8000/items/1
 curl -i -X PATCH http://127.0.0.1:8000/items/9  # 404
 ```
+
+Mudhal call-ku expected: `{"index": 0, "value": "first-patched"}`.
 
 Adutha step: [DELETE](/tanglish/docs/array-crud/delete) — oru item-ah
 remove pannurathu.
