@@ -28,5 +28,6 @@ export function baseOptions(locale: string): BaseLayoutProps {
         url: `/${locale}/docs`,
       },
     ],
+    githubUrl: "https://github.com/Jaffindurai29/fastapi",
   };
 }
