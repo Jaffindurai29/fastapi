@@ -51,13 +51,13 @@ useEffect(() => {
 }, []);
 
 async function loadItems() {
-  const response = await fetch(`${API_URL}/items`);
-  if (!response.ok) {
-    setError(`Failed to load items (status ${response.status})`);
-    return;
+  try {
+    const response = await axios.get(`${API_URL}/items`);
+    setItems(response.data);
+    setError(null);
+  } catch (err) {
+    setError(errorMessage("load items", err));
   }
-  setItems(await response.json());
-  setError(null);
 }
 ```
 
@@ -70,19 +70,19 @@ server actually has, not just an optimistic guess.
 
 ```jsx
 async function reachItem(index) {
-  const response = await fetch(`${API_URL}/items/${index}`);
-  if (!response.ok) {
-    setError(`Failed to reach index ${index} (status ${response.status})`);
+  try {
+    const response = await axios.get(`${API_URL}/items/${index}`);
+    setReached(response.data);
+    setError(null);
+  } catch (err) {
+    setError(errorMessage(`reach index ${index}`, err));
     setReached(null);
-    return;
   }
-  setReached(await response.json());
-  setError(null);
 }
 ```
 
 Stored in its own `reached` state, separate from `items` — so it's
-visibly a fresh fetch, not just re-reading something already on the
+visibly a fresh request, not just re-reading something already on the
 page. Wired to a **"Reach"** button next to each row.
 
 ## Line by line
@@ -90,14 +90,18 @@ page. Wired to a **"Reach"** button next to each row.
 1. `useEffect(() => { loadItems(); }, [])` — the empty dependency array
    means this runs exactly once, right after the first render, loading
    the starting list.
-2. `loadItems()` calls `GET /items`; on failure it sets `error` instead
-   of throwing, so the page shows a message instead of crashing.
+2. `loadItems()` calls `axios.get(...)` for `GET /items`. axios parses
+   the JSON for you, so the array is already in `response.data`. If the
+   request fails, axios throws, and the `catch` sets `error`, so the
+   page shows a message instead of crashing.
 3. `loadItems()` runs again after every create/update/delete elsewhere
    in the app, so the page always reflects what the server actually
    has, not just an optimistic guess.
 4. `reachItem(index)` calls `GET /items/{index}` and stores the result
    in its own `reached` state, separate from `items` — so it's visibly
-   a fresh fetch, not just something already on the page.
+   a fresh request, not just something already on the page. An index
+   that doesn't exist gets a `404`, which axios throws, which lands in
+   `catch` as "Failed to reach index 7 (status 404)".
 5. The **"Reach"** button next to each row calls `reachItem(index)`
    with that row's position.
 
@@ -140,8 +144,14 @@ def get_item(item_index: int):
 
 ```jsx title="example/5/react/src/App.jsx"
 import { useEffect, useState } from "react";
+import axios from "axios";
 
 const API_URL = "http://127.0.0.1:8000";
+
+function errorMessage(action, err) {
+  const status = err.response?.status;
+  return status ? `Failed to ${action} (status ${status})` : `Failed to ${action}: ${err.message}`;
+}
 
 export default function App() {
   const [items, setItems] = useState([]);
@@ -154,26 +164,23 @@ export default function App() {
 
   async function loadItems() {
     try {
-      const response = await fetch(`${API_URL}/items`);
-      if (!response.ok) {
-        throw new Error(`Failed to load items (status ${response.status})`);
-      }
-      setItems(await response.json());
+      const response = await axios.get(`${API_URL}/items`);
+      setItems(response.data);
       setError(null);
     } catch (err) {
-      setError(err.message);
+      setError(errorMessage("load items", err));
     }
   }
 
   async function reachItem(index) {
-    const response = await fetch(`${API_URL}/items/${index}`);
-    if (!response.ok) {
-      setError(`Failed to reach index ${index} (status ${response.status})`);
+    try {
+      const response = await axios.get(`${API_URL}/items/${index}`);
+      setReached(response.data);
+      setError(null);
+    } catch (err) {
+      setError(errorMessage(`reach index ${index}`, err));
       setReached(null);
-      return;
     }
-    setReached(await response.json());
-    setError(null);
   }
 
   return (

@@ -5,6 +5,10 @@ at the MySQL backend from [7/a](../a) instead of the array backend from
 [5/a](../../5/a). Every step below is identical in shape — the diff is
 always the same one change: **index → id**.
 
+Both apps make their requests with axios, set up the same way — see
+[Step 0 in 5/react](../../5/react/STEPS.md) for the `fetch()` vs
+axios differences and the `errorMessage` helper.
+
 ## Step 1 — State
 
 ```jsx
@@ -40,8 +44,10 @@ assuming it landed at `items.length`.
 
 ```jsx
 async function reachItem(id) {
-  const response = await fetch(`${API_URL}/items/${id}`);
-  // ...same as 5/react, just named `id` instead of `index`
+  try {
+    const response = await axios.get(`${API_URL}/items/${id}`);
+    setReached(response.data);
+    // ...same as 5/react, just named `id` instead of `index`
 }
 ```
 
@@ -59,11 +65,13 @@ function startEditing(id, currentValue) {
 }
 
 async function saveEdit(id, method) {
-  const response = await fetch(`${API_URL}/items/${id}`, {
-    method: method, // "PUT" or "PATCH"
-    // ...identical body/logic to 5/react
-  });
-  // ...
+  try {
+    await axios({
+      method: method, // "PUT" or "PATCH"
+      url: `${API_URL}/items/${id}`,
+      // ...identical body/logic to 5/react
+    });
+  } catch (err) { /* ... */ }
   setEditingId(null);
   await loadItems();
 }

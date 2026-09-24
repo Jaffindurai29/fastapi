@@ -96,14 +96,14 @@ function startEditing(id, currentValue) {
 
 ```jsx
 async function saveEdit(id, method) {
-  const response = await fetch(`${API_URL}/items/${id}`, {
-    method: method, // "PUT" or "PATCH"
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ value: editValue }),
-  });
-
-  if (!response.ok) {
-    setError(`Failed to update item (status ${response.status})`);
+  try {
+    await axios({
+      method: method, // "PUT" or "PATCH"
+      url: `${API_URL}/items/${id}`,
+      data: { value: editValue },
+    });
+  } catch (err) {
+    setError(errorMessage("update item", err));
     return;
   }
 
@@ -278,8 +278,14 @@ def replace_item(item_id: int, item: ItemRequest, db: Session = Depends(get_db))
 
 ```jsx title="example/7/react/src/App.jsx"
 import { useEffect, useState } from "react";
+import axios from "axios";
 
 const API_URL = "http://127.0.0.1:8000";
+
+function errorMessage(action, err) {
+  const status = err.response?.status;
+  return status ? `Failed to ${action} (status ${status})` : `Failed to ${action}: ${err.message}`;
+}
 
 export default function App() {
   const [items, setItems] = useState([]);
@@ -296,14 +302,11 @@ export default function App() {
 
   async function loadItems() {
     try {
-      const response = await fetch(`${API_URL}/items`);
-      if (!response.ok) {
-        throw new Error(`Failed to load items (status ${response.status})`);
-      }
-      setItems(await response.json());
+      const response = await axios.get(`${API_URL}/items`);
+      setItems(response.data);
       setError(null);
     } catch (err) {
-      setError(err.message);
+      setError(errorMessage("load items", err));
     }
   }
 
@@ -311,14 +314,10 @@ export default function App() {
     event.preventDefault();
     if (value.trim() === "") return;
 
-    const response = await fetch(`${API_URL}/items`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ value: value }),
-    });
-
-    if (!response.ok) {
-      setError(`Failed to add item (status ${response.status})`);
+    try {
+      await axios.post(`${API_URL}/items`, { value: value });
+    } catch (err) {
+      setError(errorMessage("add item", err));
       return;
     }
 
@@ -327,14 +326,14 @@ export default function App() {
   }
 
   async function reachItem(id) {
-    const response = await fetch(`${API_URL}/items/${id}`);
-    if (!response.ok) {
-      setError(`Failed to reach id ${id} (status ${response.status})`);
+    try {
+      const response = await axios.get(`${API_URL}/items/${id}`);
+      setReached(response.data);
+      setError(null);
+    } catch (err) {
+      setError(errorMessage(`reach id ${id}`, err));
       setReached(null);
-      return;
     }
-    setReached(await response.json());
-    setError(null);
   }
 
   function startEditing(id, currentValue) {
@@ -343,14 +342,14 @@ export default function App() {
   }
 
   async function saveEdit(id, method) {
-    const response = await fetch(`${API_URL}/items/${id}`, {
-      method: method,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ value: editValue }),
-    });
-
-    if (!response.ok) {
-      setError(`Failed to update item (status ${response.status})`);
+    try {
+      await axios({
+        method: method,
+        url: `${API_URL}/items/${id}`,
+        data: { value: editValue },
+      });
+    } catch (err) {
+      setError(errorMessage("update item", err));
       return;
     }
 

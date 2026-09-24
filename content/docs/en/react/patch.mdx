@@ -55,7 +55,7 @@ Compare that to the PUT button from the previous page:
 <button onClick={() => saveEdit(index, "PUT")}>Save (PUT)</button>
 ```
 
-Same component, same request body, same `fetch` call — the only
+Same component, same request body, same `axios` call — the only
 difference on the frontend is the literal string `"PUT"` vs `"PATCH"`
 passed as an argument. That one difference is enough to genuinely
 exercise both HTTP methods against the backend, proving neither button
@@ -79,7 +79,7 @@ is just cosmetic.
    — same function, same body, a different string.
 3. That one string (`"PUT"` vs `"PATCH"`) is the only frontend
    difference between the two buttons — the component, request body,
-   and `fetch` call are all identical.
+   and `axios` call are all identical.
 4. Both buttons sit side by side in edit mode, next to a **"Cancel"**
    button that just sets `editingIndex` back to `null` without saving.
 
@@ -157,8 +157,14 @@ def update_item(item_index: int, patch: ItemPatch):
 
 ```jsx title="example/5/react/src/App.jsx"
 import { useEffect, useState } from "react";
+import axios from "axios";
 
 const API_URL = "http://127.0.0.1:8000";
+
+function errorMessage(action, err) {
+  const status = err.response?.status;
+  return status ? `Failed to ${action} (status ${status})` : `Failed to ${action}: ${err.message}`;
+}
 
 export default function App() {
   const [items, setItems] = useState([]);
@@ -175,14 +181,11 @@ export default function App() {
 
   async function loadItems() {
     try {
-      const response = await fetch(`${API_URL}/items`);
-      if (!response.ok) {
-        throw new Error(`Failed to load items (status ${response.status})`);
-      }
-      setItems(await response.json());
+      const response = await axios.get(`${API_URL}/items`);
+      setItems(response.data);
       setError(null);
     } catch (err) {
-      setError(err.message);
+      setError(errorMessage("load items", err));
     }
   }
 
@@ -190,14 +193,10 @@ export default function App() {
     event.preventDefault();
     if (value.trim() === "") return;
 
-    const response = await fetch(`${API_URL}/items`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ value: value }),
-    });
-
-    if (!response.ok) {
-      setError(`Failed to add item (status ${response.status})`);
+    try {
+      await axios.post(`${API_URL}/items`, { value: value });
+    } catch (err) {
+      setError(errorMessage("add item", err));
       return;
     }
 
@@ -206,14 +205,14 @@ export default function App() {
   }
 
   async function reachItem(index) {
-    const response = await fetch(`${API_URL}/items/${index}`);
-    if (!response.ok) {
-      setError(`Failed to reach index ${index} (status ${response.status})`);
+    try {
+      const response = await axios.get(`${API_URL}/items/${index}`);
+      setReached(response.data);
+      setError(null);
+    } catch (err) {
+      setError(errorMessage(`reach index ${index}`, err));
       setReached(null);
-      return;
     }
-    setReached(await response.json());
-    setError(null);
   }
 
   function startEditing(index, currentValue) {
@@ -222,14 +221,14 @@ export default function App() {
   }
 
   async function saveEdit(index, method) {
-    const response = await fetch(`${API_URL}/items/${index}`, {
-      method: method, // "PUT" or "PATCH"
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ value: editValue }),
-    });
-
-    if (!response.ok) {
-      setError(`Failed to update item (status ${response.status})`);
+    try {
+      await axios({
+        method: method, // "PUT" or "PATCH"
+        url: `${API_URL}/items/${index}`,
+        data: { value: editValue },
+      });
+    } catch (err) {
+      setError(errorMessage("update item", err));
       return;
     }
 

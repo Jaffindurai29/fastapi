@@ -1,6 +1,6 @@
 # 5/react — React frontend, full CRUD
 
-A React app (Vite, no TypeScript) covering all five verbs from
+A React app (Vite + axios, no TypeScript) covering all five verbs from
 [5/a](../a): add, list, reach-by-index, edit (PUT or PATCH), and
 delete. See [STEPS.md](STEPS.md) for how `App.jsx` is built up, one
 operation at a time.
@@ -47,7 +47,10 @@ Open the URL Vite prints (usually
 - **Delete** — the **Delete** button calls `DELETE /items/{index}` and
   refreshes the list.
 
-Every one of those is a plain `fetch()` call in
+Every one of those is a single [axios](https://axios-http.com) call in
 [src/App.jsx](src/App.jsx) against the five routes from
 [5/a](../a/README.md) — no state management library, just
-`useState`/`useEffect`.
+`useState`/`useEffect`. axios parses JSON responses, serializes JSON
+request bodies, and throws on `4xx`/`5xx` so errors land in one
+`catch` (see Step 0 in [STEPS.md](STEPS.md)). `npm install` picks it up
+from `package.json`.

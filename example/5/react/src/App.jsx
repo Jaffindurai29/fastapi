@@ -1,7 +1,15 @@
 import { useEffect, useState } from "react";
+import axios from "axios";
 
 // Where the FastAPI backend is running.
 const API_URL = "http://127.0.0.1:8000";
+
+// axios throws for any non-2xx response, so every call below lives in a
+// try/catch. This turns the thrown error into a readable message.
+function errorMessage(action, err) {
+  const status = err.response?.status;
+  return status ? `Failed to ${action} (status ${status})` : `Failed to ${action}: ${err.message}`;
+}
 
 export default function App() {
   const [items, setItems] = useState([]); // the full array from the server
@@ -20,14 +28,11 @@ export default function App() {
   // READ — GET /items, the whole array.
   async function loadItems() {
     try {
-      const response = await fetch(`${API_URL}/items`);
-      if (!response.ok) {
-        throw new Error(`Failed to load items (status ${response.status})`);
-      }
-      setItems(await response.json());
+      const response = await axios.get(`${API_URL}/items`);
+      setItems(response.data); // axios already parsed the JSON
       setError(null);
     } catch (err) {
-      setError(err.message);
+      setError(errorMessage("load items", err));
     }
   }
 
@@ -36,14 +41,11 @@ export default function App() {
     event.preventDefault();
     if (value.trim() === "") return;
 
-    const response = await fetch(`${API_URL}/items`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ value: value }),
-    });
-
-    if (!response.ok) {
-      setError(`Failed to add item (status ${response.status})`);
+    try {
+      // axios turns the object into JSON and sets Content-Type for us.
+      await axios.post(`${API_URL}/items`, { value: value });
+    } catch (err) {
+      setError(errorMessage("add item", err));
       return;
     }
 
@@ -53,14 +55,14 @@ export default function App() {
 
   // REACH — GET /items/{index}, one specific array position.
   async function reachItem(index) {
-    const response = await fetch(`${API_URL}/items/${index}`);
-    if (!response.ok) {
-      setError(`Failed to reach index ${index} (status ${response.status})`);
+    try {
+      const response = await axios.get(`${API_URL}/items/${index}`);
+      setReached(response.data);
+      setError(null);
+    } catch (err) {
+      setError(errorMessage(`reach index ${index}`, err));
       setReached(null);
-      return;
     }
-    setReached(await response.json());
-    setError(null);
   }
 
   function startEditing(index, currentValue) {
@@ -72,14 +74,14 @@ export default function App() {
   // clicked. Both send the same body here (this item only has one
   // field), but the HTTP method itself is what differs.
   async function saveEdit(index, method) {
-    const response = await fetch(`${API_URL}/items/${index}`, {
-      method: method, // "PUT" or "PATCH"
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ value: editValue }),
-    });
-
-    if (!response.ok) {
-      setError(`Failed to update item (status ${response.status})`);
+    try {
+      await axios({
+        method: method, // "PUT" or "PATCH"
+        url: `${API_URL}/items/${index}`,
+        data: { value: editValue },
+      });
+    } catch (err) {
+      setError(errorMessage("update item", err));
       return;
     }
 
@@ -89,12 +91,10 @@ export default function App() {
 
   // DELETE — DELETE /items/{index}, removes that entry.
   async function deleteItem(index) {
-    const response = await fetch(`${API_URL}/items/${index}`, {
-      method: "DELETE",
-    });
-
-    if (!response.ok) {
-      setError(`Failed to delete item (status ${response.status})`);
+    try {
+      await axios.delete(`${API_URL}/items/${index}`);
+    } catch (err) {
+      setError(errorMessage("delete item", err));
       return;
     }
 
