@@ -1,15 +1,67 @@
 ---
-title: "2. POST"
-description: The add form — unchanged from the array version.
+title: "1. POST"
+description: Adding a row — one POST route, tested in Thunder Client, and a page that shows the result message.
 ---
 
 <GithubLink path="example/7/a" label="Backend on GitHub" />{" "}
 <GithubLink path="example/7/react" label="Frontend on GitHub" />
 
+Start with one verb: **`POST /items`**. The backend has a single route,
+and the React page adds a value and shows **only a message**
+(`Item added: first`) — no list yet. [GET](/en/docs/mysql-react/get)
+adds the list next.
+
 ## Backend
 
-**`database.py`** and **`models.py`** — same connection, session, and
-`ItemModel` table as [GET](/en/docs/mysql-react/get), unchanged here.
+**`database.py`** — connection settings and the `get_db()` dependency, unchanged on every page in this topic:
+
+```python title="database.py"
+import os
+
+from dotenv import load_dotenv
+from sqlalchemy import URL, create_engine
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+load_dotenv()
+
+# URL.create escapes special characters (like "@") in the password.
+# Set DATABASE_URL to override it (e.g. "sqlite:///./test.db").
+DATABASE_URL = os.getenv("DATABASE_URL") or URL.create(
+    "mysql+pymysql",
+    username=os.getenv("MYSQL_USER", "root"),
+    password=os.getenv("MYSQL_PASSWORD", ""),
+    host=os.getenv("MYSQL_HOST", "127.0.0.1"),
+    port=int(os.getenv("MYSQL_PORT", "3306")),
+    database=os.getenv("MYSQL_DB", "fastapi_learn"),
+)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+```
+
+**`models.py`** — the `ItemModel` table:
+
+```python title="models.py"
+from sqlalchemy import Column, Integer, String
+
+from database import Base
+
+
+class ItemModel(Base):
+    __tablename__ = "crud_react_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    value = Column(String(255), nullable=False)
+```
 
 **`schemas.py`** — the request body this route validates against:
 
@@ -29,9 +81,18 @@ def create_item(db: Session, item: ItemRequest) -> ItemModel:
     return row
 ```
 
-**`main.py`** — the route:
+**`main.py`** — CORS, and the route:
 
 ```python title="main.py"
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
 @app.post("/items", status_code=status.HTTP_201_CREATED)
 def create_item(item: ItemRequest, db: Session = Depends(get_db)):
     row = crud.create_item(db, item)
@@ -40,20 +101,30 @@ def create_item(item: ItemRequest, db: Session = Depends(get_db)):
 
 ## Line by line
 
-`database.py`'s connection/`get_db()` and `models.py`'s `ItemModel` are
-shared setup, explained once on the [index page](/en/docs/mysql-react).
-Below covers what's new on this page: `schemas.py`'s `ItemRequest`,
+`database.py`'s connection settings, `models.py`'s `ItemModel` table and
+the CORS setup are shared by every page in this topic — see the
+[index page](/en/docs/mysql-react) for those explained line by line.
+Below covers what's specific to this page: `schemas.py`'s `ItemRequest`,
 `crud.py`'s `create_item`, and the route in `main.py` that calls it.
 
 1. `class ItemRequest(BaseModel):` — a Pydantic model FastAPI uses to
-   validate the incoming JSON body; a request missing `value`, or
-   sending the wrong type, is rejected with a `422` before this route's
-   body ever runs.
-2. `db: Session = Depends(get_db)` — same dependency injection as
-   [GET](/en/docs/mysql-react/get): FastAPI runs `get_db()` up to its
-   `yield` before this route body executes, hands over the freshly
-   created session as `db`, and closes that session automatically once
-   this route finishes, success or failure.
+   validate the incoming JSON body; a request missing `value`, sending
+   the wrong type, or not sending JSON at all, is rejected with a `422`
+   before this route's body ever runs.
+2. `db: Session = Depends(get_db)` — this is FastAPI's dependency
+   injection at work: FastAPI calls `get_db()` itself before the route
+   body runs.
+   - `get_db` is a generator function — notice the `yield` inside it —
+     so FastAPI runs it up to that `yield`, and the value it yields (a
+     fresh `SessionLocal()` instance) becomes whatever gets bound to
+     the `db` parameter here.
+   - Once the route returns (or raises), FastAPI resumes `get_db()`
+     right after the `yield`, running its `finally: db.close()` — so
+     the session always gets closed, success or failure, without this
+     route needing its own `try`/`finally`.
+   - Without `Depends`, every route would have to open and remember to
+     close its own session by hand — and a forgotten `close()` after an
+     exception quietly leaks a database connection.
 3. `row = ItemModel(value=item.value)` — builds a new ORM object in
    memory; nothing is written to the database yet.
 4. `db.add(row)` — only stages the new object in the session's pending
@@ -70,57 +141,114 @@ Below covers what's new on this page: `schemas.py`'s `ItemRequest`,
    `row.value` into the plain dict FastAPI serializes to JSON — the
    same split between "database logic" and "HTTP response shape" as
    every route in this topic.
+8. There's **no GET route yet**. Opening `http://127.0.0.1:8000/items`
+   in a browser sends a GET, so you get `405 Method Not Allowed` — the
+   path exists, that method doesn't. That's expected on this page.
+
+## Test it with Thunder Client
+
+Test the backend on its own before writing any React.
+
+1. **Install once:** VS Code → Extensions (`Ctrl+Shift+X`) → search
+   **Thunder Client** → Install. A ⚡ icon appears in the Activity Bar.
+2. Start the backend:
+
+   ```bash
+   cd example/7/a
+   uvicorn main:app --reload
+   ```
+
+3. ⚡ → **New Request**. Method **POST**, URL
+   `http://127.0.0.1:8000/items`.
+4. **Body** tab → **JSON** (not Text, not Form):
+
+   ```json
+   {
+     "value": "first"
+   }
+   ```
+
+5. **Send**. Expected: **`201 Created`** and
+
+   ```json
+   { "id": 1, "value": "first" }
+   ```
+
+   The `id` is whatever MySQL assigns next — `1` on an empty table,
+   `2` for the next one, and so on.
+
+| You see | Why | Fix |
+|---|---|---|
+| `422` — *"Input should be a valid dictionary or object"* | Body sent as Text/Form, or not valid JSON | Body → **JSON**, send `{"value": "..."}` with double quotes |
+| `422` — *"Field required"* | The key isn't `value` | Use exactly `value` |
+| `405 Method Not Allowed` | Wrong method, or the running app has no POST route | Check the method dropdown, and that `main.py` has `@app.post("/items")` |
+| Connection refused | Backend not running | Start `uvicorn` first |
 
 ## Frontend
 
-## No difference here
+## Add, and show the message
 
-```jsx
-async function addItem(event) {
-  event.preventDefault();
-  if (value.trim() === "") return;
+```jsx title="src/App.js"
+const [newValue, setNewValue] = useState('');
+const [message, setMessage] = useState('');
+const API_URL = 'http://localhost:8000'
 
-  try {
-    await axios.post(`${API_URL}/items`, { value: value });
-  } catch (err) {
-    setError(errorMessage("add item", err));
-    return;
-  }
-
-  setValue("");
-  await loadItems();
+async function addItem() {
+  const response = await axios.post(`${API_URL}/items`, { value: newValue });
+  setMessage(`Item added: ${response.data.value}`);
+  setNewValue('');
 }
 ```
 
-Identical to [React's POST](/en/docs/react/post) — the request body is
-the same `{ value }` shape either way. **The one thing that changed
-happened on the backend, not here:** the database now assigns a real
-`id` to the new row, instead of the frontend assuming it landed at
-`items.length`.
+```jsx
+<input
+  value={newValue}
+  onChange={(e) => setNewValue(e.target.value)}
+  placeholder="New item"
+/>
+<button onClick={addItem}>
+  Add
+</button>
+{message && <p>{message}</p>}
+```
+
+The request is the same as [React's POST](/en/docs/react/post) — the
+body is the same `{ value }` shape either way. **What's new is that the
+page reads the response:** the backend sends back the saved row, and the
+page turns it into a message.
 
 ## Line by line
 
-1. `addItem` is byte-for-byte identical to the array version's
-   function — same `event.preventDefault()`, same empty-value guard,
-   same `axios.post` call and body shape. None of this code deals with item
-   identity (`index` vs `id`) at all, which is exactly why nothing here
-   needed to change.
-2. `event.preventDefault()` still stops the browser's default
-   full-page reload on submit — unrelated to MySQL, unaffected by
-   swapping the backend.
-3. `if (value.trim() === "") return;` still skips the request entirely
-   for an empty or whitespace-only input.
-4. On success, `setValue("")` clears the input, then `await
-   loadItems()` refetches the full list from the backend — this is
-   actually where the new row's `id` shows up on the frontend: it
-   arrives through this refetch, not from anything the frontend
-   computed. Contrast with the array version, where the frontend could
-   already guess the new item's index would be `items.length`.
-5. The one real change lives entirely on the backend: MySQL assigns a
-   real auto-incrementing `id` to the new row, instead of the frontend
-   assuming a computed array position.
+1. **State** — no `items` list yet: just the input (`newValue`) and the
+   `message`.
+2. `API_URL = 'http://localhost:8000'` — where `uvicorn` is running.
+3. `axios.post(...)` with `{ value: newValue }` — axios turns the object
+   into JSON and sets `Content-Type: application/json`, the same body
+   you sent from Thunder Client's JSON tab. Sending anything else (plain
+   text like `` `value` = `first` ``) is what produces the `422`.
+4. `response.data` is the backend's JSON response, so
+   `response.data.value` is the value MySQL just saved. With no GET to
+   refetch the list from, the page shows it as the message.
+5. `setNewValue('')` clears the input after a successful add.
+6. `{message && <p>{message}</p>}` renders the message only once there
+   is one; each add replaces the previous message.
+7. The button calls `addItem` directly with `onClick` — there's no
+   `<form>`, so there's no page reload to prevent.
+8. If the request fails (backend not running, CORS, `422`), axios
+   throws and nothing on the page changes — open the browser console
+   (F12) to see the error. The [GET](/en/docs/mysql-react/get) page's
+   code adds a `try`/`catch` to show errors on the page.
+9. Refresh the page and the message is gone, but the row is still in
+   MySQL. [GET](/en/docs/mysql-react/get) loads it back.
 
-Next: [PUT](/en/docs/mysql-react/put) — editing a row, addressed by ID.
+**Running it:** this is a Create React App project (`npx
+create-react-app`), started with `npm start` on
+[http://localhost:3000](http://localhost:3000) — which is why `main.py`'s
+CORS `allow_origins` includes `http://localhost:3000`. The same
+`App.js` also works as `App.jsx` in the Vite app under
+`example/7/react` (port `5173`).
+
+Next: [GET](/en/docs/mysql-react/get) — loading the rows back.
 
 ## Code so far
 
@@ -130,20 +258,20 @@ Next: [PUT](/en/docs/mysql-react/put) — editing a row, addressed by ID.
 import os
 
 from dotenv import load_dotenv
-from sqlalchemy import create_engine
+from sqlalchemy import URL, create_engine
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
 
 load_dotenv()
 
-MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
-MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
-MYSQL_USER = os.getenv("MYSQL_USER", "root")
-MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
-MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
-
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
+# URL.create escapes special characters (like "@") in the password.
+# Set DATABASE_URL to override it (e.g. "sqlite:///./test.db").
+DATABASE_URL = os.getenv("DATABASE_URL") or URL.create(
+    "mysql+pymysql",
+    username=os.getenv("MYSQL_USER", "root"),
+    password=os.getenv("MYSQL_PASSWORD", ""),
+    host=os.getenv("MYSQL_HOST", "127.0.0.1"),
+    port=int(os.getenv("MYSQL_PORT", "3306")),
+    database=os.getenv("MYSQL_DB", "fastapi_learn"),
 )
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
@@ -187,14 +315,6 @@ from models import ItemModel
 from schemas import ItemRequest
 
 
-def get_items(db: Session) -> list[ItemModel]:
-    return db.query(ItemModel).order_by(ItemModel.id).all()
-
-
-def get_item(db: Session, item_id: int) -> ItemModel | None:
-    return db.get(ItemModel, item_id)
-
-
 def create_item(db: Session, item: ItemRequest) -> ItemModel:
     row = ItemModel(value=item.value)
     db.add(row)
@@ -204,41 +324,25 @@ def create_item(db: Session, item: ItemRequest) -> ItemModel:
 ```
 
 ```python title="main.py"
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
 import crud
-from database import Base, SessionLocal, engine, get_db
+from database import Base, engine, get_db
 from schemas import ItemRequest
 
 Base.metadata.create_all(bind=engine)
-
-with SessionLocal() as db:
-    crud.seed_items(db)
 
 app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:3000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-@app.get("/items")
-def list_items(db: Session = Depends(get_db)):
-    return [{"id": row.id, "value": row.value} for row in crud.get_items(db)]
-
-
-@app.get("/items/{item_id}")
-def get_item(item_id: int, db: Session = Depends(get_db)):
-    row = crud.get_item(db, item_id)
-    if row is None:
-        raise HTTPException(status_code=404, detail="Item not found")
-    return {"id": row.id, "value": row.value}
 
 
 @app.post("/items", status_code=status.HTTP_201_CREATED)
@@ -247,100 +351,42 @@ def create_item(item: ItemRequest, db: Session = Depends(get_db)):
     return {"id": row.id, "value": row.value}
 ```
 
-**Frontend** — `example/7/react/src/App.jsx`, up to POST:
+**Frontend** — `src/App.js`, up to POST:
 
-```jsx title="example/7/react/src/App.jsx"
-import { useEffect, useState } from "react";
-import axios from "axios";
-
-const API_URL = "http://127.0.0.1:8000";
-
-function errorMessage(action, err) {
-  const status = err.response?.status;
-  return status ? `Failed to ${action} (status ${status})` : `Failed to ${action}: ${err.message}`;
-}
+```jsx title="src/App.js"
+import { useState } from 'react'
+import axios from 'axios'
 
 export default function App() {
-  const [items, setItems] = useState([]);
-  const [value, setValue] = useState("");
-  const [reached, setReached] = useState(null);
-  const [error, setError] = useState(null);
+  const [newValue, setNewValue] = useState('');
+  const [message, setMessage] = useState('');
+  const API_URL = 'http://localhost:8000'
 
-  useEffect(() => {
-    loadItems();
-  }, []);
-
-  async function loadItems() {
-    try {
-      const response = await axios.get(`${API_URL}/items`);
-      setItems(response.data);
-      setError(null);
-    } catch (err) {
-      setError(errorMessage("load items", err));
-    }
-  }
-
-  async function addItem(event) {
-    event.preventDefault();
-    if (value.trim() === "") return;
-
-    try {
-      await axios.post(`${API_URL}/items`, { value: value });
-    } catch (err) {
-      setError(errorMessage("add item", err));
-      return;
-    }
-
-    setValue("");
-    await loadItems();
-  }
-
-  async function reachItem(id) {
-    try {
-      const response = await axios.get(`${API_URL}/items/${id}`);
-      setReached(response.data);
-      setError(null);
-    } catch (err) {
-      setError(errorMessage(`reach id ${id}`, err));
-      setReached(null);
-    }
+  async function addItem() {
+    const response = await axios.post(`${API_URL}/items`, { value: newValue });
+    setMessage(`Item added: ${response.data.value}`);
+    setNewValue('');
   }
 
   return (
-    <main style={{ maxWidth: 560, margin: "3rem auto", fontFamily: "sans-serif" }}>
-      <h1>MySQL Store</h1>
-
-      {error && <p style={{ color: "crimson" }}>{error}</p>}
-
-      <form onSubmit={addItem} style={{ display: "flex", gap: "0.5rem" }}>
-        <input
-          value={value}
-          onChange={(event) => setValue(event.target.value)}
-          placeholder="Add a value"
-          style={{ flex: 1, padding: "0.5rem" }}
-        />
-        <button type="submit">Add</button>
-      </form>
-
-      <ul style={{ listStyle: "none", padding: 0, marginTop: "1.5rem" }}>
-        {items.map((item) => (
-          <li
-            key={item.id}
-            style={{ display: "flex", alignItems: "center", gap: "0.5rem", padding: "0.25rem 0" }}
-          >
-            <span style={{ color: "#888", width: "2rem" }}>#{item.id}</span>
-            <span style={{ flex: 1 }}>{item.value}</span>
-            <button onClick={() => reachItem(item.id)}>Reach</button>
-          </li>
-        ))}
-      </ul>
-
-      {reached && (
-        <p style={{ marginTop: "1rem" }}>
-          Reached id <strong>#{reached.id}</strong>: <strong>{reached.value}</strong>
-        </p>
-      )}
-    </main>
-  );
+    <div>
+      <main>
+        <h1>
+          Array
+        </h1>
+        <div>
+          <input
+            value={newValue}
+            onChange={(e) => setNewValue(e.target.value)}
+            placeholder="New item"
+          />
+          <button onClick={addItem}>
+            Add
+          </button>
+        </div>
+        {message && <p>{message}</p>}
+      </main>
+    </div>
+  )
 }
 ```

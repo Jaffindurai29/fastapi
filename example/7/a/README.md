@@ -44,5 +44,27 @@ curl -i -X DELETE http://127.0.0.1:8000/items/3
 `http://127.0.0.1:8000/items` (with `/{id}` where needed), Body → raw →
 JSON where a body is needed.
 
+## Thunder Client (VS Code)
+
+Install once: VS Code → Extensions (`Ctrl+Shift+X`) → search
+**Thunder Client** → Install. A ⚡ icon appears in the Activity Bar.
+Then ⚡ → **New Request** for each of these, POST first:
+
+| # | Method | URL | Body tab | Expected |
+|---|---|---|---|---|
+| 1 | `POST` | `http://127.0.0.1:8000/items` | **JSON**: `{"value": "third"}` | `201 Created`, `{"id": 3, "value": "third"}` |
+| 2 | `GET` | `http://127.0.0.1:8000/items` | none | `200 OK`, every row |
+| 3 | `GET` | `http://127.0.0.1:8000/items/3` | none | `200 OK`, that row (`404` for an unknown ID) |
+| 4 | `PUT` | `http://127.0.0.1:8000/items/3` | **JSON**: `{"value": "replaced"}` | `200 OK`, updated row |
+| 5 | `PATCH` | `http://127.0.0.1:8000/items/3` | **JSON**: `{"value": "patched"}` | `200 OK`, updated row |
+| 6 | `DELETE` | `http://127.0.0.1:8000/items/3` | none | `204 No Content` |
+
+Choose **JSON** in the Body tab, not Text or Form. A body that isn't a
+JSON object, e.g. `` `value` = `first` ``, gets
+`422 — "Input should be a valid dictionary or object"`.
+
+Tip: save the requests into a Thunder Client **Collection** (e.g.
+`mysql-react`) to re-run them with one click.
+
 Windows curl quoting, Postman basics, and "405 Method Not Allowed" are
 covered generically in the [root README](../../../README.md).

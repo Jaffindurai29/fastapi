@@ -1,64 +1,21 @@
 ---
-title: "1. GET"
-description: Rows load pannurathu, database ID vachi oru row reach pannurathu.
+title: "2. GET"
+description: Rows-ah thirumba load pannurathu, database ID vachi oru row reach pannurathu.
 ---
 
 <GithubLink path="example/7/a" label="Backend" />{" "}
 <GithubLink path="example/7/react" label="Frontend" />
 
+[POST](/tanglish/docs/mysql-react/post)-la rows add panni message mattum
+kaatta mudinjudhu. Indha page rendu GET routes add pannudhu — page ella
+rows-ayum list pannalam, ID vachi oru row-ah reach pannalam.
+
 ## Backend
 
-**`database.py`** — connection settings mattrum `get_db()` dependency, indha topic-la ella page-layum maaradhu:
+**`database.py`**, **`models.py`**, **`schemas.py`** — [POST](/tanglish/docs/mysql-react/post)-la
+paartha same connection, session, `ItemModel` table, `ItemRequest`, inga maaradhu.
 
-```python title="database.py"
-import os
-
-from dotenv import load_dotenv
-from sqlalchemy import create_engine
-from sqlalchemy.orm import Session, declarative_base, sessionmaker
-
-load_dotenv()
-
-MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
-MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
-MYSQL_USER = os.getenv("MYSQL_USER", "root")
-MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
-MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
-
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
-)
-
-engine = create_engine(DATABASE_URL, pool_pre_ping=True)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
-
-
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-```
-
-**`models.py`** — `ItemModel` table:
-
-```python title="models.py"
-from sqlalchemy import Column, Integer, String
-
-from database import Base
-
-
-class ItemModel(Base):
-    __tablename__ = "crud_react_items"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    value = Column(String(255), nullable=False)
-```
-
-**`crud.py`** — rendu read functions, HTTP-agnostic-a vechu:
+**`crud.py`** — rendu read functions, HTTP-agnostic-a:
 
 ```python title="crud.py"
 def get_items(db: Session) -> list[ItemModel]:
@@ -69,7 +26,7 @@ def get_item(db: Session, item_id: int) -> ItemModel | None:
     return db.get(ItemModel, item_id)
 ```
 
-**`main.py`** — rendu routes, `crud.py`-ku call pannudhu:
+**`main.py`** — rendu routes, `crud.py`-ah call pannudhu:
 
 ```python title="main.py"
 @app.get("/items")
@@ -93,22 +50,10 @@ same, [index page](/tanglish/docs/mysql-react)-la avatha line by
 line paarunga. Keezha indha page-ku specific-a irukradhu: `crud.py`-oda
 rendu read functions, adha call panra `main.py`-oda routes.
 
-1. `db: Session = Depends(get_db)` — idhu FastAPI-oda dependency
-   injection dhan: route body run aaguradhukku munnadi FastAPI thaan
-   `get_db()`-ah call pannum.
-   - `get_db` oru generator function — adhula `yield` irukku
-     paarunga — so FastAPI adha andha `yield` varaikkum run pannum,
-     adhu yield panra value (pudhusa create panna `SessionLocal()`
-     instance) dhan inga `db` parameter-ku bind aagum.
-   - Route return aana appuram (illa raise pannalum), FastAPI
-     `get_db()`-ah `yield`-ku apparam resume pannum, `finally:
-     db.close()`-ah run pannum — so session eppovum close aagum,
-     success-a irundhalum failure-a irundhalum, indha route-ku thani
-     `try`/`finally` venaam.
-   - `Depends` illama irundha, ovoru route-um thanoda session-ah
-     manually open pannanum, close pannanum-nu ninaichukanum —
-     exception vandha appuram `close()` marandhuduna, database
-     connection quietly leak aagidum.
+1. `db: Session = Depends(get_db)` — [POST](/tanglish/docs/mysql-react/post)-la
+   paartha same dependency injection dhan: route body run aaguradhukku
+   munnadi FastAPI `get_db()` vachi pudhu session open pannum, route
+   mudinja appuram (success-a irundhalum failure-a irundhalum) close pannum.
 2. `crud.get_items(db)` `db.query(ItemModel).order_by(ItemModel.id).all()`-ah
    run pannum — moonu thani steps chain aagi irukku, kadaisi step
    varaikkum MySQL-ku edhuvum pogadhu:
@@ -139,6 +84,40 @@ rendu read functions, adha call panra `main.py`-oda routes.
      Python `AttributeError: 'NoneType' object has no attribute
      'value'`-ah raise pannum, adha FastAPI generic `500 Internal
      Server Error`-a maathidum.
+4. `GET /items` POST-oda same path, vera method. FastAPI **method +
+   path** vachi match pannum — adhanaala dhaan POST page-la `/items`-ku
+   GET anuppuna `404` illa, `405 Method Not Allowed` vandhuchu (path
+   irundhuchu, method illa).
+
+## Thunder Client-la test pannunga
+
+`uvicorn --reload` run aagitu irundha restart venaam — `main.py` save
+pannina adhuve reload aagum.
+
+**Request 1 — ella rows-um GET:**
+
+1. ⚡ → **New Request**, method **GET**, URL `http://127.0.0.1:8000/items`.
+2. Body venam — Body tab-ah empty-a vidunga.
+3. **Send** → `200 OK`, ippo varaikkum irukra ella rows-um — udharanathukku
+   POST page-la add panna `first`, plus innonnu:
+
+   ```json
+   [
+     { "id": 1, "value": "first" },
+     { "id": 2, "value": "second" }
+   ]
+   ```
+
+**Request 2 — ID vachi oru row GET:**
+
+1. **New Request**, **GET**, `http://127.0.0.1:8000/items/1`.
+2. **Send** → `200 OK`, `{"id": 1, "value": "first"}`.
+3. Illadha ID-ku URL maathunga, e.g. `/items/999` →
+   `404 Not Found`, `{"detail": "Item not found"}`.
+
+**Tip:** Thunder Client → **Collections** → **New Collection** (e.g.
+`mysql-react`) → POST, GET requests-ah adhula save pannunga, appuram
+ovvonnayum oru click-la thirumba run pannalam.
 
 ## Frontend
 
@@ -158,6 +137,22 @@ async function reachItem(id) {
 }
 ```
 
+[POST](/tanglish/docs/mysql-react/post)-oda `addItem`-um maarudhu: ippo
+call panna GET irukradhaala, message kaattradhukku pathila list-ah
+refetch pannum — pudhu row adhoda `id`-oda list-la varum:
+
+```jsx
+try {
+  await axios.post(`${API_URL}/items`, { value: value });
+} catch (err) {
+  setError(errorMessage("add item", err));
+  return;
+}
+
+setValue("");
+await loadItems();
+```
+
 **[React's GET](/tanglish/docs/react/get)-oda vidhyasam:** URL innum
 `/items/<something>` dhan — andha something enna **meaning** pannudho
 adhu mattum maari irukku. Munnadi, "array-la 3rd item" nu irundhuchu.
@@ -168,16 +163,21 @@ vandha JSON-ah adha maadhiri dhan store pannum.
 
 ## Line by line
 
-1. `reachItem(id)` array version-oda `reachItem(index)` dhan,
+1. `loadItems()` page open aagumbodhu oru thadava run aagum
+   (`useEffect(..., [])` moolama), vandha JSON-ah store pannum — inga
+   `{ id, value }` objects.
+2. `addItem` ippo `setMessage(...)`-ku pathila `await loadItems()`-la
+   mudiyudhu — pudhu row-oda `id` indha refetch moolama, matha ella
+   rows-oda serndhu varum.
+3. `reachItem(id)` array version-oda `reachItem(index)` dhan,
    `index`-ku pathila `id` engum rename pannirukom — URL, error
    message, mattrum parameter.
-2. `loadItems()` maaradhu — vandha JSON edhuvaagilum (plain strings
-   illana `{ id, value }` objects) adha maadhiri dhan store pannum.
-3. URL pattern `/items/<something>` maaradhu; andha `<something>`
+4. URL pattern `/items/<something>` maaradhu; andha `<something>`
    enna identify pannudho adhu mattum maarudhu — array position-ku
    pathila database ID.
 
-Adutha step: [POST](/tanglish/docs/mysql-react/post) — add form.
+Adutha step: [PUT](/tanglish/docs/mysql-react/put) — oru row-ah edit
+pannurathu, ID vachi address panni.
 
 ## Ippo varaikkum code
 
@@ -187,20 +187,20 @@ Adutha step: [POST](/tanglish/docs/mysql-react/post) — add form.
 import os
 
 from dotenv import load_dotenv
-from sqlalchemy import create_engine
+from sqlalchemy import URL, create_engine
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
 
 load_dotenv()
 
-MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
-MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
-MYSQL_USER = os.getenv("MYSQL_USER", "root")
-MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
-MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
-
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
+# URL.create escapes special characters (like "@") in the password.
+# Set DATABASE_URL to override it (e.g. "sqlite:///./test.db").
+DATABASE_URL = os.getenv("DATABASE_URL") or URL.create(
+    "mysql+pymysql",
+    username=os.getenv("MYSQL_USER", "root"),
+    password=os.getenv("MYSQL_PASSWORD", ""),
+    host=os.getenv("MYSQL_HOST", "127.0.0.1"),
+    port=int(os.getenv("MYSQL_PORT", "3306")),
+    database=os.getenv("MYSQL_DB", "fastapi_learn"),
 )
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
@@ -229,10 +229,19 @@ class ItemModel(Base):
     value = Column(String(255), nullable=False)
 ```
 
+```python title="schemas.py"
+from pydantic import BaseModel
+
+
+class ItemRequest(BaseModel):
+    value: str
+```
+
 ```python title="crud.py"
 from sqlalchemy.orm import Session
 
 from models import ItemModel
+from schemas import ItemRequest
 
 
 def get_items(db: Session) -> list[ItemModel]:
@@ -241,15 +250,30 @@ def get_items(db: Session) -> list[ItemModel]:
 
 def get_item(db: Session, item_id: int) -> ItemModel | None:
     return db.get(ItemModel, item_id)
+
+
+def create_item(db: Session, item: ItemRequest) -> ItemModel:
+    row = ItemModel(value=item.value)
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def seed_items(db: Session) -> None:
+    if db.query(ItemModel).count() == 0:
+        db.add_all([ItemModel(value="first"), ItemModel(value="second")])
+        db.commit()
 ```
 
 ```python title="main.py"
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
 import crud
 from database import Base, SessionLocal, engine, get_db
+from schemas import ItemRequest
 
 Base.metadata.create_all(bind=engine)
 
@@ -260,7 +284,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:3000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -278,7 +302,17 @@ def get_item(item_id: int, db: Session = Depends(get_db)):
     if row is None:
         raise HTTPException(status_code=404, detail="Item not found")
     return {"id": row.id, "value": row.value}
+
+
+@app.post("/items", status_code=status.HTTP_201_CREATED)
+def create_item(item: ItemRequest, db: Session = Depends(get_db)):
+    row = crud.create_item(db, item)
+    return {"id": row.id, "value": row.value}
 ```
+
+`seed_items` GET-oda serndhu varudhu: startup-la table empty-a irundha
+rendu starter rows add pannum, so page first time open pannumbodhu list
+blank-a irukadhu. POST page-la already rows add pannirundha, edhuvum pannadhu.
 
 **Frontend** — `example/7/react/src/App.jsx`, GET varaikkum:
 
@@ -295,6 +329,7 @@ function errorMessage(action, err) {
 
 export default function App() {
   const [items, setItems] = useState([]);
+  const [value, setValue] = useState("");
   const [reached, setReached] = useState(null);
   const [error, setError] = useState(null);
 
@@ -310,6 +345,21 @@ export default function App() {
     } catch (err) {
       setError(errorMessage("load items", err));
     }
+  }
+
+  async function addItem(event) {
+    event.preventDefault();
+    if (value.trim() === "") return;
+
+    try {
+      await axios.post(`${API_URL}/items`, { value: value });
+    } catch (err) {
+      setError(errorMessage("add item", err));
+      return;
+    }
+
+    setValue("");
+    await loadItems();
   }
 
   async function reachItem(id) {
@@ -328,6 +378,16 @@ export default function App() {
       <h1>MySQL Store</h1>
 
       {error && <p style={{ color: "crimson" }}>{error}</p>}
+
+      <form onSubmit={addItem} style={{ display: "flex", gap: "0.5rem" }}>
+        <input
+          value={value}
+          onChange={(event) => setValue(event.target.value)}
+          placeholder="Add a value"
+          style={{ flex: 1, padding: "0.5rem" }}
+        />
+        <button type="submit">Add</button>
+      </form>
 
       <ul style={{ listStyle: "none", padding: 0, marginTop: "1.5rem" }}>
         {items.map((item) => (

@@ -36,22 +36,20 @@ pannirundha) automatic-a pick up aagum:
 import os
 
 from dotenv import load_dotenv
-from sqlalchemy import create_engine
+from sqlalchemy import URL, create_engine
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
 
 load_dotenv()
 
-MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
-MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
-MYSQL_USER = os.getenv("MYSQL_USER", "root")
-MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
-MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
-
-# Set DATABASE_URL directly to override everything above (e.g. to point
-# at SQLite for a quick local test with no MySQL server at all).
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
+# URL.create escapes special characters (like "@") in the password.
+# Set DATABASE_URL to override it (e.g. "sqlite:///./test.db").
+DATABASE_URL = os.getenv("DATABASE_URL") or URL.create(
+    "mysql+pymysql",
+    username=os.getenv("MYSQL_USER", "root"),
+    password=os.getenv("MYSQL_PASSWORD", ""),
+    host=os.getenv("MYSQL_HOST", "127.0.0.1"),
+    port=int(os.getenv("MYSQL_PORT", "3306")),
+    database=os.getenv("MYSQL_DB", "fastapi_learn"),
 )
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
@@ -74,12 +72,18 @@ def get_db():
    irundhu copy pannirundha) adha environment-ku load pannum. `.env`
    create pannama vittutta, keezha irukra ella variable-um adhoda
    default-ku fall back aagum.
-2. `os.getenv("DATABASE_URL", f"mysql+pymysql://...")` — `DATABASE_URL`
-   environment variable set aa irundha adha padikkum (e.g. SQLite
+2. `os.getenv("DATABASE_URL") or URL.create(...)` — `DATABASE_URL`
+   environment variable set aa irundha adha use pannum (e.g. SQLite
    override), illa-na individual `MYSQL_*` variables-la irundhu MySQL
-   connection string build pannum. `mysql+pymysql://` SQLAlchemy-ku
-   edhu driver use pannanum-nu sollum — `pymysql` — real-a MySQL-oda
-   pesuradhukku.
+   URL build pannum. `"mysql+pymysql"` SQLAlchemy-ku edhu driver use
+   pannanum-nu sollum — `pymysql` — real-a MySQL-oda pesuradhukku.
+   - Yen f-string (`f"mysql+pymysql://root:{password}@localhost/..."`)
+     illama `URL.create(...)`? `my@pass123` maari password-la `@` irundha,
+     URL format already password-ayum host-ayum pirikka `@` use
+     pannudhu — f-string version break aagidum. `URL.create` special
+     characters-ah thaane escape pannidum.
+   - `port=int(...)` — environment variables eppovum string dhan;
+     `URL.create`-ku port number-a venum.
 3. `create_engine(DATABASE_URL, pool_pre_ping=True)` — `engine`
    SQLAlchemy-oda connection factory indha database-ku; session onnu
    real-a connection venumnu kekkura varaikkum edhuvum open pannadhu.
@@ -148,7 +152,7 @@ udane `main.py`-la register pannirukom:
 ```python title="main.py"
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:3000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -162,8 +166,9 @@ app.add_middleware(
    JavaScript vera origin-oda response-ah padikkanumna, browser
    kekkura HTTP headers add pannum.
 2. `allow_origins=[...]` — indha API-ku cross-origin request anuppa
-   allow panna rendu origins mattum: Vite dev server, `localhost`/
-   `127.0.0.1`, port `5173`. Vera edhuvum request indha backend-ku
+   allow panna origins mattum: Vite dev server, `localhost`/
+   `127.0.0.1`, port `5173`, mattrum Create React App (`npm start`),
+   `localhost:3000`. Vera edhuvum request indha backend-ku
    vara munnadiye browser dhan block pannidum.
 3. `allow_credentials=True` — cookies/auth headers cross-origin
    anuppa allow pannum. Indha example use pannala, aana aprom
@@ -210,8 +215,8 @@ match panna rename pannirukom — array-la position illa, database ID.
 
 ## Indha topic-la irukra pages
 
-1. [GET](/tanglish/docs/mysql-react/get) — rows load pannurathu, ID vachi oru row reach pannurathu.
-2. [POST](/tanglish/docs/mysql-react/post) — add form (maaradhu).
+1. [POST](/tanglish/docs/mysql-react/post) — add form, Thunder Client-la test panni, result message kaatturathu.
+2. [GET](/tanglish/docs/mysql-react/get) — rows-ah thirumba load pannurathu, ID vachi oru row reach pannurathu.
 3. [PUT](/tanglish/docs/mysql-react/put) — "Save (PUT)" button, ID vachi address pannurathu.
 4. [PATCH](/tanglish/docs/mysql-react/patch) — "Save (PATCH)" button, ID vachi address pannurathu.
 5. [DELETE](/tanglish/docs/mysql-react/delete) — row-ah delete pannurathu, mattrum IDs yeandhukku shift aagadhu.
@@ -276,22 +281,20 @@ functions-um, aaru routes-um, plus CORS:
 import os
 
 from dotenv import load_dotenv
-from sqlalchemy import create_engine
+from sqlalchemy import URL, create_engine
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
 
 load_dotenv()
 
-MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
-MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
-MYSQL_USER = os.getenv("MYSQL_USER", "root")
-MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
-MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
-
-# Set DATABASE_URL directly to override everything above (e.g. to point
-# at SQLite for a quick local test with no MySQL server at all).
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
+# URL.create escapes special characters (like "@") in the password.
+# Set DATABASE_URL to override it (e.g. "sqlite:///./test.db").
+DATABASE_URL = os.getenv("DATABASE_URL") or URL.create(
+    "mysql+pymysql",
+    username=os.getenv("MYSQL_USER", "root"),
+    password=os.getenv("MYSQL_PASSWORD", ""),
+    host=os.getenv("MYSQL_HOST", "127.0.0.1"),
+    port=int(os.getenv("MYSQL_PORT", "3306")),
+    database=os.getenv("MYSQL_DB", "fastapi_learn"),
 )
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
@@ -413,7 +416,7 @@ app = FastAPI()
 # API, so the browser needs explicit permission to read the response.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:3000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

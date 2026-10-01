@@ -1,4 +1,4 @@
 {
   "title": "React + MySQL + CRUD",
-  "pages": ["index", "get", "post", "put", "patch", "delete"]
+  "pages": ["index", "post", "get", "put", "patch", "delete"]
 }
