@@ -1,0 +1,223 @@
+---
+title: Pagination & Filtering
+description: GET /items-ah oru thadava oru page mattum return panna, filter/sort panna, nonsense parameters-ah reject panna, total-ah solla kathukudukkurom.
+---
+
+<GithubLink path="example/9" />
+
+Ippo varaikkum ovoru `GET /items`-um **full table**-ah return
+pannuchu. Rendu rows-ku adhu ok, aana rendu million rows-na real
+problem: oru request-e ella row-ayum memory-ku load panni, JSON-a
+maathi, megabytes-ah network-la anuppum. Indha topic list endpoint-ku
+**oru thadava oru page** return panna, request-la kettaa **filter mattrum
+sort** panna, **nonsense parameters-ah reject** panna, kadaisiya total-a
+**evlo pages irukku**-nu client-ku solla kathukudukkudhu.
+
+Idhu ellam **query parameters** vachi dhan nadakkudhu — path-ku
+appuram varra `?key=value&key=value` part. FastAPI-la adhu path-la
+illadha function arguments, avlo dhan.
+
+Table oru chinna product catalog, `catalog_items` — anju categories-la
+(`books`, `electronics`, `toys`, `kitchen`, `garden`) 25 rows seed
+pannirukku, so ovoru filter-kum ovoru page-kum paakkura maadhiri
+edhavadhu velai irukkum.
+
+## Oru folder-la five files
+
+Ovoru letter-um (`example/9/a` mudhal `example/9/d` varaikkum)
+[MySQL + CRUD](/tanglish/docs/mysql-crud)-la paartha same layered
+layout dhan, kooda [Validation](/tanglish/docs/validation)-la irundhu
+`schemas.py` + `response_model` pattern:
+
+| File | Responsibility |
+|---|---|
+| `database.py` | env vars, `engine`, `SessionLocal`, `Base`, `get_db()` |
+| `models.py` | `ItemModel` — `catalog_items` table |
+| `schemas.py` | `ItemOut` (veliya pogumbodhu oru row eppadi irukkum), kooda 9/c-la `FilterParams`, 9/d-la `ItemPage` |
+| `crud.py` | filter, sort, page panra query, kooda 25-row seed |
+| `main.py` | `FastAPI()` app; query parameters route signatures-la dhan irukku |
+
+`database.py` mattrum `models.py` naalu folder-layum byte-for-byte same
+— keezha "Keezha irukra ovoru page-um share panra pieces"-la adha
+line-by-line paarunga. Ovoru page-um adhoda sontha `crud.py`,
+`main.py`, `schemas.py`-ah full-a explain pannum.
+
+Naalu folder-um **ore** table, `catalog_items`-ah share pannudhu, so
+edhaiyum reset pannama letters-ku naduvula switch pannalaam. Table
+empty-a irundha mattum dhan seed run aagum, so endha letter-ah
+first start pannalum same 25 rows (ids 1–25) irukkum.
+
+## Setup
+
+Pudhu packages edhuvum illa — ellame
+[MySQL + CRUD](/tanglish/docs/mysql-crud)-kaga already install
+pannitom:
+
+```bash
+pip install fastapi uvicorn sqlalchemy pymysql python-dotenv
+```
+
+9/c-oda query-parameter model-ku **FastAPI 0.115 illa adhukku mela**
+venum; `pip show fastapi` pazhaya version-nu sonna,
+`pip install -U fastapi` run pannunga.
+
+Database, `.env`, SQLite fallback ellam
+[MySQL + CRUD setup](/tanglish/docs/mysql-crud) maadhiri-ye — same
+`fastapi_learn` database, adhukulla oru pudhu table, first run-la
+automatic-a create aagum. MySQL kaiyila illaya?
+
+```bash
+export DATABASE_URL="sqlite:///./test.db"
+```
+
+## Indha topic-ah eppadi run pannurathu
+
+Backend mattum dhan. Setup-ah oru thadava pannunga, apparam unga ku
+venum letter-ah run pannunga:
+
+```bash
+cd example/9/a   # illana b, c, d
+uvicorn main:app --reload
+```
+
+Apparam [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
+open pannunga — ovoru query parameter-um thani input box-a varum,
+adhu dhan avangala try panna easy vazhi.
+
+**`&` irukra URL-ah quote pannunga.** Indha topic-la onnukku mela query
+parameter irukra ovoru `curl`-um double quotes-kulla irukku:
+
+```bash
+curl "http://127.0.0.1:8000/items?category=books&limit=5"
+```
+
+Quotes illama, unga shell `&`-ah "idha background-la run pannu"-nu
+eduthukkum, URL-ah andha idathula cut pannidum — `curl`-ku
+`?category=books` mattum dhan theriyum, `limit=5` thani (use illadha)
+command-a run aagum. Double quotes bash, zsh, PowerShell, cmd ellathulayum
+work aagum.
+
+## Keezha irukra ovoru page-um share panra pieces
+
+Indha rendu files-um `9/a`, `9/b`, `9/c`, `9/d`-la exact same.
+
+**`database.py`** — [MySQL + CRUD](/tanglish/docs/mysql-crud)-la
+paartha same connection mattrum session setup, maathama:
+
+```python title="database.py"
+import os
+
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+load_dotenv()
+
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
+MYSQL_USER = os.getenv("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
+
+# Set DATABASE_URL directly to override everything above (e.g. to point
+# at SQLite for a quick local test with no MySQL server at all).
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
+)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+```
+
+## Line by line: database.py
+
+1. `load_dotenv()` — `.env` file irundha adha process-oda environment
+   variables-ku read pannum, so keezha irukra `os.getenv(...)` calls
+   adha paakkum. `.env` illaya? Edhuvum aagadhu, defaults use aagum.
+2. `MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")` mattrum adhoda
+   naalu siblings — ovoru connection detail-um oru environment
+   variable-la irundhu varum, second argument-a work aagra local
+   default irukku.
+3. `DATABASE_URL = os.getenv("DATABASE_URL", f"mysql+pymysql://...")` —
+   `DATABASE_URL` set-a irundha (mela irukra SQLite override), adhu
+   dhan jeyikkum; illana `MYSQL_*` values vachi URL build aagum.
+   `mysql+pymysql://` na, SQLAlchemy MySQL-oda `pymysql` driver moola
+   pesanum-nu artham.
+4. `create_engine(DATABASE_URL, pool_pre_ping=True)` — engine
+   SQLAlchemy-oda connection factory. `pool_pre_ping=True` pool-la
+   irukra connection-ah reuse panna munnadi ping pannum, so idle-a
+   irundhappo MySQL drop panna connection unga request-ah fail
+   pannama silent-a replace aagum.
+5. `sessionmaker(autocommit=False, autoflush=False, bind=engine)` —
+   `Session` objects-kaana factory. `db.commit()` call pannra varaikkum
+   edhuvum write aagadhu, unga-ku theriyama edhuvum munnadiye pogadhu.
+   (Indha topic one-time seed thavira read mattum dhan pannudhu.)
+6. `Base = declarative_base()` — ovoru model-um inherit panra parent
+   class; endha classes tables-nu SQLAlchemy-ku idhu vachi dhan
+   theriyum.
+7. `get_db()` — oru session open pannum, `db: Session = Depends(get_db)`
+   nu ketta route-ku `yield` pannum, route mudinja appuram `finally`-la
+   close pannum — success-a irundhalum error-a irundhalum.
+
+**`models.py`** — munnadi vida rich-aana table, so paging, filtering,
+sorting-ku real columns irukku:
+
+```python title="models.py"
+from sqlalchemy import Column, DateTime, Float, Integer, String, func
+
+from database import Base
+
+
+# 9/a–9/d all use this exact model, so they can share one table.
+class ItemModel(Base):
+    __tablename__ = "catalog_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(100), nullable=False)
+    category = Column(String(50), nullable=False)
+    price = Column(Float, nullable=False)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+```
+
+## Line by line: models.py
+
+1. `__tablename__ = "catalog_items"` — munnadi topics-oda `items`
+   table-la irundhu thani-aana pudhu table, so indha topic-oda 25-row
+   seed angu neenga create panna rows-oda mothaadhu.
+2. `id = Column(Integer, primary_key=True, autoincrement=True)` —
+   unique, stable key. Inga adhu innum mukkiyam: ovoru page-kum fixed,
+   repeat aagra order kudukkura tie-breaker idhu dhan.
+3. `name = Column(String(100), nullable=False)` — `?search=` idhukulla
+   dhan thedum.
+4. `category = Column(String(50), nullable=False)` — `?category=` idha
+   exact-a match pannum.
+5. `price = Column(Float, nullable=False)` — `?min_price=`,
+   `?max_price=` idhoda dhan compare aagum, sort panna natural-aana
+   column-um idhu.
+6. `created_at = Column(DateTime, nullable=False, server_default=func.now())`
+   — `server_default=func.now()` na, value illama insert aagra row-ku
+   **database-e** current time-ah fill pannum, so seed adha set panna
+   thevaiyilla. 25 seed rows-um ore nerathula insert aagudhu, so
+   ellathukkum (kittathatta) same timestamp — adhunaala dhan 9/b-la
+   idha vachi sort pannumbodhu tie-breaker venum.
+7. MySQL + CRUD pages maadhiri illama, `models.py`-la
+   `Base.metadata.create_all(...)` illa — ovoru `main.py`-um startup-la
+   adha oru thadava call pannum, apparam table empty-a irundha
+   `crud.seed_items(db)` 25 rows-ah insert pannum.
+
+## Indha topic-la irukra pages
+
+1. [skip/limit pagination](/tanglish/docs/pagination/skip-limit) — `?skip=10&limit=5`, paging-ku munnadi eppovum `ORDER BY` yen pannanum.
+2. [Search, filter, sort](/tanglish/docs/pagination/filter-sort) — optional filters onnu onna add pannurathu; `sort_by`-ku whitelist-a `Literal`.
+3. [Query(...) validation](/tanglish/docs/pagination/query-validation) — `ge`/`le`/`min_length`, repeat aagra `?category=`, query params-ku oru Pydantic model.
+4. [Page envelope](/tanglish/docs/pagination/page-envelope) — `?page=2&size=10` `items`, `total`, `page`, `size`, `pages` return pannudhu.

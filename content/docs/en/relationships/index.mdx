@@ -1,0 +1,156 @@
+---
+title: Relationships
+description: Linking tables with foreign keys, returning nested JSON without an N+1 flood, all-or-nothing writes, and deletes you can undo.
+---
+
+<GithubLink path="example/11" />
+
+Every app so far had **one** table. Real data lives in several tables
+that point at each other: an item belongs to a category, an item has
+many tags, an order has many lines. This topic:
+
+- **links tables** with a foreign key and SQLAlchemy `relationship()`;
+- **returns nested JSON** (a category inside an item, items inside a
+  category) without quietly running one query per row;
+- **makes multi-step writes all-or-nothing** with a transaction;
+- **"deletes" rows without losing them**, with a `deleted_at` column.
+
+| Page | What it covers |
+|---|---|
+| [1. One-to-many](/en/docs/relationships/one-to-many) | `ForeignKey`, `relationship()`, `back_populates`; checking a foreign key in code (`404`); refusing to delete a parent that still has children (`409`) |
+| [2. Nested responses](/en/docs/relationships/nested-responses) | `category` inside an item, `items` inside a category; the N+1 query problem; `selectinload` / `joinedload`; why `ItemSummary` exists |
+| [3. Many-to-many](/en/docs/relationships/many-to-many) | Tags through an association table (`secondary=`); attach/detach routes; idempotent `PUT` |
+| [4. Transactions](/en/docs/relationships/transactions) | Placing an order: one `commit` at the end, `rollback` on any error — next to an `/orders/unsafe` twin that leaves a half-written order behind |
+| [5. Soft delete](/en/docs/relationships/soft-delete) | A `deleted_at` column instead of `DELETE`; hide, restore, purge; what it costs |
+
+## The layout: routers, one per resource
+
+The code layout is the one from
+[Project structure](/en/docs/project-structure): `main.py` only builds
+the app, and each resource gets its own module in `routers/`. 11/a, for
+example:
+
+```text
+example/11/a/
+├── .env.example
+├── __init__.py
+├── crud.py
+├── database.py
+├── main.py
+├── models.py
+├── README.md
+├── schemas.py
+├── STEPS.md
+└── routers/
+    ├── __init__.py
+    ├── categories.py
+    └── items.py
+```
+
+| File | Responsibility |
+|---|---|
+| `database.py` | env vars, `engine`, `SessionLocal`, `Base`, `get_db()` — byte-for-byte the same as [MySQL + CRUD](/en/docs/mysql-crud) |
+| `models.py` | the SQLAlchemy tables — now two or more per letter, linked by foreign keys |
+| `schemas.py` | Pydantic request/response models — some now contain other models |
+| `crud.py` | plain functions that talk to the database, no HTTP |
+| `routers/*.py` | one `APIRouter` per resource (`categories.py`, `items.py`, `tags.py`, `orders.py`, ...) |
+| `main.py` | creates the tables, seeds them, builds `FastAPI()` and plugs the routers in |
+| `__init__.py`, `routers/__init__.py` | empty — they only mark the folders as Python packages |
+
+## Which tables each letter uses
+
+- **11/a, 11/b and 11/c share two tables, `rel_categories` and
+  `rel_items`.** Their columns are identical in all three, so whichever
+  letter runs first creates and seeds them, and the others see the same
+  rows (2 categories, 4 items). 11/c only adds a Python-side
+  relationship plus two new tables, `rel_tags` and `rel_item_tags`.
+- **11/d has its own shop:** `shop_products`, `shop_orders` and
+  `shop_order_lines`.
+- **11/e has its own `soft_items`.**
+
+Every table is created on startup by `Base.metadata.create_all(...)`
+and seeded if it's empty.
+
+## Setup
+
+No new packages — `relationship()`, `selectinload`, `joinedload` and
+`Table` all ship with SQLAlchemy, which you installed for MySQL + CRUD.
+If you're starting fresh:
+
+```bash
+pip install fastapi uvicorn sqlalchemy pymysql python-dotenv
+```
+
+The database setup is exactly the same as
+[MySQL + CRUD](/en/docs/mysql-crud) — same `fastapi_learn` database,
+same `MYSQL_*` environment variables or `.env` file (every folder has
+a `.env.example`), same SQLite fallback:
+
+```bash
+export DATABASE_URL="sqlite:///./test.db"
+```
+
+## Running this topic
+
+Backend only. Pick a letter and run it from inside its folder (the
+imports like `from routers import items` are relative to that folder):
+
+```bash
+cd example/11/a   # or b, c, d, e
+uvicorn main:app --reload
+```
+
+Open [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs) to try
+every route from the browser.
+
+## The pieces every page below shares
+
+`database.py` is identical in all five folders — and identical to
+topic 6's. See the [MySQL + CRUD index](/en/docs/mysql-crud) for it
+explained line by line. One line in it becomes the star of
+[Transactions](/en/docs/relationships/transactions):
+
+```python
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+```
+
+`autocommit=False` means nothing is permanent until you call
+`db.commit()`. Every route so far changed one row and committed; once a
+route changes many rows, **when** you commit is the whole lesson.
+
+**The `main.py` shape (every letter):**
+
+```python
+Base.metadata.create_all(bind=engine)
+
+with SessionLocal() as db:
+    crud.seed(db)
+
+app = FastAPI()
+
+app.include_router(categories.router)
+app.include_router(items.router)
+```
+
+## Line by line: main.py
+
+1. `Base.metadata.create_all(bind=engine)` — creates every table that
+   inherits from `Base` and doesn't exist yet. With foreign keys it also
+   works out the **order**: it sees that `rel_items.category_id` points
+   at `rel_categories`, so it creates `rel_categories` first. It never
+   changes a table that already exists — which is why the shared tables
+   in 11/a–c must have identical columns.
+2. `with SessionLocal() as db: crud.seed(db)` — opens one session at
+   startup, inserts the sample rows if the table is empty, and closes it
+   again when the `with` block ends.
+3. `app.include_router(...)` — each router module brings its own
+   `prefix` (`/categories`, `/items`, ...) and `tags` (for grouping in
+   `/docs`). `main.py` doesn't define a single route itself.
+
+## Pages in this topic
+
+1. [One-to-many](/en/docs/relationships/one-to-many) — a category has many items.
+2. [Nested responses](/en/docs/relationships/nested-responses) — objects inside objects, and the N+1 problem.
+3. [Many-to-many](/en/docs/relationships/many-to-many) — tags through an association table.
+4. [Transactions](/en/docs/relationships/transactions) — all-or-nothing orders.
+5. [Soft delete](/en/docs/relationships/soft-delete) — `deleted_at` instead of `DELETE`.

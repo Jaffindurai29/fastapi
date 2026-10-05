@@ -9,6 +9,12 @@
     "array-crud",
     "react",
     "mysql-crud",
-    "mysql-react"
+    "mysql-react",
+    "validation",
+    "pagination",
+    "project-structure",
+    "relationships",
+    "security",
+    "migrations"
   ]
 }

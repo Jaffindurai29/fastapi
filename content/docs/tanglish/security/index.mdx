@@ -1,0 +1,199 @@
+---
+title: Security
+description: Neenga yaaru, enna panna allowed, edhu eppovum leak aaga koodadhu — password hashing, JWT login, roles, ownership, encryption, rate limiting mattrum oru React client.
+---
+
+<GithubLink path="example/12" />
+
+Ivlo naal, yaar venumnaalum edha venumnaalum call pannalaam. Indha
+topic, ovoru real API-um answer panna vendiya moonu kelvigalai add
+pannudhu:
+
+- **Neenga yaaru?** — *authentication*: username mattrum password, oru
+  hash-oda check panni, oru signed token-ku maathuradhu.
+- **Neenga enna panna allowed?** — *authorization*: roles (admin vs user)
+  mattrum ownership (unga rows, vera yaaroda rows illa).
+- **Edhu eppovum leak aaga koodadhu?** — passwords, secrets, sensitive
+  columns, guess panna mudiyura internal ids.
+
+Ovoru page-um oru piece-ah mattum, adhoda sontha folder-la
+solli kudukkum. [Everything together](/tanglish/docs/security/secure-app)
+(12/j) ella-thaiyum oru "secure notes" API-la oru security checklist-oda
+serkkum, [React frontend](/tanglish/docs/security/react) (12/react) login
+panni tokens-ah fresh-a vachukkum.
+
+## Same layered layout, konjam pudhu files
+
+Ovoru letter-um [MySQL + CRUD](/tanglish/docs/mysql-crud)-la paartha
+layered layout-ah dhan use pannudhu (`database.py`, `models.py`,
+`schemas.py`, `crud.py`, `main.py`), plus konjam pudhu files:
+
+| File | Responsibility |
+|---|---|
+| `config.py` | environment-la irundhu read panra settings: `SECRET_KEY`, algorithm, token lifetimes |
+| `security.py` | password hashing mattrum tokens create/decode panradhu — pure functions, HTTP illa |
+| `dependencies.py` | "locks": `get_current_user`, `require_role`, ownership checks |
+| `routers/` | 12/j-la mattum — routes `auth`, `users`, `notes`-a split aagum |
+
+## Hashing vs encryption vs encoding/signing
+
+Easy-a kozhappikka koodiya moonu vera vera tools:
+
+| | Reversible-a? | Key venumaa? | Edhukku use pannanum | Indha topic-la |
+|---|---|---|---|---|
+| **Hashing** | Illa, one-way. "Indha input match aagudha?" nu mattum dhan check panna mudiyum | Illa (salt hash-kulleye store aagum) | Passwords. Adha thirumba read panna thevai illa, verify panna mattum podhum. | [Password hashing](/tanglish/docs/security/password-hashing), pwdlib / Argon2 |
+| **Encryption** | Aamaa, two-way, key-oda | Aamaa, key yaar kitta irukko avanga decrypt pannalaam | Thirumba read panna vendiya sensitive data (phone numbers, unga users-oda API keys, ...) | [Encrypt/decrypt fields](/tanglish/docs/security/encryption), Fernet |
+| **Encoding + signing (JWT)** | Aamaa, **yaar venumnaalum**. Payload verum base64 dhan. | Key **sign** mattum dhan pannum. Token tamper aagalai-nu prove pannum. | Oruthar yaaru-nu (`sub`) forge panna mudiyaadha maadhiri solradhu | [JWT login](/tanglish/docs/security/jwt-login), PyJWT HS256 |
+
+Idhula irundhu vara practical rules:
+
+- **Passwords-ah eppovum encrypt pannadheenga. Hash pannunga.**
+  Passwords encrypt pannirundha, key-ah thirudravanga (illa server-e)
+  ella password-aiyum thirumba plain text-a maathidalaam. Hash-la
+  thirumba maathradhukku edhuvum illa: server kooda oru guess-ah check
+  mattum dhan panna mudiyum.
+- **JWT-kulla secrets podadheenga.** Token kaila irukra yaar venumnaalum
+  adha read pannalaam. Oru token-ah [jwt.io](https://jwt.io)-la paste
+  panni neengale paarunga.
+- **sqids ([ID hashing](/tanglish/docs/security/id-hashing)) encoding,
+  security illa.** Id-oda shape-ah hide pannum, aana real protection
+  innum [ownership check](/tanglish/docs/security/ownership) dhan.
+
+## Seeded users
+
+Users irukra ovoru letter-um, table empty-a irundha avangala seed
+pannum:
+
+| Username | Password | Seed aagura idam |
+|---|---|---|
+| `alice` | `alice-password` | users irukra ella letter-layum |
+| `bob` | `bob-password` | users irukra ella letter-layum |
+| `admin` | `admin-password` | users irukra ella letter-layum |
+| `carol` | `carol-password` | 12/b, 12/c, 12/d, 12/i-la mattum, `is_active=False`-oda (login panni illa aval token use panni `403` "Inactive user" paarunga) |
+
+**Roles 12/e, 12/f, 12/j-la mattum dhan irukku.** Anga `admin`-ku role
+`admin`, mathavanga ellarukkum `user`. 12/a–d mattrum 12/i-la `admin`
+verum oru username dhan, extra powers edhuvum illa.
+
+## Tables
+
+User model identical-a irukra letters oru table-ah share pannum,
+yen-na `create_all` irukra table-ah eppovum alter pannadhu — so models
+exact-a match aana dhan rendu folders oru table-ah share panna mudiyum.
+Oru letter pudhu column add pannina (`role` maadhiri), adhukku thani
+table:
+
+| Table | Use panra letters |
+|---|---|
+| `sec_a_users` | 12/a |
+| `sec_users` (`is_active`-oda) | 12/b, 12/c, 12/d, 12/i |
+| `sec_rbac_users` (`role`-oda) mattrum `sec_notes` | 12/e, 12/f |
+| `secure_users`, `secure_notes`, `secure_refresh_tokens` | 12/j |
+
+## Setup
+
+[MySQL + CRUD](/tanglish/docs/mysql-crud)-oda same database setup dhan
+(`fastapi_learn` database, `MYSQL_*` variables illana `.env`, illana
+SQLite fallback). Indha topic-ku pudhusa vara packages:
+
+```bash
+pip install "pwdlib[argon2]" pyjwt cryptography sqids slowapi python-multipart
+```
+
+| Package | Edhukku |
+|---|---|
+| `pwdlib[argon2]` | Argon2 vachi password hashing (`passlib`-oda modern replacement) |
+| `pyjwt` | JSON Web Tokens create panni verify panradhu |
+| `cryptography` | sensitive columns-ku Fernet encryption |
+| `sqids` | short, non-sequential public ids |
+| `slowapi` | rate limiting |
+| `python-multipart` | login route ethirpaakra **form**-ah FastAPI read panna |
+
+Tokens irukra letters `SECRET_KEY`, `ACCESS_TOKEN_EXPIRE_MINUTES`,
+`REFRESH_TOKEN_EXPIRE_DAYS`-ah environment-la irundhu read pannum
+(ovoru folder-oda `.env.example` paarunga). Ellathukkum working
+development defaults irukku, so laptop-la skip pannalaam. Real-a edhavadhu
+pannumbodhu, oru key generate pannunga:
+
+```bash
+python -c "import secrets; print(secrets.token_hex(32))"
+```
+
+## Indha topic-ah eppadi run pannurathu
+
+12/a–12/j-ku backend mattum dhan: oru letter choose panni run pannunga.
+
+```bash
+cd example/12/a   # illana b, c, d, e, f, g, h, i, j
+uvicorn main:app --reload
+```
+
+12/react-ku 12/j same time-la run aaganum. Rendaavadhu terminal-la:
+
+```bash
+cd example/12/react
+npm install
+npm run dev
+```
+
+Vite print panra URL-ah open pannunga (usually http://localhost:5173),
+`alice` / `alice-password`-a login pannunga.
+
+## Login eppadi work aagudhu (12/b-la irundhu)
+
+[JWT login](/tanglish/docs/security/jwt-login)-la irundhu, login na
+**form fields**-oda `POST /token`, JSON illa. OAuth2 "password flow"
+standard adha dhan solludhu, `/docs` page-kum adha dhan anuppa
+theriyum. curl-la, `Content-Type` header illama `-d` kudutha adhu oru
+form anuppum:
+
+```bash
+curl -X POST http://127.0.0.1:8000/token -d "username=alice&password=alice-password"
+```
+
+Answer oru token:
+
+```json
+{"access_token": "eyJhbGciOiJIUzI1NiIs...", "token_type": "bearer"}
+```
+
+`access_token`-ah copy panni, ovoru protected request-layum
+`Authorization` header-la anuppunga:
+
+```bash
+curl http://127.0.0.1:8000/users/me -H "Authorization: Bearer <paste token>"
+```
+
+**`/docs`-la:** **Authorize** button-ah click pannunga (top right),
+`alice` / `alice-password` type pannunga, ippo lock aana ovoru route-um
+(padlock-oda kaattum) unga-ku token-ah automatic-a anuppum. Adhe
+dialog-la **Logout** pannina token pogum, `401`-gala paakalaam.
+
+**Postman-la:** Body → x-www-form-urlencoded-la (`username`,
+`password`; JSON anuppina `422`) login pannunga, apparam protected
+request-la **Authorization** tab → **Bearer Token** open panni token-ah
+paste pannunga.
+
+## 401 vs 403 — rendu "no" answers
+
+Kittathatta ella page-layum rendaiyum paapeenga, so rule-ah oru thadava
+solliduvom:
+
+| Status | Name | Real meaning | Fix |
+|---|---|---|---|
+| `401` | Unauthorized | "Neenga yaaru-nu theriyala" — token illa, bad token, expired token, wrong password | Thirumba login pannunga |
+| `403` | Forbidden | "Neenga yaaru-nu nalla theriyum, aana mudiyaadhu" — wrong role, unga row illa, deactivated account | Thirumba login pannaalum help aagadhu |
+
+## Indha topic-la irukra pages
+
+1. [Password hashing](/tanglish/docs/security/password-hashing) — pwdlib vachi passwords-ah Argon2 hashes-a store panni check panradhu.
+2. [JWT login](/tanglish/docs/security/jwt-login) — username + password form-oda `POST /token`, oru signed access token return pannum.
+3. [Protected routes](/tanglish/docs/security/protected-routes) — oru `get_current_user` dependency: valid token illana access illa (`401`).
+4. [Refresh tokens](/tanglish/docs/security/refresh-tokens) — short-lived access tokens, pudhusa vaanga oru long-lived refresh token.
+5. [Authorization by role](/tanglish/docs/security/roles) — admin-only routes; `403` vs `401`.
+6. [Authorization by ownership](/tanglish/docs/security/ownership) — users avanga sontha rows-ah mattum dhan touch panna mudiyum.
+7. [Encrypt/decrypt fields](/tanglish/docs/security/encryption) — Fernet: sensitive columns-ah rest-la encrypt panni, read pannumbodhu decrypt.
+8. [ID hashing](/tanglish/docs/security/id-hashing) — sqids: 1, 2, 3-ku pathila short, non-sequential public ids.
+9. [Rate limiting login](/tanglish/docs/security/rate-limiting) — slowapi: romba login attempts-ku appuram `429 Too Many Requests`.
+10. [Everything together](/tanglish/docs/security/secure-app) — mela irukra ellathaiyum vachi oru "secure notes" API, plus production security checklist.
+11. [React frontend](/tanglish/docs/security/react) — login UI, tokens-ah enga store pannanum, refresh panni retry panra axios interceptors.

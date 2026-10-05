@@ -1,0 +1,500 @@
+---
+title: "1. One-to-many"
+description: Oru category-ku pala items — oru ForeignKey column, rendu side-layum relationship(), kooda varra 404/409 checks.
+---
+
+<GithubLink path="example/11/a" />
+
+Onnu innonna point panra rendu tables. Oru **category**-ku pala
+**items**; ovoru item-um `category_id` foreign key moola exact-a oru
+category-ku belong aagum. Illadha category-la item create panna `404`,
+innum items irukra category-ah delete panna `409`. Tables:
+`rel_categories` mattrum `rel_items` (11/b, 11/c kooda share aagudhu),
+2 categories, 4 items-oda seed aagirukku.
+
+| Route | Status | Description |
+|---|---|---|
+| `GET /categories` | `200` | Ella categories |
+| `POST /categories` | `201`, `409` | Pudhu category; name already irundha `409` |
+| `GET /categories/{category_id}` | `200`, `404` | Oru category |
+| `GET /categories/{category_id}/items` | `200`, `404` | Andha category-la irukra items (empty-na `[]`) |
+| `DELETE /categories/{category_id}` | `204`, `404`, `409` | Items innum irundha `409` |
+| `GET /items` | `200` | Ella items, ovvonnum adhoda `category_id`-oda |
+| `GET /items/{item_id}` | `200`, `404` | Oru item |
+| `POST /items` | `201`, `404`, `422` | Pudhu item; `category_id` illana `404` |
+
+## Folder
+
+```text
+example/11/a/
+├── .env.example
+├── __init__.py
+├── crud.py
+├── database.py
+├── main.py
+├── models.py
+├── README.md
+├── schemas.py
+├── STEPS.md
+└── routers/
+    ├── __init__.py
+    ├── categories.py
+    └── items.py
+```
+
+`__init__.py` mattrum `routers/__init__.py` empty files — folders-ah
+packages-nu mark panna mattum, appo dhan
+`from routers import categories, items` work aagum.
+
+## Code
+
+**`database.py`** — env vars, `engine`/`SessionLocal`/`Base`, mattrum
+`get_db()` dependency (MySQL + CRUD-la irundhu maarala):
+
+```python title="database.py"
+import os
+
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+load_dotenv()
+
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
+MYSQL_USER = os.getenv("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
+
+# Set DATABASE_URL directly to override everything above (e.g. to point
+# at SQLite for a quick local test with no MySQL server at all).
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
+)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+```
+
+**`models.py`** — rendu tables, link aagirukku:
+
+```python title="models.py"
+from sqlalchemy import Column, Float, ForeignKey, Integer, String
+from sqlalchemy.orm import relationship
+
+from database import Base
+
+
+# The "one" side: one category has many items.
+class CategoryModel(Base):
+    __tablename__ = "rel_categories"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(50), nullable=False, unique=True)
+
+    # Not a column. A Python-side shortcut: category.items runs
+    # "SELECT * FROM rel_items WHERE category_id = <this id>" for you.
+    items = relationship("ItemModel", back_populates="category")
+
+
+# The "many" side: every item belongs to exactly one category.
+class ItemModel(Base):
+    __tablename__ = "rel_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(50), nullable=False)
+    price = Column(Float, nullable=False)
+    # The real column. ForeignKey tells the database "this must match an
+    # id in rel_categories". nullable=False: no item without a category.
+    category_id = Column(Integer, ForeignKey("rel_categories.id"), nullable=False)
+
+    # The other end of CategoryModel.items. back_populates links the two,
+    # so setting item.category also appends the item to category.items.
+    category = relationship("CategoryModel", back_populates="items")
+```
+
+**`schemas.py`** — request bodies mattrum flat responses:
+
+```python title="schemas.py"
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class CategoryCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=50)
+
+
+class CategoryOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+
+
+class ItemCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=50)
+    price: float = Field(gt=0)
+    category_id: int
+
+
+# Flat: the item points at its category by id. 11/b nests the whole
+# category object in here instead.
+class ItemOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    price: float
+    category_id: int
+```
+
+**`crud.py`** — database-oda pesura plain functions, HTTP illa:
+
+```python title="crud.py"
+from sqlalchemy.orm import Session
+
+from models import CategoryModel, ItemModel
+from schemas import CategoryCreate, ItemCreate
+
+
+# --- categories ---------------------------------------------------------
+
+def get_categories(db: Session) -> list[CategoryModel]:
+    return db.query(CategoryModel).order_by(CategoryModel.id).all()
+
+
+def get_category(db: Session, category_id: int) -> CategoryModel | None:
+    return db.get(CategoryModel, category_id)
+
+
+def get_category_by_name(db: Session, name: str) -> CategoryModel | None:
+    return db.query(CategoryModel).filter(CategoryModel.name == name).first()
+
+
+def create_category(db: Session, category: CategoryCreate) -> CategoryModel:
+    row = CategoryModel(**category.model_dump())
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def count_items_in_category(db: Session, category_id: int) -> int:
+    return db.query(ItemModel).filter(ItemModel.category_id == category_id).count()
+
+
+def delete_category(db: Session, row: CategoryModel) -> None:
+    db.delete(row)
+    db.commit()
+
+
+# --- items --------------------------------------------------------------
+
+def get_items(db: Session) -> list[ItemModel]:
+    return db.query(ItemModel).order_by(ItemModel.id).all()
+
+
+def get_items_in_category(db: Session, category_id: int) -> list[ItemModel]:
+    return (
+        db.query(ItemModel)
+        .filter(ItemModel.category_id == category_id)
+        .order_by(ItemModel.id)
+        .all()
+    )
+
+
+def get_item(db: Session, item_id: int) -> ItemModel | None:
+    return db.get(ItemModel, item_id)
+
+
+def create_item(db: Session, item: ItemCreate) -> ItemModel:
+    row = ItemModel(**item.model_dump())
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+# --- seed ---------------------------------------------------------------
+
+def seed(db: Session) -> None:
+    if db.query(CategoryModel).count() == 0:
+        electronics = CategoryModel(name="Electronics")
+        books = CategoryModel(name="Books")
+        # Setting the relationship (category=...) instead of category_id:
+        # SQLAlchemy inserts the category first, then fills in the id.
+        db.add_all(
+            [
+                ItemModel(name="Laptop", price=999.99, category=electronics),
+                ItemModel(name="Mouse", price=19.99, category=electronics),
+                ItemModel(name="FastAPI Guide", price=39.0, category=books),
+                ItemModel(name="SQL Basics", price=25.5, category=books),
+            ]
+        )
+        db.commit()
+```
+
+**`routers/categories.py`** — ella `/categories` routes:
+
+```python title="routers/categories.py"
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+
+import crud
+from database import get_db
+from schemas import CategoryCreate, CategoryOut, ItemOut
+
+# Every route below lives under /categories (APIRouter is topic 10).
+router = APIRouter(prefix="/categories", tags=["categories"])
+
+
+@router.get("", response_model=list[CategoryOut])
+def list_categories(db: Session = Depends(get_db)):
+    return crud.get_categories(db)
+
+
+@router.post("", response_model=CategoryOut, status_code=status.HTTP_201_CREATED)
+def create_category(category: CategoryCreate, db: Session = Depends(get_db)):
+    if crud.get_category_by_name(db, category.name) is not None:
+        raise HTTPException(status_code=409, detail="Category name already exists")
+    return crud.create_category(db, category)
+
+
+@router.get("/{category_id}", response_model=CategoryOut)
+def get_category(category_id: int, db: Session = Depends(get_db)):
+    row = crud.get_category(db, category_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Category not found")
+    return row
+
+
+@router.get("/{category_id}/items", response_model=list[ItemOut])
+def list_category_items(category_id: int, db: Session = Depends(get_db)):
+    # 404 for a missing category, so the client can tell "no such
+    # category" apart from "category exists but is empty" ([]).
+    if crud.get_category(db, category_id) is None:
+        raise HTTPException(status_code=404, detail="Category not found")
+    return crud.get_items_in_category(db, category_id)
+
+
+@router.delete("/{category_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_category(category_id: int, db: Session = Depends(get_db)):
+    row = crud.get_category(db, category_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Category not found")
+    # Deleting it would leave items pointing at a category that no
+    # longer exists. Refuse instead of orphaning them.
+    count = crud.count_items_in_category(db, category_id)
+    if count > 0:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Category still has {count} item(s); move or delete them first",
+        )
+    crud.delete_category(db, row)
+```
+
+**`routers/items.py`** — ella `/items` routes:
+
+```python title="routers/items.py"
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+
+import crud
+from database import get_db
+from schemas import ItemCreate, ItemOut
+
+router = APIRouter(prefix="/items", tags=["items"])
+
+
+@router.get("", response_model=list[ItemOut])
+def list_items(db: Session = Depends(get_db)):
+    return crud.get_items(db)
+
+
+@router.get("/{item_id}", response_model=ItemOut)
+def get_item(item_id: int, db: Session = Depends(get_db)):
+    row = crud.get_item(db, item_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Item not found")
+    return row
+
+
+@router.post("", response_model=ItemOut, status_code=status.HTTP_201_CREATED)
+def create_item(item: ItemCreate, db: Session = Depends(get_db)):
+    # Check the foreign key ourselves. MySQL (InnoDB) would reject a bad
+    # category_id anyway, but only as an IntegrityError, i.e. a 500.
+    # SQLite doesn't enforce foreign keys by default and would happily
+    # store it. Checking in code gives a clear 404 on both.
+    if crud.get_category(db, item.category_id) is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Category {item.category_id} not found",
+        )
+    return crud.create_item(db, item)
+```
+
+**`main.py`** — tables create pannum, seed pannum, routers-ah plug
+pannum:
+
+```python title="main.py"
+from fastapi import FastAPI
+
+import crud
+from database import Base, SessionLocal, engine
+from routers import categories, items
+
+# Creates BOTH tables, parent first: create_all reads the ForeignKey to
+# work out that rel_categories must exist before rel_items.
+Base.metadata.create_all(bind=engine)
+
+with SessionLocal() as db:
+    crud.seed(db)
+
+app = FastAPI()
+
+# One router module per resource; main.py just plugs them in.
+app.include_router(categories.router)
+app.include_router(items.router)
+```
+
+## Line by line
+
+`database.py` [MySQL + CRUD index](/tanglish/docs/mysql-crud)-la
+explain panna shared piece dhan. Pudhusu enna-na, link aana rendu
+tables.
+
+**`models.py` — foreign key:**
+
+1. **`category_id = Column(Integer, ForeignKey("rel_categories.id"), nullable=False)`**
+   — link **"many" side-la oru real column**. Ovoru item row-um adhoda
+   category-oda `id`-ah store pannum. `ForeignKey(...)` database-kitta
+   "indha value `rel_categories`-la irukra oru `id`-oda match aaganum"-nu
+   solludhu. `nullable=False`-na category illama item irukka mudiyaadhu.
+
+   Link yen category-la illama item-la irukku? Oru category row oru
+   column-la item ids-oda *list*-ah vachukka mudiyaadhu, aana ovoru
+   item-um exact-a *oru* category id vachukkalaam. One-to-many link-la
+   foreign key eppovum "many" side-la dhan pogum.
+
+**`models.py` — `relationship()` mattrum `back_populates`:**
+
+2. `CategoryModel`-la **`items = relationship("ItemModel", back_populates="category")`**,
+   `ItemModel`-la **`category = relationship("CategoryModel", back_populates="items")`**.
+   Idhu **columns illa** — rendu table-layum edhuvum add aagala.
+   Idhu Python-side shortcuts:
+   - `category.items` `ItemModel` rows-oda list kudukkum. First time
+     touch pannum bodhu SQLAlchemy
+     `SELECT ... FROM rel_items WHERE category_id = ?` run pannum.
+   - `item.category` andha item point panra `CategoryModel` row-ah
+     kudukkum.
+   - `back_populates` **innoru** class-la irukra attribute-oda name-ah
+     solludhu, so rendu end-um memory-la sync-a irukkum:
+     `item.category = books` set pannina, edhuvum save aaguradhukku
+     munnadiye `item` `books.items`-layum vandhudum. Idhu illana rendu
+     unrelated relationships irukkum, onnoda onnu disagree pannalaam.
+   - Class names strings-a irukku (`"ItemModel"`) yen-na
+     `CategoryModel` ezhudhum bodhu `ItemModel` innum define aagala;
+     SQLAlchemy apparam name-ah resolve pannikkum.
+
+**`crud.py` — seed ids illama relationship use pannudhu:**
+
+3. **`ItemModel(name="Laptop", price=999.99, category=electronics)`** —
+   `electronics` database-la innum illadha brand-new `CategoryModel`,
+   so adhukku `id` illa. `category_id=...`-ku pathila
+   `category=electronics` kudutha, SQLAlchemy order-ah figure out
+   pannum: first categories insert, avanga pudhu ids-ah read back,
+   apparam correct `category_id`-oda items insert. Neenga kaila oru id
+   kooda touch panna vendaam.
+4. **`count_items_in_category(...)`** —
+   `db.query(ItemModel).filter(ItemModel.category_id == category_id).count()`
+   `SELECT count(*) ... WHERE category_id = ?`-a maarum. Database dhan
+   count pannum; `len()` call panna rows-ah Python-ku load panna
+   vendaam.
+
+**`main.py`:**
+
+5. **`Base.metadata.create_all(bind=engine)`** **rendu** tables-aiyum
+   create pannum, parent first — `ForeignKey`-ah read panni
+   `rel_items`-ku munnadi `rel_categories` irukkanum-nu
+   kandupidikkum. Apparam `main.py` rendu routers-ah plug mattum
+   pannum.
+
+**`routers/items.py` — foreign key-ah neengale check pannunga:**
+
+6. **`if crud.get_category(db, item.category_id) is None: raise HTTPException(404, ...)`**
+   — thappana `category_id`-ah database-ae pidikka vidalaame? Vendaam,
+   yen-na enna nadakkum-ngradhu database-ah poruthu:
+   - **MySQL (InnoDB)** foreign keys-ah enforce pannum. `INSERT`
+     `IntegrityError`-oda fail aagum, adha yaarum catch pannala, so
+     client-ku `500` varum.
+   - **SQLite** neenga ovoru connection-kum on pannala-na
+     (`PRAGMA foreign_keys = ON`) foreign keys-ah enforce **pannaadhu**.
+     `category_id = 999`-ah happy-a store pannidum, edhaiyum point
+     pannama.
+
+   First oru lookup pannina rendu-layum clear `404` kidaikkum. Database
+   constraint safety net-a irukkum. `404` (`400` illa `422` illa) yen-na
+   body well-formed dhan — adhu illadha onna refer pannudhu,
+   `GET /categories/999` maadhiri.
+
+**`routers/categories.py`:**
+
+7. **`404` vs empty list** — `list_category_items`-la first check
+   illana, `/categories/999/items` happy-a `[]` return pannum, client-ku
+   "andha category-ae illa"-vum "category irukku, aana innum items illa"-vum
+   vidhyasam theriyaadhu. Munnadi topics-la `GET /items/{item_id}`
+   maadhiri adhe idea.
+8. **Children-ah orphan aakka maattom** — `delete_category`-la. Laptop
+   innum "Electronics"-ah point pannum bodhu adha delete pannina,
+   `category_id = 1` onnum illadhadha point pannum (SQLite-la) illana
+   `IntegrityError`-oda crash aagum (MySQL-la). So route first count
+   panni `409 Conflict` answer pannum: "request sari dhan, aana data-oda
+   current state allow pannala" — duplicate name-ku
+   [Status codes](/tanglish/docs/validation/status-codes) use panna
+   adhe code. Mathha common choices:
+   - **cascade** — items-aiyum delete pannu:
+     `relationship(..., cascade="all, delete-orphan")`;
+   - **`SET NULL`** — `category_id` nullable-a irundha mattum dhan
+     mudiyum.
+
+   Refuse pannradhu dhan safest default: surprise-a edhuvum
+   kaanaama pogaadhu.
+9. **`router = APIRouter(prefix="/categories", tags=["categories"])`**
+   mattrum `@router.get("")` — empty path plus prefix exact-a
+   `/categories` kudukkum (trailing slash illama).
+
+**`schemas.py` — flat responses:**
+
+10. **`ItemOut`-la `category_id: int`** — item adhoda category-ah id
+    vachi point pannudhu. Client-ku category-oda *name* venumna,
+    innoru call pannanum. [Nested responses](/tanglish/docs/relationships/nested-responses)
+    category-ah item-kulla nest pannudhu, adhukku konjam care venum.
+11. **`model_config = ConfigDict(from_attributes=True)`** —
+    `response_model` dict illama SQLAlchemy row-la irundhu neraa fields
+    read panna vidum (`row.id`, `row.name`, ...).
+
+## Try it
+
+```bash
+curl http://127.0.0.1:8000/categories/1/items
+curl -X POST http://127.0.0.1:8000/items -H "Content-Type: application/json" -d "{\"name\": \"Keyboard\", \"price\": 49, \"category_id\": 1}"
+curl -i -X POST http://127.0.0.1:8000/items -H "Content-Type: application/json" -d "{\"name\": \"Ghost\", \"price\": 5, \"category_id\": 999}"  # 404
+curl -i -X DELETE http://127.0.0.1:8000/categories/1  # 409
+```
+
+Moonavadhu request `404 {"detail": "Category 999 not found"}` answer
+pannum. Kadaisi request
+`409 {"detail": "Category still has 3 item(s); move or delete them first"}`
+answer pannum (2 seeded items plus Keyboard).
+
+Adutha step: [Nested responses](/tanglish/docs/relationships/nested-responses)
+— N+1 query flood illama category-ah item-kulla podurathu.

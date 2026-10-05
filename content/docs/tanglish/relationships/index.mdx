@@ -1,0 +1,163 @@
+---
+title: Relationships
+description: Foreign keys vachi tables-ah link pannurathu, N+1 flood illama nested JSON, all-or-nothing writes, undo panna mudiyura deletes.
+---
+
+<GithubLink path="example/11" />
+
+Ivlo naal ovoru app-layum **oru** table dhan irundhuchu. Real data
+pala tables-la irukkum, onnu innonna point pannum: oru item oru
+category-ku belong aagum, oru item-ku pala tags irukkum, oru order-ku
+pala lines irukkum. Indha topic:
+
+- foreign key mattrum SQLAlchemy `relationship()` vachi **tables-ah
+  link pannudhu**;
+- ovoru row-kum silent-a oru query run pannama **nested JSON return
+  pannudhu** (item-kulla category, category-kulla items);
+- transaction vachi **multi-step writes-ah all-or-nothing aakkudhu**;
+- `deleted_at` column vachi **rows-ah lose pannama "delete" pannudhu**.
+
+| Page | Enna cover pannudhu |
+|---|---|
+| [1. One-to-many](/tanglish/docs/relationships/one-to-many) | `ForeignKey`, `relationship()`, `back_populates`; code-la foreign key check (`404`); children irukra parent-ah delete panna maattom (`409`) |
+| [2. Nested responses](/tanglish/docs/relationships/nested-responses) | item-kulla `category`, category-kulla `items`; N+1 query problem; `selectinload` / `joinedload`; `ItemSummary` yen irukku |
+| [3. Many-to-many](/tanglish/docs/relationships/many-to-many) | association table (`secondary=`) moola tags; attach/detach routes; idempotent `PUT` |
+| [4. Transactions](/tanglish/docs/relationships/transactions) | Order place pannurathu: kadaisila oru `commit`, edhavadhu error-na `rollback` — pakkathula half-written order-ah vittudra `/orders/unsafe` twin |
+| [5. Soft delete](/tanglish/docs/relationships/soft-delete) | `DELETE`-ku pathila `deleted_at` column; hide, restore, purge; idhoda cost enna |
+
+## Layout: ovoru resource-kum oru router
+
+Code layout [Project structure](/tanglish/docs/project-structure)-la
+paartha adhe dhan: `main.py` app-ah mattum build pannum, ovoru
+resource-kum `routers/`-la thani module. Example-ku 11/a:
+
+```text
+example/11/a/
+├── .env.example
+├── __init__.py
+├── crud.py
+├── database.py
+├── main.py
+├── models.py
+├── README.md
+├── schemas.py
+├── STEPS.md
+└── routers/
+    ├── __init__.py
+    ├── categories.py
+    └── items.py
+```
+
+| File | Responsibility |
+|---|---|
+| `database.py` | env vars, `engine`, `SessionLocal`, `Base`, `get_db()` — [MySQL + CRUD](/tanglish/docs/mysql-crud)-oda byte-for-byte same |
+| `models.py` | SQLAlchemy tables — ippo ovoru letter-layum rendu or adhukku mela, foreign keys vachi link aagirukku |
+| `schemas.py` | Pydantic request/response models — silathu kulla vera models irukku |
+| `crud.py` | database-oda pesura plain functions, HTTP edhuvum theriyaadhu |
+| `routers/*.py` | ovoru resource-kum oru `APIRouter` (`categories.py`, `items.py`, `tags.py`, `orders.py`, ...) |
+| `main.py` | tables create pannum, seed pannum, `FastAPI()` build panni routers-ah plug pannum |
+| `__init__.py`, `routers/__init__.py` | empty — folders-ah Python packages-nu mark panna mattum |
+
+## Ovoru letter-um yentha tables use pannudhu
+
+- **11/a, 11/b, 11/c moonum rendu tables share pannudhu,
+  `rel_categories` mattrum `rel_items`.** Moonu-layum columns exact
+  same, so yentha letter first run aagudho adhu create panni seed
+  pannum, mathadhu ellam same rows-ah paakkum (2 categories, 4 items).
+  11/c oru Python-side relationship-um rendu pudhu tables-um
+  (`rel_tags`, `rel_item_tags`) mattum add pannudhu.
+- **11/d-ku sontha shop:** `shop_products`, `shop_orders`,
+  `shop_order_lines`.
+- **11/e-ku sontha `soft_items`.**
+
+Ella table-um startup-la `Base.metadata.create_all(...)` create
+pannum, empty-a irundha seed pannum.
+
+## Setup
+
+Pudhu packages edhuvum illa — `relationship()`, `selectinload`,
+`joinedload`, `Table` ellam SQLAlchemy kooda varudhu, adha MySQL +
+CRUD-kaga already install pannirukeenga. Fresh-a start pannreenga-na:
+
+```bash
+pip install fastapi uvicorn sqlalchemy pymysql python-dotenv
+```
+
+Database setup [MySQL + CRUD](/tanglish/docs/mysql-crud)-la irundha
+exact same — same `fastapi_learn` database, same `MYSQL_*` environment
+variables illana `.env` file (ovoru folder-layum `.env.example`
+irukku), same SQLite fallback:
+
+```bash
+export DATABASE_URL="sqlite:///./test.db"
+```
+
+## Indha topic-ah eppadi run pannurathu
+
+Backend mattum dhan. Oru letter-ah choose panni adhoda folder-kulla
+irundhu run pannunga (`from routers import items` maadhiri imports
+andha folder-ku relative):
+
+```bash
+cd example/11/a   # or b, c, d, e
+uvicorn main:app --reload
+```
+
+[http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs) open panni
+ovoru route-aiyum browser-la irundhe try pannalaam.
+
+## Keezha irukra ovoru page-um share panra pieces
+
+`database.py` anju folder-layum exact same — topic 6-oda adhe dhan.
+Line-by-line explanation-ku [MySQL + CRUD index](/tanglish/docs/mysql-crud)
+paarunga. Adhula oru line
+[Transactions](/tanglish/docs/relationships/transactions)-la hero
+aagudhu:
+
+```python
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+```
+
+`autocommit=False`-na `db.commit()` call pannra varaikkum edhuvum
+permanent illa. Ivlo naal ovoru route-um oru row maathi commit
+pannuchu; oru route pala rows-ah maathum bodhu, **eppo** commit
+pannreenga-ngradhu dhan full lesson.
+
+**`main.py` shape (ella letter-layum):**
+
+```python
+Base.metadata.create_all(bind=engine)
+
+with SessionLocal() as db:
+    crud.seed(db)
+
+app = FastAPI()
+
+app.include_router(categories.router)
+app.include_router(items.router)
+```
+
+## Line by line: main.py
+
+1. `Base.metadata.create_all(bind=engine)` — `Base`-la irundhu inherit
+   panra, innum illadha ella tables-aiyum create pannum. Foreign keys
+   irundha **order**-um adhuve figure out pannum: `rel_items.category_id`
+   `rel_categories`-ah point pannudhu-nu paathu, `rel_categories`-ah
+   first create pannum. Already irukra table-ah adhu eppovum maathaadhu
+   — adhanala dhan 11/a–c share panra tables-la columns exact same-a
+   irukkanum.
+2. `with SessionLocal() as db: crud.seed(db)` — startup-la oru session
+   open panni, table empty-a irundha sample rows insert panni, `with`
+   block mudinja odane close pannum.
+3. `app.include_router(...)` — ovoru router module-um adhoda sontha
+   `prefix` (`/categories`, `/items`, ...) mattrum `tags` (`/docs`-la
+   group panna) kondu varum. `main.py` thaane oru route kooda define
+   pannala.
+
+## Indha topic-la irukra pages
+
+1. [One-to-many](/tanglish/docs/relationships/one-to-many) — oru category-ku pala items.
+2. [Nested responses](/tanglish/docs/relationships/nested-responses) — objects-kulla objects, mattrum N+1 problem.
+3. [Many-to-many](/tanglish/docs/relationships/many-to-many) — association table moola tags.
+4. [Transactions](/tanglish/docs/relationships/transactions) — all-or-nothing orders.
+5. [Soft delete](/tanglish/docs/relationships/soft-delete) — `DELETE`-ku pathila `deleted_at`.

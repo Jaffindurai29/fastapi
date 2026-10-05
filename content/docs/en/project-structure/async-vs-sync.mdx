@@ -1,0 +1,291 @@
+---
+title: "4. async def vs def"
+description: Timing 5 concurrent requests shows why a blocking call inside async def freezes the whole server, and why database routes here are plain def.
+---
+
+<GithubLink path="example/10/d" />
+
+When should a route be `async def`, and when plain `def`? This app has
+no database: just four tiny routes that each wait one second in a
+different way (or not at all), and a `demo.py` script that hits each one
+with 5 requests **at the same time** and times them.
+
+| Route | How it waits | 1 request | 5 at once |
+|---|---|---|---|
+| `GET /sync-sleep` | `def` + `time.sleep(1)` | 1 s | **~1 s** (5 worker threads sleep side by side) |
+| `GET /async-sleep` | `async def` + `await asyncio.sleep(1)` | 1 s | **~1 s** (the event loop juggles all 5) |
+| `GET /async-blocking` | `async def` + `time.sleep(1)` | 1 s | **~5 s** (one after another, and the whole server is frozen meanwhile) |
+| `GET /ping` | `def`, returns at once | instant | instant |
+
+## The folder
+
+```text
+10/d/
+├── main.py    # /sync-sleep, /async-sleep, /async-blocking, /ping
+└── demo.py    # 5 concurrent requests per endpoint, prints wall time
+```
+
+## The code
+
+**`main.py`** — four routes, three ways of waiting one second:
+
+```python title="main.py"
+import asyncio
+import time
+
+from fastapi import FastAPI
+
+app = FastAPI()
+
+
+# Plain `def`: FastAPI runs it in a worker thread (a threadpool), so
+# while this thread sleeps, the event loop keeps serving other requests.
+# 5 requests at once -> 5 threads sleeping side by side -> about 1 s.
+@app.get("/sync-sleep")
+def sync_sleep():
+    time.sleep(1)  # a blocking call, like a SQLAlchemy query or requests.get()
+    return {"endpoint": "sync-sleep", "slept": 1}
+
+
+# `async def` + `await`: runs on the event loop itself. `await` hands
+# control back to the loop while waiting, so it serves others meanwhile.
+# 5 requests at once -> about 1 s.
+@app.get("/async-sleep")
+async def async_sleep():
+    await asyncio.sleep(1)
+    return {"endpoint": "async-sleep", "slept": 1}
+
+
+# THE MISTAKE: `async def` + a blocking call. There's no `await`, so the
+# event loop is stuck inside time.sleep for a full second and can do
+# nothing else — not even /ping. 5 requests at once -> about 5 s.
+@app.get("/async-blocking")
+async def async_blocking():
+    time.sleep(1)
+    return {"endpoint": "async-blocking", "slept": 1}
+
+
+# Instant. Used by demo.py to show whether the server is still responsive.
+@app.get("/ping")
+def ping():
+    return {"pong": True}
+```
+
+**`demo.py`** — the timing script. Standard library only, nothing to
+install:
+
+```python title="demo.py"
+"""Fire 5 concurrent requests at each endpoint and print the wall time.
+
+Start the server first (in another terminal):
+
+    uvicorn main:app
+
+then:
+
+    python demo.py
+    python demo.py --base-url http://127.0.0.1:8765
+
+Only the standard library is used, so nothing to install.
+"""
+
+import argparse
+import time
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor
+
+N = 5
+
+
+def fetch(url: str) -> float:
+    """GET url, return how long it took in seconds."""
+    start = time.perf_counter()
+    with urllib.request.urlopen(url, timeout=30) as resp:
+        resp.read()
+    return time.perf_counter() - start
+
+
+def burst(url: str, n: int = N) -> float:
+    """Send n requests to url at the same time; return total wall time."""
+    start = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=n) as pool:
+        list(pool.map(fetch, [url] * n))
+    return time.perf_counter() - start
+
+
+def ping_during(base: str, path: str) -> float:
+    """Start a burst on `path`, then time one /ping sent while it runs."""
+    with ThreadPoolExecutor(max_workers=N + 1) as pool:
+        for _ in range(N):
+            pool.submit(fetch, base + path)
+        time.sleep(0.2)  # let the burst reach the server first
+        return pool.submit(fetch, base + "/ping").result()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--base-url", default="http://127.0.0.1:8000")
+    base = parser.parse_args().base_url.rstrip("/")
+
+    fetch(base + "/ping")  # warm-up: fails fast if the server isn't running
+
+    print(f"{N} concurrent requests per endpoint against {base}\n")
+    for path in ["/sync-sleep", "/async-sleep", "/async-blocking"]:
+        print(f"  {path:<16} {burst(base + path):5.2f} s total")
+
+    print("\nOne /ping sent while each burst is running:\n")
+    for path in ["/sync-sleep", "/async-sleep", "/async-blocking"]:
+        print(f"  during {path:<16} /ping took {ping_during(base, path):5.2f} s")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+## Line by line
+
+No database, no `models.py`/`crud.py`: just `main.py` and `demo.py`.
+
+**Two ways FastAPI runs a route:**
+
+1. **Uvicorn runs one event loop**: a single thread that switches
+   between requests whenever one of them is waiting. What FastAPI does
+   with your function depends on how you wrote it:
+   - `async def` → called **directly on the event loop**. FastAPI trusts
+     you to `await` whenever you wait, so the loop can switch to other
+     requests.
+   - `def` → sent to a **threadpool** (about 40 worker threads by
+     default). The function can block as long as it likes; it only
+     blocks its own thread.
+
+**`main.py`:**
+
+2. **`/sync-sleep` — `def` with a blocking call.** `time.sleep(1)`
+   stands in for any blocking call, like a SQLAlchemy query or
+   `requests.get()`. Five requests arrive together, FastAPI hands them to
+   five worker threads, all five sleep at the same time, and all five
+   answer after about **1 second**. The event loop itself never blocks,
+   so `/ping` stays instant.
+3. **`/async-sleep` — `async def` with an async wait.**
+   `await asyncio.sleep(1)` means "wake me in a second, serve others
+   meanwhile". The loop starts all five, parks them, answers `/ping` in
+   between, and finishes all five after about **1 second**. No threads
+   involved.
+4. **`/async-blocking` — the mistake.** It's `async def`, so it runs on
+   the event loop. But `time.sleep` isn't awaitable: it holds the loop's
+   only thread for a full second, and the loop can't switch to anything
+   else. The five requests run strictly one after another, **about 5
+   seconds** in total, and every other request to the server, `/ping`
+   included, queues behind them.
+5. **Nothing warns you about this.** The code runs, a single request
+   takes 1 second as expected, and the problem only shows up under
+   load.
+6. **`/ping`** — returns at once. `demo.py` uses it to check whether the
+   server is still responsive while a burst is running.
+
+**`demo.py` — measuring it:**
+
+7. **`fetch(url)`** — one `urllib.request.urlopen` call, timed with
+   `time.perf_counter()`. `timeout=30` stops it hanging forever if the
+   server is stuck.
+8. **`burst(url)`** — `ThreadPoolExecutor(max_workers=n)` sends the five
+   `fetch` calls from five threads at once; `pool.map(...)` waits for all
+   of them. `burst` returns how long until the last one came back.
+9. **`ping_during(base, path)`** — starts a burst of 5 on `path`, waits
+   `0.2` seconds so the burst reaches the server first, then times one
+   `/ping` sent while the burst is in flight. This is what shows the
+   freeze.
+10. **`main()`** — `--base-url` (default `http://127.0.0.1:8000`) picks
+    the server. The first `fetch(base + "/ping")` is a warm-up that fails
+    fast if the server isn't running. Then it prints the burst time for
+    each slow route, followed by the `/ping` time during each burst.
+
+## Real output
+
+Real output from `demo.py`, run with `--base-url http://127.0.0.1:8765`
+against a server on that port:
+
+```text
+5 concurrent requests per endpoint against http://127.0.0.1:8765
+
+  /sync-sleep       1.01 s total
+  /async-sleep      1.01 s total
+  /async-blocking   5.02 s total
+
+One /ping sent while each burst is running:
+
+  during /sync-sleep      /ping took  0.02 s
+  during /async-sleep     /ping took  0.00 s
+  during /async-blocking  /ping took  4.82 s
+```
+
+| Route | 5 requests at once | One `/ping` during the burst |
+|---|---|---|
+| `/sync-sleep` | 1.01 s | 0.02 s |
+| `/async-sleep` | 1.01 s | 0.00 s |
+| `/async-blocking` | **5.02 s** | **4.82 s** |
+
+The last line is the important one: while `/async-blocking` runs, even
+`/ping`, which does nothing, waits almost 5 seconds. Every user of the
+app would see it hang.
+
+## The rule
+
+> If the library you call is sync (SQLAlchemy `Session`, `requests`,
+> `time.sleep`) → use `def`. Only use `async def` when everything you
+> await is async.
+
+- **"Async" libraries are the ones whose calls you `await`:** `asyncio`,
+  `httpx.AsyncClient`, SQLAlchemy's `AsyncSession`, `aiomysql`. If you
+  aren't writing `await` in front of the slow call, it isn't async.
+- **When in doubt, `def` is the safe choice.** A `def` route that could
+  have been `async def` costs a thread; an `async def` route that blocks
+  costs the whole server.
+- **That's why every database route in this repo is plain `def`.** Since
+  [MySQL + CRUD](/en/docs/mysql-crud), each route does
+  `db: Session = Depends(get_db)` and calls things like `db.query(...)`
+  and `db.commit()`. That's the **sync** SQLAlchemy `Session`: it waits
+  for MySQL the way `time.sleep` waits, blocking its thread. As `def`
+  routes, those waits happen in worker threads. Change one to
+  `async def` and it becomes `/async-blocking`: correct on your laptop,
+  frozen under real traffic. Going async for real means switching the
+  whole stack (async engine, `AsyncSession`, an async driver, `await` on
+  every query), not just the keyword.
+- **Dependencies follow the same rule.** `get_db` from
+  [Dependencies](/en/docs/project-structure/dependencies) is a plain
+  `def` with `yield`, so FastAPI runs it in the threadpool too. It's fine
+  for a `def` route to use `def` dependencies, and for an `async def`
+  route to use them; FastAPI runs each piece in the right place.
+
+## Try it
+
+Terminal 1 (no `--reload`; the reloader adds noise to the timings):
+
+```bash
+cd example/10/d
+uvicorn main:app
+```
+
+Terminal 2:
+
+```bash
+cd example/10/d
+python demo.py
+```
+
+Or hit each route by hand:
+
+```bash
+curl http://127.0.0.1:8000/sync-sleep
+curl http://127.0.0.1:8000/async-sleep
+curl http://127.0.0.1:8000/async-blocking
+curl http://127.0.0.1:8000/ping
+```
+
+**Postman:** Method `GET`, URL `http://127.0.0.1:8000/sync-sleep` (or any
+route above), no Headers or Body. Postman sends one request at a time,
+so it can't show the difference; use `demo.py` for that.
+
+Back to the [Project Structure overview](/en/docs/project-structure).
+
+Next topic: [Relationships](/en/docs/relationships) — linking tables together, transactions and soft delete.

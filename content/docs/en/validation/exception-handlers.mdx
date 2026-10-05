@@ -1,0 +1,463 @@
+---
+title: "3. Exception handlers"
+description: One consistent error shape for every error the API can return, with crud.py raising business errors and main.py turning them into responses in one place.
+---
+
+<GithubLink path="example/8/c" />
+
+Every error from this API, whatever caused it, now has **one shape**:
+
+```json
+{"error": {"code": "item_not_found", "message": "Item 99 not found"}}
+```
+
+Validation errors add a `fields` list. A frontend needs just one piece
+of code to show any error. The routes and rules are the same as in
+[8/b](/en/docs/validation/status-codes), but the routes no longer
+contain any error handling. One new file:
+
+| File | Responsibility |
+|---|---|
+| `exceptions.py` | `AppError` and its subclasses: business errors that each carry a status code and an error code |
+
+| Route | Errors (all in the shape above) |
+|---|---|
+| `GET /items/{item_id}` | `item_not_found` (404) |
+| `POST /items` | `duplicate_name` (409), `validation_error` (422) |
+| `PATCH /items/{item_id}` | `empty_update` (400), `item_not_found`, `duplicate_name`, `validation_error` |
+| `DELETE /items/{item_id}` | `item_not_found`, `item_in_stock` (409) |
+| `GET /boom` | `internal_error` (500), from a deliberately broken route |
+| any unknown URL | `http_404`; the wrong method gives `http_405` |
+
+## The code
+
+**`database.py`** — same as topic 6:
+
+```python title="database.py"
+import os
+
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+load_dotenv()
+
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
+MYSQL_USER = os.getenv("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
+
+# Set DATABASE_URL directly to override everything above (e.g. to point
+# at SQLite for a quick local test with no MySQL server at all).
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
+)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+```
+
+**`models.py`** — same `validation_items` table as 8/a and 8/b:
+
+```python title="models.py"
+from sqlalchemy import Column, Float, Integer, String
+
+from database import Base
+
+
+class ItemModel(Base):
+    __tablename__ = "validation_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(50), nullable=False, unique=True)
+    price = Column(Float, nullable=False)
+    quantity = Column(Integer, nullable=False, default=0)
+```
+
+**`schemas.py`** — same as 8/b:
+
+```python title="schemas.py"
+from typing import Optional
+
+from pydantic import BaseModel, Field, field_validator
+
+
+class ItemCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=50)
+    price: float = Field(gt=0, le=1_000_000)
+    quantity: int = Field(default=0, ge=0)
+
+    @field_validator("name")
+    @classmethod
+    def name_not_blank(cls, value: str) -> str:
+        value = value.strip()
+        if value == "":
+            raise ValueError("name must not be blank")
+        return value
+
+
+# Same rules as ItemCreate, but every field is optional — PATCH only
+# sends what changed.
+class ItemPatch(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=50)
+    price: Optional[float] = Field(default=None, gt=0, le=1_000_000)
+    quantity: Optional[int] = Field(default=None, ge=0)
+
+    @field_validator("name")
+    @classmethod
+    def name_not_blank(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        value = value.strip()
+        if value == "":
+            raise ValueError("name must not be blank")
+        return value
+```
+
+**`exceptions.py`** — new: errors in business terms:
+
+```python title="exceptions.py"
+# Errors that describe what went wrong in *business* terms. crud.py raises
+# them; main.py decides what HTTP response each one becomes. crud.py never
+# has to know about status codes.
+
+
+class AppError(Exception):
+    status_code = 400
+    code = "bad_request"
+
+    def __init__(self, message: str):
+        super().__init__(message)
+        self.message = message
+
+
+class ItemNotFound(AppError):
+    status_code = 404
+    code = "item_not_found"
+
+    def __init__(self, item_id: int):
+        super().__init__(f"Item {item_id} not found")
+
+
+class DuplicateItemName(AppError):
+    status_code = 409
+    code = "duplicate_name"
+
+    def __init__(self, name: str):
+        super().__init__(f"An item named '{name}' already exists")
+
+
+class ItemStillInStock(AppError):
+    status_code = 409
+    code = "item_in_stock"
+
+    def __init__(self, item_id: int, quantity: int):
+        super().__init__(f"Item {item_id} still has {quantity} in stock; set quantity to 0 first")
+
+
+class EmptyUpdate(AppError):
+    status_code = 400
+    code = "empty_update"
+
+    def __init__(self):
+        super().__init__("Send at least one non-null field to update")
+```
+
+**`crud.py`** — now raises instead of returning `None`:
+
+```python title="crud.py"
+from sqlalchemy.orm import Session
+
+from exceptions import DuplicateItemName, EmptyUpdate, ItemNotFound, ItemStillInStock
+from models import ItemModel
+from schemas import ItemCreate, ItemPatch
+
+
+def get_items(db: Session) -> list[ItemModel]:
+    return db.query(ItemModel).order_by(ItemModel.id).all()
+
+
+def get_item(db: Session, item_id: int) -> ItemModel:
+    row = db.get(ItemModel, item_id)
+    if row is None:
+        raise ItemNotFound(item_id)
+    return row
+
+
+def _ensure_name_free(db: Session, name: str) -> None:
+    if db.query(ItemModel).filter(ItemModel.name == name).first() is not None:
+        raise DuplicateItemName(name)
+
+
+def create_item(db: Session, item: ItemCreate) -> ItemModel:
+    _ensure_name_free(db, item.name)
+    row = ItemModel(name=item.name, price=item.price, quantity=item.quantity)
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def update_item(db: Session, item_id: int, patch: ItemPatch) -> ItemModel:
+    row = get_item(db, item_id)
+    changes = {k: v for k, v in patch.model_dump(exclude_unset=True).items() if v is not None}
+    if not changes:
+        raise EmptyUpdate()
+    if "name" in changes and changes["name"] != row.name:
+        _ensure_name_free(db, changes["name"])
+    for field, value in changes.items():
+        setattr(row, field, value)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def delete_item(db: Session, item_id: int) -> None:
+    row = get_item(db, item_id)
+    if row.quantity > 0:
+        raise ItemStillInStock(item_id, row.quantity)
+    db.delete(row)
+    db.commit()
+
+
+def seed_items(db: Session) -> None:
+    if db.query(ItemModel).count() == 0:
+        db.add_all(
+            [
+                ItemModel(name="Laptop", price=999.99, quantity=5),
+                ItemModel(name="Mouse", price=19.99, quantity=50),
+            ]
+        )
+        db.commit()
+```
+
+**`main.py`** — four exception handlers, and routes with no error
+handling:
+
+```python title="main.py"
+import logging
+
+from fastapi import Depends, FastAPI, Request, status
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from sqlalchemy.orm import Session
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+import crud
+from database import Base, SessionLocal, engine, get_db
+from exceptions import AppError
+from schemas import ItemCreate, ItemPatch
+
+Base.metadata.create_all(bind=engine)
+
+with SessionLocal() as db:
+    crud.seed_items(db)
+
+app = FastAPI()
+logger = logging.getLogger("uvicorn.error")
+
+
+# Every error this API returns has the same shape:
+#   {"error": {"code": "...", "message": "...", "fields": [...]}}
+# so a frontend only needs one piece of code to display any of them.
+def error_response(status_code: int, code: str, message: str, fields=None):
+    body = {"error": {"code": code, "message": message}}
+    if fields:
+        body["error"]["fields"] = fields
+    return JSONResponse(status_code=status_code, content=body)
+
+
+# 1. Our own business errors (ItemNotFound, DuplicateItemName, ...).
+@app.exception_handler(AppError)
+def handle_app_error(request: Request, exc: AppError):
+    return error_response(exc.status_code, exc.code, exc.message)
+
+
+# 2. Pydantic validation failures — replaces FastAPI's default 422 body.
+@app.exception_handler(RequestValidationError)
+def handle_validation_error(request: Request, exc: RequestValidationError):
+    fields = [
+        {"field": ".".join(str(part) for part in err["loc"]), "message": err["msg"]}
+        for err in exc.errors()
+    ]
+    return error_response(
+        422, "validation_error", "Invalid request", fields
+    )
+
+
+# 3. Errors raised by FastAPI/Starlette itself — unknown URL (404),
+#    wrong method (405), or any HTTPException a route still raises.
+@app.exception_handler(StarletteHTTPException)
+def handle_http_error(request: Request, exc: StarletteHTTPException):
+    return error_response(exc.status_code, f"http_{exc.status_code}", str(exc.detail))
+
+
+# 4. Anything unexpected. Log the real error, but never send the stack
+#    trace (or database details) to the client.
+@app.exception_handler(Exception)
+def handle_unexpected_error(request: Request, exc: Exception):
+    logger.error("Unhandled error on %s %s", request.method, request.url.path, exc_info=exc)
+    return error_response(500, "internal_error", "Something went wrong")
+
+
+# The routes have no error handling at all now — crud.py raises, and
+# the handlers above turn it into a response.
+@app.get("/items")
+def list_items(db: Session = Depends(get_db)):
+    return [{"id": r.id, "name": r.name, "price": r.price, "quantity": r.quantity} for r in crud.get_items(db)]
+
+
+@app.get("/items/{item_id}")
+def get_item(item_id: int, db: Session = Depends(get_db)):
+    row = crud.get_item(db, item_id)
+    return {"id": row.id, "name": row.name, "price": row.price, "quantity": row.quantity}
+
+
+@app.post("/items", status_code=status.HTTP_201_CREATED)
+def create_item(item: ItemCreate, db: Session = Depends(get_db)):
+    row = crud.create_item(db, item)
+    return {"id": row.id, "name": row.name, "price": row.price, "quantity": row.quantity}
+
+
+@app.patch("/items/{item_id}")
+def update_item(item_id: int, patch: ItemPatch, db: Session = Depends(get_db)):
+    row = crud.update_item(db, item_id, patch)
+    return {"id": row.id, "name": row.name, "price": row.price, "quantity": row.quantity}
+
+
+@app.delete("/items/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_item(item_id: int, db: Session = Depends(get_db)):
+    crud.delete_item(db, item_id)
+
+
+# A deliberately broken route, to see handler 4 in action.
+@app.get("/boom")
+def boom():
+    return 1 / 0
+```
+
+## Line by line
+
+`database.py`, `models.py` and `schemas.py` are the same as 8/b. What
+changes is *where* errors are decided: `crud.py` raises business errors,
+and `main.py` turns them into HTTP responses in one place.
+
+**`exceptions.py`:**
+
+1. **`AppError` — one base class for every business error.** It's a
+   normal Python `Exception` with two class attributes: `status_code`
+   (the HTTP status) and `code` (a machine-readable name). Its
+   `__init__` stores a human-readable `message`.
+2. **Each subclass only fills in the details.** `ItemNotFound` sets
+   `status_code = 404` and `code = "item_not_found"`, and its
+   `__init__` takes an `item_id` and builds the message
+   `"Item 99 not found"`. `DuplicateItemName`, `ItemStillInStock` and
+   `EmptyUpdate` follow the same pattern.
+3. **`code` is for programs, `message` is for humans.** A frontend can
+   `switch` on `"duplicate_name"` to highlight the name field, and show
+   `message` to the user as-is. Messages can be reworded later without
+   breaking any client; codes should stay stable.
+
+**`crud.py`:**
+
+4. **Raises instead of returning `None`.** In topic 6 and 8/b,
+   `get_item` returned `None` and every caller had to check for it.
+   Now `get_item` raises `ItemNotFound(item_id)` itself — so a caller
+   that gets a value back can be sure it's a real row.
+5. **`crud.py` still knows nothing about HTTP.** It never imports
+   `HTTPException` or mentions a status code — it only says *what* went
+   wrong ("not found", "duplicate name"), in business terms.
+6. **The rules from 8/b moved here:**
+   - `_ensure_name_free` raises `DuplicateItemName` — used by both
+     `create_item` and (only when the name actually changes)
+     `update_item`. The leading `_` marks it as an internal helper.
+   - `update_item` builds `changes` with
+     `model_dump(exclude_unset=True)` and **also drops `None` values**
+     in the same dict comprehension, so `{}` and `{"price": null}` both
+     end up empty and raise one `EmptyUpdate` (400). In 8/b they were
+     two separate `400` checks.
+   - `delete_item` raises `ItemStillInStock` while `row.quantity > 0`.
+
+**`main.py` — the handlers:**
+
+7. **`error_response(...)` builds every error body**, so the shape
+   can't drift between handlers. It always has `code` and `message`,
+   and adds `fields` only when there are some.
+8. **Handler 1 — `@app.exception_handler(AppError)`.** When any
+   `AppError` escapes a route, FastAPI calls this function instead of
+   crashing. Registering the **base** class catches every subclass, and
+   the handler just reads `exc.status_code`, `exc.code` and
+   `exc.message` off whichever one was raised. To add a new error later,
+   you write a new subclass in `exceptions.py` — nothing in `main.py`
+   changes.
+9. **Handler 2 — `RequestValidationError`.** This is what FastAPI
+   raises when Pydantic validation fails. The handler replaces FastAPI's
+   default `422` body (`{"detail": [...]}`) with ours. `exc.errors()` is
+   the same list you saw in [8/a](/en/docs/validation/field-validation);
+   each `loc`, like `["body", "price"]`, is joined into `"body.price"`
+   (`str(part)` because a `loc` can contain numbers, e.g. a list index).
+10. **Handler 3 — Starlette's `HTTPException`.** FastAPI's own `404`
+    for unknown URLs and `405` for wrong methods are raised by
+    Starlette, the framework underneath FastAPI. Registering the
+    *Starlette* class (imported as `StarletteHTTPException` to avoid a
+    name clash) catches both — and also any FastAPI `HTTPException`,
+    which is a subclass of it. The code becomes `http_404`, `http_405`,
+    and so on.
+11. **Handler 4 — `Exception`, the catch-all.** Any bug — like `/boom`'s
+    `1 / 0` — becomes a `500` with the generic message
+    `"Something went wrong"`. The real error is logged with its full
+    traceback (`exc_info=exc`) to the server's terminal, using
+    uvicorn's own logger (`logging.getLogger("uvicorn.error")`) so it
+    shows up next to uvicorn's output. It's never sent to the client: a
+    stack trace can leak file paths, SQL and library versions to an
+    attacker.
+
+**`main.py` — the routes:**
+
+12. **Each route is now just "call crud, shape the result".** There's no
+    `if row is None` and no `raise HTTPException`. If anything goes
+    wrong inside `crud`, the exception travels up out of the route, and
+    the matching handler answers.
+13. **`/boom`** — a deliberately broken route, so you can see handler 4
+    in action without having to write a real bug.
+
+## Try it
+
+```bash
+curl -i http://127.0.0.1:8000/items/99  # 404 item_not_found
+curl -i -X POST http://127.0.0.1:8000/items -H "Content-Type: application/json" -d "{\"name\": \"\", \"price\": -1}"  # 422 validation_error
+curl -i http://127.0.0.1:8000/nope  # 404 http_404
+curl -i http://127.0.0.1:8000/boom  # 500 internal_error
+```
+
+The second request returns:
+
+```json
+{
+  "error": {
+    "code": "validation_error",
+    "message": "Invalid request",
+    "fields": [
+      {"field": "body.name", "message": "String should have at least 1 character"},
+      {"field": "body.price", "message": "Input should be greater than 0"}
+    ]
+  }
+}
+```
+
+`/boom` answers `"Something went wrong"`. The real `ZeroDivisionError`
+and its traceback go to the server's terminal, never to the client.
+
+Next: [response_model](/en/docs/validation/response-model) — returning
+ORM rows directly and controlling exactly which fields leave the server.

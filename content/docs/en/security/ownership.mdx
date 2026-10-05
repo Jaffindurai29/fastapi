@@ -1,0 +1,529 @@
+---
+title: "6. Authorization by ownership"
+description: Every note belongs to its creator — one get_note_for_user dependency does the "does it exist, and is it yours?" check, preventing IDOR.
+---
+
+<GithubLink path="example/12/f" />
+
+Every note belongs to the user who created it. You can list, read, edit
+and delete **your own** notes. Someone else's note is `403`; an admin can
+touch any note. One dependency, `get_note_for_user`, does the "does it
+exist, and is it yours?" check for every `/notes/{note_id}` route.
+
+| Route | Description |
+|---|---|
+| `POST /token` | Log in (form fields `username`, `password`); `401` if wrong |
+| `GET /notes` | Your notes only; an admin gets everyone's |
+| `POST /notes` | Body with `title` and `body`; `201`. The owner is always you |
+| `GET /notes/{note_id}` | `404` if missing, `403` if not yours (and you're not admin) |
+| `PUT /notes/{note_id}` | Replace title and body; same `404`/`403` rules |
+| `DELETE /notes/{note_id}` | `204`; same `404`/`403` rules |
+
+Every route except `/token` answers `401` without a valid token.
+
+Tables: `sec_rbac_users` (shared with
+[Authorization by role](/en/docs/security/roles)) and `sec_notes`.
+Seeded users: `alice` / `alice-password` and `bob` / `bob-password`
+(role `user`), `admin` / `admin-password` (role `admin`). Alice starts
+with two notes, Bob with one.
+
+## The code
+
+Login is the same as on [JWT login](/en/docs/security/jwt-login),
+`config.py` and `security.py` are the same as on
+[Authorization by role](/en/docs/security/roles), and `UserModel` is
+copied unchanged from there. New: `NoteModel` with an `owner_id`, and the
+`get_note_for_user` dependency.
+
+**`config.py`:**
+
+```python title="config.py"
+import os
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# Dev default only. Set a long random SECRET_KEY in .env for anything real.
+SECRET_KEY = os.getenv("SECRET_KEY", "dev-only-secret-change-me-in-production-0123456789")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "15"))
+```
+
+**`database.py`:**
+
+```python title="database.py"
+import os
+
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+load_dotenv()
+
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
+MYSQL_USER = os.getenv("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
+
+# Set DATABASE_URL directly to override everything above (e.g. to point
+# at SQLite for a quick local test with no MySQL server at all).
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
+)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+```
+
+**`models.py`** — users (unchanged) and notes, each with an owner:
+
+```python title="models.py"
+from sqlalchemy import Column, ForeignKey, Integer, String, Text
+
+from database import Base
+
+
+# Identical to 12/e's model, so both lessons share the same table.
+class UserModel(Base):
+    __tablename__ = "sec_rbac_users"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    username = Column(String(50), nullable=False, unique=True)
+    hashed_password = Column(String(255), nullable=False)
+    # "user" or "admin". A plain string column is enough for two roles.
+    role = Column(String(20), nullable=False, default="user")
+
+
+class NoteModel(Base):
+    __tablename__ = "sec_notes"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    title = Column(String(100), nullable=False)
+    body = Column(Text, nullable=False, default="")
+    # Who owns this row. Every permission check compares against it.
+    # ondelete="CASCADE": when 12/e's admin deletes a user, MySQL deletes
+    # their notes too instead of refusing the delete.
+    owner_id = Column(
+        Integer, ForeignKey("sec_rbac_users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+```
+
+**`schemas.py`** — note in, note out; no `owner_id` coming in:
+
+```python title="schemas.py"
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+
+# Used for both POST and PUT (PUT replaces the whole note).
+# There is NO owner_id here: the client never chooses the owner.
+class NoteIn(BaseModel):
+    title: str = Field(min_length=1, max_length=100)
+    body: str = Field(default="", max_length=5000)
+
+
+class NoteOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    title: str
+    body: str
+    owner_id: int
+```
+
+**`security.py`:**
+
+```python title="security.py"
+from datetime import datetime, timedelta, timezone
+
+import jwt
+from pwdlib import PasswordHash
+
+from config import ACCESS_TOKEN_EXPIRE_MINUTES, ALGORITHM, SECRET_KEY
+
+password_hash = PasswordHash.recommended()
+
+
+def hash_password(password: str) -> str:
+    return password_hash.hash(password)
+
+
+def verify_password(password: str, hashed: str) -> bool:
+    return password_hash.verify(password, hashed)
+
+
+def create_access_token(username: str, role: str) -> str:
+    expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    # "role" is informational only (handy for a frontend that wants to
+    # show or hide an Admin button). The server never trusts it: see
+    # get_current_user in dependencies.py.
+    payload = {"sub": username, "role": role, "exp": expire, "type": "access"}
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def decode_access_token(token: str) -> str | None:
+    """Return the username inside a valid access token, else None."""
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except jwt.InvalidTokenError:  # bad signature, expired, garbage...
+        return None
+    if payload.get("type") != "access":
+        return None
+    return payload.get("sub")
+```
+
+**`crud.py`** — the owner filter lives in the query:
+
+```python title="crud.py"
+from sqlalchemy.orm import Session
+
+from models import NoteModel, UserModel
+from schemas import NoteIn
+from security import hash_password, verify_password
+
+
+# ---- users (same as 12/e) ----
+
+def get_user_by_username(db: Session, username: str) -> UserModel | None:
+    return db.query(UserModel).filter(UserModel.username == username).first()
+
+
+def authenticate_user(db: Session, username: str, password: str) -> UserModel | None:
+    user = get_user_by_username(db, username)
+    if user is None or not verify_password(password, user.hashed_password):
+        return None
+    return user
+
+
+# ---- notes ----
+
+def get_note(db: Session, note_id: int) -> NoteModel | None:
+    return db.get(NoteModel, note_id)
+
+
+# The owner filter lives in the QUERY. Forget it and every user can
+# read every note: that's the bug this lesson is about.
+def get_notes_for_owner(db: Session, owner_id: int) -> list[NoteModel]:
+    return (
+        db.query(NoteModel)
+        .filter(NoteModel.owner_id == owner_id)
+        .order_by(NoteModel.id)
+        .all()
+    )
+
+
+def get_all_notes(db: Session) -> list[NoteModel]:
+    return db.query(NoteModel).order_by(NoteModel.id).all()
+
+
+def create_note(db: Session, note: NoteIn, owner_id: int) -> NoteModel:
+    row = NoteModel(**note.model_dump(), owner_id=owner_id)
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def update_note(db: Session, row: NoteModel, note: NoteIn) -> NoteModel:
+    row.title = note.title
+    row.body = note.body
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def delete_note(db: Session, row: NoteModel) -> None:
+    db.delete(row)
+    db.commit()
+
+
+# ---- seed ----
+
+def seed(db: Session) -> None:
+    # 12/e may already have created the users (same table).
+    if db.query(UserModel).count() == 0:
+        db.add_all(
+            [
+                UserModel(username="alice", hashed_password=hash_password("alice-password"), role="user"),
+                UserModel(username="bob", hashed_password=hash_password("bob-password"), role="user"),
+                UserModel(username="admin", hashed_password=hash_password("admin-password"), role="admin"),
+            ]
+        )
+        db.commit()
+
+    if db.query(NoteModel).count() == 0:
+        notes = {
+            "alice": [("Alice's shopping list", "milk, eggs"), ("Alice's diary", "Dear diary...")],
+            "bob": [("Bob's passwords", "please don't read this")],
+        }
+        for username, items in notes.items():
+            user = get_user_by_username(db, username)
+            if user is None:  # deleted in 12/e? just skip
+                continue
+            for title, body in items:
+                db.add(NoteModel(title=title, body=body, owner_id=user.id))
+        db.commit()
+```
+
+**`dependencies.py`** — who are you, and is this note yours:
+
+```python title="dependencies.py"
+from fastapi import Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
+from sqlalchemy.orm import Session
+
+import crud
+from database import get_db
+from models import NoteModel, UserModel
+from security import decode_access_token
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+
+# Same as 12/c and 12/e: who are you? (401)
+def get_current_user(
+    token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)
+) -> UserModel:
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    username = decode_access_token(token)
+    if username is None:
+        raise credentials_exception
+    user = crud.get_user_by_username(db, username)
+    if user is None:
+        raise credentials_exception
+    return user
+
+
+# Ownership: may THIS user touch THIS note? (404 / 403)
+# note_id comes from the path (/notes/{note_id}), so any route with that
+# path parameter can just declare: note = Depends(get_note_for_user).
+def get_note_for_user(
+    note_id: int,
+    user: UserModel = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> NoteModel:
+    note = crud.get_note(db, note_id)
+    if note is None:
+        raise HTTPException(status_code=404, detail="Note not found")
+    if note.owner_id != user.id and user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not enough permissions",
+        )
+    return note
+```
+
+**`main.py`** — routes receive a note that's already been checked:
+
+```python title="main.py"
+from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi.security import OAuth2PasswordRequestForm
+from sqlalchemy.orm import Session
+
+import crud
+from database import Base, SessionLocal, engine, get_db
+from dependencies import get_current_user, get_note_for_user
+from models import NoteModel, UserModel
+from schemas import NoteIn, NoteOut, Token
+from security import create_access_token
+
+Base.metadata.create_all(bind=engine)
+
+with SessionLocal() as db:
+    crud.seed(db)
+
+app = FastAPI()
+
+NOTE_ERRORS = {
+    403: {"description": "Not your note"},
+    404: {"description": "Note not found"},
+}
+
+
+@app.post("/token", response_model=Token)
+def login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    user = crud.authenticate_user(db, form.username, form.password)
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return {"access_token": create_access_token(user.username, user.role), "token_type": "bearer"}
+
+
+@app.get("/notes", response_model=list[NoteOut])
+def list_notes(user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)):
+    if user.role == "admin":
+        return crud.get_all_notes(db)
+    return crud.get_notes_for_owner(db, user.id)
+
+
+# The owner is ALWAYS the logged-in user, never something from the body.
+@app.post("/notes", response_model=NoteOut, status_code=status.HTTP_201_CREATED)
+def create_note(
+    note: NoteIn, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)
+):
+    return crud.create_note(db, note, owner_id=user.id)
+
+
+# get_note_for_user already did the 404 and 403 checks before we get here.
+@app.get("/notes/{note_id}", response_model=NoteOut, responses=NOTE_ERRORS)
+def read_note(note: NoteModel = Depends(get_note_for_user)):
+    return note
+
+
+@app.put("/notes/{note_id}", response_model=NoteOut, responses=NOTE_ERRORS)
+def replace_note(
+    body: NoteIn,
+    note: NoteModel = Depends(get_note_for_user),
+    db: Session = Depends(get_db),
+):
+    return crud.update_note(db, note, body)
+
+
+@app.delete("/notes/{note_id}", status_code=status.HTTP_204_NO_CONTENT, responses=NOTE_ERRORS)
+def delete_note(note: NoteModel = Depends(get_note_for_user), db: Session = Depends(get_db)):
+    crud.delete_note(db, note)
+```
+
+## Line by line
+
+The previous page asked "is this user an admin?". This one asks a
+different question: "is this **row** yours?".
+
+**The bug this page prevents: IDOR:**
+
+1. *Insecure Direct Object Reference*: the API checks that you're logged
+   in, then happily returns `/notes/3` to whoever asks, because the route
+   never compared the note's owner with the caller. Alice changes `1` to
+   `3` in the URL and reads Bob's notes. Login, hashing and JWTs are all
+   perfect, and the data still leaks. It's one of the most common
+   security bugs in real APIs ("Broken Object Level Authorization", #1 on
+   the OWASP API Security Top 10), precisely because it's not a missing
+   feature — it's a missing `WHERE`. Without this page's check, the
+   vulnerable version would be just:
+
+   ```python
+   @app.get("/notes/{note_id}")
+   def read_note(note_id: int, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)):
+       return crud.get_note(db, note_id)  # logged in? yes. YOUR note? never asked.
+   ```
+
+**`models.py`:**
+
+2. `owner_id = Column(Integer, ForeignKey("sec_rbac_users.id", ondelete="CASCADE"), nullable=False, index=True)`
+   — every note points at its owner.
+   - `index=True` because "notes WHERE owner_id = ?" is now the most
+     frequent query.
+   - `ondelete="CASCADE"` matters because the role page shares the users
+     table: when its admin deletes Bob, MySQL removes Bob's notes too,
+     instead of refusing the delete with a foreign-key error.
+   - `UserModel` is identical to the role page's: two folders can only
+     share a table if their models match, because `create_all` never
+     alters an existing table.
+
+**`schemas.py`:**
+
+3. `NoteIn` has **no `owner_id` field at all**. Even if a client sends
+   `"owner_id": 999`, Pydantic ignores it. Letting the client pick the
+   owner would let anyone create notes "as" someone else. `NoteOut` does
+   show `owner_id`, which is harmless to reveal.
+
+**`crud.py`:**
+
+4. `get_notes_for_owner` — `.filter(NoteModel.owner_id == owner_id)`.
+   Don't load every note and drop the wrong ones in Python; let the
+   database return only the caller's rows. **Rule of thumb: every query
+   that touches user-owned data should mention `owner_id`** (or go
+   through a helper that does).
+5. `create_note(db, note, owner_id)` — `NoteModel(**note.model_dump(), owner_id=owner_id)`:
+   the title and body come from the client, the owner comes from the
+   caller (the route).
+6. `seed` — users are only created if the table is empty (the role page
+   may already have made them). Notes look users up by name and skip
+   anyone the role page deleted.
+
+**`dependencies.py`:**
+
+7. `get_current_user` — the same `401` check as on the role page.
+8. `get_note_for_user` — the ownership check, written **once**:
+   - `note_id: int` has no `Depends`, so FastAPI fills it from the path
+     `/notes/{note_id}`, exactly as it would in a route.
+   - Missing note → `404 Note not found`.
+   - `note.owner_id != user.id and user.role != "admin"` → `403 Not
+     enough permissions`. The admin bypass is a deliberate choice; drop
+     the `and user.role != "admin"` and even admins only see their own.
+   - The order is always: no or bad token `401` (inside
+     `get_current_user`), missing `404`, not yours `403`.
+
+**`main.py`:**
+
+9. `POST /notes` — `owner_id=user.id`: the owner comes from the token,
+   never the body.
+10. `GET /notes` — picks `get_all_notes` for an admin and
+    `get_notes_for_owner` for everyone else.
+11. `read_note`, `replace_note`, `delete_note` — all take
+    `note: NoteModel = Depends(get_note_for_user)`. One place to get the
+    rule right instead of three places to forget it. A new
+    `/notes/{note_id}/share` route would get the check by adding one
+    parameter. The route bodies are one line each, because by the time
+    they run, the note exists and the caller may touch it.
+12. FastAPI caches dependencies per request: `get_db` in `replace_note`
+    and inside `get_note_for_user` is the **same** session, so the note
+    we change is attached to the session we commit.
+
+**`403` or `404` for someone else's note?**
+
+13. `403` tells Alice "note 3 exists, you just can't see it". That's a
+    small leak: by trying ids she learns how many notes there are. Some
+    APIs answer `404` instead, as if the row didn't exist. GitHub does
+    this: a private repo you can't see is a `404 Not Found`, not a `403`.
+    To do the same here, change the second `raise` to a `404` with the
+    same message as the first. This page keeps `403` because it's
+    clearer while learning ("you're logged in as the wrong user" vs
+    "wrong id"). Pick `404` when the mere existence of a row is
+    sensitive. [ID hashing](/en/docs/security/id-hashing) attacks the
+    same leak from another side by making ids unguessable, but that never
+    replaces this ownership check.
+
+## Try it
+
+```bash
+curl -X POST http://127.0.0.1:8000/token -d "username=alice&password=alice-password"
+curl http://127.0.0.1:8000/notes -H "Authorization: Bearer <paste alice token>"
+curl -i http://127.0.0.1:8000/notes/3 -H "Authorization: Bearer <paste alice token>"  # 403, Bob's note
+curl -X POST http://127.0.0.1:8000/notes -H "Authorization: Bearer <paste alice token>" -H "Content-Type: application/json" -d "{\"title\": \"Ideas\", \"body\": \"learn FastAPI\"}"
+curl -X PUT http://127.0.0.1:8000/notes/1 -H "Authorization: Bearer <paste alice token>" -H "Content-Type: application/json" -d "{\"title\": \"Shopping\", \"body\": \"milk, eggs, bread\"}"
+curl -i -X DELETE http://127.0.0.1:8000/notes/3 -H "Authorization: Bearer <paste alice token>"  # 403
+```
+
+On a fresh database, note 3 is Bob's, so the third and last requests are
+`403` `{"detail": "Not enough permissions"}`. Log in as `admin` and the
+same `DELETE` works.
+
+**Try this too:** send `"owner_id": 2` in the `POST /notes` body. The new
+note still belongs to alice.
+
+Next: [Encrypt/decrypt fields](/en/docs/security/encryption) — protecting
+sensitive columns at rest.

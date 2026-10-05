@@ -1,0 +1,499 @@
+---
+title: "9. Rate limiting"
+description: Slowing down password guessing with slowapi — 429 Too Many Requests after 5 login attempts a minute.
+---
+
+<GithubLink path="example/12/i" />
+
+Argon2 ([Password hashing](/en/docs/security/password-hashing)) makes
+each guess expensive **offline**, but an attacker can still hammer
+`POST /token` **online**. Here [slowapi](https://github.com/laurentS/slowapi)
+allows **5 login attempts per minute per IP address**; the 6th gets
+`429 Too Many Requests` until the minute is up. `GET /users/me` is
+protected exactly as in [Protected routes](/en/docs/security/protected-routes).
+
+## Why limit login
+
+Without a limit, a script can try thousands of passwords a minute
+against `alice` (**brute force**), or try the most common passwords
+against every username (**password spraying**). A limit of 5 a minute
+turns "thousands per minute" into 7,200 a day. The most common
+passwords are the first ones tried, so pair the limit with a minimum
+password length.
+
+## The code
+
+`database.py`, `models.py`, `config.py`, `security.py`, `crud.py` and
+`dependencies.py` are the same as in
+[Protected routes](/en/docs/security/protected-routes). Everything new
+is at the top of `main.py` and on the `/token` route. Table:
+`sec_users`, shared with the JWT, protected-routes and refresh-token
+lessons. Seeded users: `alice`, `bob`, `admin` (password
+`<name>-password`), and `carol` / `carol-password`, who is
+deactivated.
+
+**`.env.example`**:
+
+```bash title=".env.example"
+# Copy this file to .env and adjust the values for your local MySQL
+# server. All of these already have working defaults baked into the
+# code, so creating a .env is optional — the app runs with zero setup
+# if you skip this file entirely.
+
+MYSQL_HOST=127.0.0.1
+MYSQL_PORT=3306
+MYSQL_USER=root
+MYSQL_PASSWORD=
+MYSQL_DB=fastapi_learn
+
+# Set this to override everything above at once — e.g. point at SQLite
+# for a quick local try with no MySQL server running at all.
+# DATABASE_URL=sqlite:///./test.db
+
+# --- Security (topic 12) ---
+# Signs every JWT. Anyone who knows it can forge tokens, so in production
+# use a long random value and keep it out of git. Generate one with:
+#   python -c "import secrets; print(secrets.token_hex(32))"
+SECRET_KEY=dev-only-secret-change-me-in-production-0123456789
+ACCESS_TOKEN_EXPIRE_MINUTES=15
+REFRESH_TOKEN_EXPIRE_DAYS=7
+```
+
+**`config.py`** — secret key, algorithm and token lifetimes:
+
+```python title="config.py"
+import os
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# Signs every token. Anyone who knows it can mint valid tokens for any
+# user, so in production set a long random value in .env, generated with:
+#   python -c "import secrets; print(secrets.token_hex(32))"
+SECRET_KEY = os.getenv("SECRET_KEY", "dev-only-secret-change-me-in-production-0123456789")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "15"))
+REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7"))
+```
+
+**`database.py`** — env vars, `engine`/`SessionLocal`/`Base`, and `get_db()`:
+
+```python title="database.py"
+import os
+
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+load_dotenv()
+
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
+MYSQL_USER = os.getenv("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
+
+# Set DATABASE_URL directly to override everything above (e.g. to point
+# at SQLite for a quick local test with no MySQL server at all).
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
+)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+```
+
+**`models.py`** — the shared `sec_users` table:
+
+```python title="models.py"
+from sqlalchemy import Boolean, Column, Integer, String
+
+from database import Base
+
+
+# Shared by 12/b, 12/c, 12/d and 12/i. Keep it identical in all four:
+# create_all never alters an existing table.
+class UserModel(Base):
+    __tablename__ = "sec_users"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    username = Column(String(30), nullable=False, unique=True)
+    hashed_password = Column(String(255), nullable=False)
+    is_active = Column(Boolean, nullable=False, default=True)
+```
+
+**`schemas.py`** — `Token` and `UserOut`:
+
+```python title="schemas.py"
+from pydantic import BaseModel, ConfigDict
+
+
+# The OAuth2 spec fixes these two field names, and /docs relies on them.
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+
+class UserOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    username: str
+    is_active: bool
+```
+
+**`security.py`** — password hashing and access tokens:
+
+```python title="security.py"
+from datetime import datetime, timedelta, timezone
+
+import jwt
+from pwdlib import PasswordHash
+
+from config import ACCESS_TOKEN_EXPIRE_MINUTES, ALGORITHM, SECRET_KEY
+
+# Argon2, exactly as in 12/a.
+password_hash = PasswordHash.recommended()
+
+
+def hash_password(password: str) -> str:
+    return password_hash.hash(password)
+
+
+def verify_password(password: str, hashed: str) -> bool:
+    return password_hash.verify(password, hashed)
+
+
+def create_access_token(username: str, expires_delta: timedelta | None = None) -> str:
+    if expires_delta is None:
+        expires_delta = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    payload = {
+        "sub": username,  # who the token is about (the "subject")
+        "exp": datetime.now(timezone.utc) + expires_delta,  # stored as a Unix timestamp
+        "type": "access",
+    }
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def decode_token(token: str) -> dict:
+    # Checks the signature AND the exp claim. Raises jwt.InvalidTokenError
+    # (or its subclass jwt.ExpiredSignatureError) if either fails.
+    # algorithms= is a whitelist: never let the token pick its own.
+    return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+```
+
+**`crud.py`** — user lookup, `authenticate()`, seed data:
+
+```python title="crud.py"
+from sqlalchemy.orm import Session
+
+from models import UserModel
+from security import hash_password, verify_password
+
+
+def get_user_by_username(db: Session, username: str) -> UserModel | None:
+    return db.query(UserModel).filter(UserModel.username == username).first()
+
+
+def authenticate(db: Session, username: str, password: str) -> UserModel | None:
+    user = get_user_by_username(db, username)
+    if user is None or not verify_password(password, user.hashed_password):
+        return None
+    return user
+
+
+def seed_users(db: Session) -> None:
+    if db.query(UserModel).count() == 0:
+        db.add_all(
+            [
+                UserModel(username="alice", hashed_password=hash_password("alice-password")),
+                UserModel(username="bob", hashed_password=hash_password("bob-password")),
+                UserModel(username="admin", hashed_password=hash_password("admin-password")),
+                # Deactivated account: can log in, but the protected
+                # routes from 12/c on turn it away with 403.
+                UserModel(username="carol", hashed_password=hash_password("carol-password"), is_active=False),
+            ]
+        )
+        db.commit()
+```
+
+**`dependencies.py`** — `get_current_user` / `get_current_active_user`:
+
+```python title="dependencies.py"
+import jwt
+from fastapi import Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
+from sqlalchemy.orm import Session
+
+import crud
+from database import get_db
+from models import UserModel
+from security import decode_token
+
+# Reads "Authorization: Bearer <token>" and hands the <token> part to
+# the route. No header at all -> 401 "Not authenticated" automatically.
+# tokenUrl tells /docs where the "Authorize" button should log in.
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+
+def credentials_error(detail: str = "Could not validate credentials") -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail=detail,
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> UserModel:
+    try:
+        payload = decode_token(token)
+    except jwt.ExpiredSignatureError:  # subclass, so it must come first
+        raise credentials_error("Token has expired")
+    except jwt.InvalidTokenError:  # bad signature, garbage, wrong algorithm...
+        raise credentials_error()
+
+    if payload.get("type") != "access":
+        raise credentials_error()
+
+    username = payload.get("sub")
+    user = crud.get_user_by_username(db, username) if username else None
+    if user is None:  # valid token, but the account was deleted since
+        raise credentials_error()
+    return user
+
+
+# Builds on get_current_user: authenticated AND allowed in.
+def get_current_active_user(user: UserModel = Depends(get_current_user)) -> UserModel:
+    if not user.is_active:
+        # 403, not 401: we know exactly who this is, and the answer is no.
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Inactive user")
+    return user
+```
+
+**`main.py`** — the limiter, the `429` handler, and the limited `/token` route:
+
+```python title="main.py"
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
+from fastapi.security import OAuth2PasswordRequestForm
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
+from sqlalchemy.orm import Session
+
+import crud
+from database import Base, SessionLocal, engine, get_db
+from dependencies import get_current_active_user
+from models import UserModel
+from schemas import Token, UserOut
+from security import create_access_token
+
+Base.metadata.create_all(bind=engine)
+
+with SessionLocal() as db:
+    crud.seed_users(db)
+
+# Counts requests per client IP address. Storage is in-memory by
+# default: it resets on restart and isn't shared between workers. In
+# production pass storage_uri="redis://localhost:6379" so every worker
+# shares one set of counters.
+# headers_enabled=True adds X-RateLimit-* headers to every limited
+# response and Retry-After to the 429.
+limiter = Limiter(key_func=get_remote_address, headers_enabled=True)
+
+app = FastAPI()
+app.state.limiter = limiter
+# Turns RateLimitExceeded into a 429 JSON response.
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+AUTH_ERRORS = {
+    401: {"description": "Missing, invalid or expired token"},
+    403: {"description": "Inactive user"},
+}
+
+
+# 5 attempts per minute per IP, successful or not. slowapi needs the
+# `request` parameter to find the client IP, and (because of
+# headers_enabled) the `response` parameter to attach its headers to,
+# since this route returns a dict rather than a Response.
+@app.post("/token", response_model=Token, responses={
+    401: {"description": "Incorrect username or password"},
+    429: {"description": "Too many login attempts"},
+})
+@limiter.limit("5/minute")
+def login(request: Request, response: Response,
+          form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    user = crud.authenticate(db, form_data.username, form_data.password)
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return {"access_token": create_access_token(user.username), "token_type": "bearer"}
+
+
+# Not rate limited: only /token is a password-guessing target.
+@app.get("/users/me", response_model=UserOut, responses=AUTH_ERRORS)
+def read_me(current_user: UserModel = Depends(get_current_active_user)):
+    return current_user
+```
+
+## Line by line
+
+**One limiter for the app (`main.py`):**
+
+1. **`Limiter(key_func=get_remote_address, ...)`** — `key_func` decides
+   **who** is being counted. `get_remote_address` uses the client's IP
+   address, so every request from one machine shares one counter.
+2. **`headers_enabled=True`** adds `X-RateLimit-Limit`,
+   `X-RateLimit-Remaining` and `X-RateLimit-Reset` to limited responses,
+   and `Retry-After` to the `429`. It's off by default.
+3. **`app.state.limiter = limiter`** — this is where slowapi looks for
+   the limiter at request time. Forget it and the decorator can't find
+   its counters.
+4. **`app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)`**
+   — when a limit is hit, slowapi raises `RateLimitExceeded`. The
+   built-in handler turns it into a `429` with
+   `{"error": "Rate limit exceeded: 5 per 1 minute"}`. Note the key is
+   `error`, not FastAPI's usual `detail`; write your own handler if your
+   client expects `detail`.
+
+**The route (`main.py`):**
+
+5. **`@limiter.limit("5/minute")` sits below `@app.post(...)`.**
+   Decorators apply bottom-up, so FastAPI registers the already-limited
+   function. Put it above and the limit is silently never applied. The
+   string can also be `"100/hour"`, `"5/minute;20/hour"`, and so on.
+6. **`request: Request` is required, and must be named `request`.**
+   slowapi reads the IP from it, and refuses to start without it
+   (`No "request" or "websocket" argument on function ...`), even though
+   the route body never uses it.
+7. **`response: Response` is required only because of
+   `headers_enabled`.** This route returns a dict, not a `Response`, so
+   slowapi needs FastAPI's `response` object to put its headers on.
+   Leave it out and every successful login becomes a `500`, with
+   "parameter `response` must be an instance of
+   starlette.responses.Response" in the server log.
+8. **`responses={... 429: ...}`** — only documentation: it makes the
+   `429` show up in `/docs` next to the `401`.
+
+**What counts:**
+
+9. **Every request to `/token` counts, right password or wrong.** The
+   limiter runs **before** the route body, so it can't know the
+   outcome. That's fine for login; a real user rarely needs more than 5
+   tries a minute.
+10. **Only `/token` is limited.** `/users/me` isn't a password-guessing
+    target, and checking a token there is cheap. Your token from an
+    earlier login keeps working while you're locked out of `/token`.
+
+**Reading the headers:**
+
+11. On a successful login you see your remaining budget:
+
+    ```
+    x-ratelimit-limit: 5
+    x-ratelimit-remaining: 4
+    x-ratelimit-reset: 1791196147.93
+    ```
+
+    On the `429` you also get `retry-after: 60` (seconds to wait).
+    `x-ratelimit-reset` is the Unix time when the window resets. A
+    well-behaved client reads `Retry-After` and waits instead of retrying
+    in a loop. One gap: the `401` for a wrong password has **no**
+    rate-limit headers. It's raised as an exception before slowapi gets
+    to decorate the response.
+
+**Production concerns:**
+
+12. **In-memory storage.** By default the counters live in a Python
+    dict inside the server process. That means:
+    - **Restart = reset.** Every `--reload` gives everyone a fresh 5.
+    - **Not shared between workers.** `uvicorn main:app --workers 4`
+      (or 4 containers behind a load balancer) gives each worker its own
+      counters, so the real limit becomes up to 20 a minute, depending on
+      which worker answers.
+
+    The fix is one argument, pointing every worker at the same store:
+
+    ```python
+    limiter = Limiter(key_func=get_remote_address, storage_uri="redis://localhost:6379")
+    ```
+
+    (slowapi uses the `limits` library underneath, which also supports
+    Memcached and MongoDB.)
+13. **Limits of limiting by IP.**
+    - Behind a reverse proxy (nginx, a cloud load balancer), every
+      request arrives from the **proxy's** IP, so everybody shares one
+      counter. Run uvicorn with `--proxy-headers` and
+      `--forwarded-allow-ips` set to your proxy so the real client IP
+      (from `X-Forwarded-For`) is used. Only trust that header from your
+      own proxy; anyone can send a fake one.
+    - Many users behind one office or mobile-carrier IP share a limit.
+    - An attacker with thousands of IPs (a botnet) gets 5 a minute from
+      each. Defences there include also limiting per **username** (a
+      custom `key_func` reading the form field), temporary account
+      lockouts, CAPTCHAs, and multi-factor login.
+14. **Testing.** FastAPI's `TestClient` reports its address as
+    `"testclient"`, so all test requests share one counter: the 6th
+    login in a test returns `429`. The counters also persist between
+    tests in the same process; call `limiter.reset()` between tests that
+    each expect a fresh budget.
+
+## Routes
+
+| Route | Description |
+|---|---|
+| `POST /token` | Form login → access token; `401` if wrong, `429` after 5 attempts in a minute (right or wrong) |
+| `GET /users/me` | The logged-in user; `401` without a valid token, `403` if deactivated. Not rate limited |
+
+## Try it
+
+```bash
+cd example/12/i
+uvicorn main:app --reload
+```
+
+```bash
+curl -i -X POST http://127.0.0.1:8000/token -d "username=alice&password=alice-password"
+curl http://127.0.0.1:8000/users/me -H "Authorization: Bearer TOKEN"
+```
+
+`-i` prints the response headers, including your rate-limit budget.
+Replace `TOKEN` with the `access_token` from the first response. Now run
+this one **six times** quickly:
+
+```bash
+curl -i -X POST http://127.0.0.1:8000/token -d "username=alice&password=wrong"
+```
+
+Attempts 2–5 are `401 Incorrect username or password`. The 6th (and any
+login from your IP, even with the right password, even as `bob`) is:
+
+```
+HTTP/1.1 429 Too Many Requests
+x-ratelimit-limit: 5
+x-ratelimit-remaining: 0
+x-ratelimit-reset: 1791196147.93
+retry-after: 60
+
+{"error":"Rate limit exceeded: 5 per 1 minute"}
+```
+
+**Try this too:** restart the server (or save a file so `--reload`
+restarts it) and you can log in again at once. The counters live in
+memory — that's step 12 above.
+
+Next: [Everything together](/en/docs/security/secure-app) — one secure
+notes API with every piece of this topic, plus a security checklist.

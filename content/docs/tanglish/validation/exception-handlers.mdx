@@ -1,0 +1,470 @@
+---
+title: "3. Exception handlers"
+description: API return panra ovoru error-kum oru consistent shape — crud.py business errors raise pannum, main.py adha oru idathula responses-a maathum.
+---
+
+<GithubLink path="example/8/c" />
+
+Indha API-la irundhu varra ovoru error-um, edhunaala vandhaalum, ippo
+**oru shape** dhan:
+
+```json
+{"error": {"code": "item_not_found", "message": "Item 99 not found"}}
+```
+
+Validation errors oru `fields` list add pannum. Edha error-aiyum kaatta
+frontend-ku oru piece of code podhum. Routes mattrum rules
+[8/b](/tanglish/docs/validation/status-codes)-oda same, aana routes-la
+ippo error handling edhuvume illa. Oru pudhu file:
+
+| File | Responsibility |
+|---|---|
+| `exceptions.py` | `AppError` mattrum adhoda subclasses: ovvonnum oru status code-um error code-um vachirukra business errors |
+
+| Route | Errors (ellam mela irukra shape-la) |
+|---|---|
+| `GET /items/{item_id}` | `item_not_found` (404) |
+| `POST /items` | `duplicate_name` (409), `validation_error` (422) |
+| `PATCH /items/{item_id}` | `empty_update` (400), `item_not_found`, `duplicate_name`, `validation_error` |
+| `DELETE /items/{item_id}` | `item_not_found`, `item_in_stock` (409) |
+| `GET /boom` | `internal_error` (500), purpose-a broken route-la irundhu |
+| edha unknown URL-um | `http_404`; thappana method `http_405` kudukkum |
+
+## Code
+
+**`database.py`** — topic 6-oda same:
+
+```python title="database.py"
+import os
+
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+load_dotenv()
+
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
+MYSQL_USER = os.getenv("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
+
+# Set DATABASE_URL directly to override everything above (e.g. to point
+# at SQLite for a quick local test with no MySQL server at all).
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
+)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+```
+
+**`models.py`** — 8/a, 8/b-oda same `validation_items` table:
+
+```python title="models.py"
+from sqlalchemy import Column, Float, Integer, String
+
+from database import Base
+
+
+class ItemModel(Base):
+    __tablename__ = "validation_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(50), nullable=False, unique=True)
+    price = Column(Float, nullable=False)
+    quantity = Column(Integer, nullable=False, default=0)
+```
+
+**`schemas.py`** — 8/b-oda same:
+
+```python title="schemas.py"
+from typing import Optional
+
+from pydantic import BaseModel, Field, field_validator
+
+
+class ItemCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=50)
+    price: float = Field(gt=0, le=1_000_000)
+    quantity: int = Field(default=0, ge=0)
+
+    @field_validator("name")
+    @classmethod
+    def name_not_blank(cls, value: str) -> str:
+        value = value.strip()
+        if value == "":
+            raise ValueError("name must not be blank")
+        return value
+
+
+# Same rules as ItemCreate, but every field is optional — PATCH only
+# sends what changed.
+class ItemPatch(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=50)
+    price: Optional[float] = Field(default=None, gt=0, le=1_000_000)
+    quantity: Optional[int] = Field(default=None, ge=0)
+
+    @field_validator("name")
+    @classmethod
+    def name_not_blank(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        value = value.strip()
+        if value == "":
+            raise ValueError("name must not be blank")
+        return value
+```
+
+**`exceptions.py`** — pudhusu: business terms-la errors:
+
+```python title="exceptions.py"
+# Errors that describe what went wrong in *business* terms. crud.py raises
+# them; main.py decides what HTTP response each one becomes. crud.py never
+# has to know about status codes.
+
+
+class AppError(Exception):
+    status_code = 400
+    code = "bad_request"
+
+    def __init__(self, message: str):
+        super().__init__(message)
+        self.message = message
+
+
+class ItemNotFound(AppError):
+    status_code = 404
+    code = "item_not_found"
+
+    def __init__(self, item_id: int):
+        super().__init__(f"Item {item_id} not found")
+
+
+class DuplicateItemName(AppError):
+    status_code = 409
+    code = "duplicate_name"
+
+    def __init__(self, name: str):
+        super().__init__(f"An item named '{name}' already exists")
+
+
+class ItemStillInStock(AppError):
+    status_code = 409
+    code = "item_in_stock"
+
+    def __init__(self, item_id: int, quantity: int):
+        super().__init__(f"Item {item_id} still has {quantity} in stock; set quantity to 0 first")
+
+
+class EmptyUpdate(AppError):
+    status_code = 400
+    code = "empty_update"
+
+    def __init__(self):
+        super().__init__("Send at least one non-null field to update")
+```
+
+**`crud.py`** — ippo `None` return pannama raise pannudhu:
+
+```python title="crud.py"
+from sqlalchemy.orm import Session
+
+from exceptions import DuplicateItemName, EmptyUpdate, ItemNotFound, ItemStillInStock
+from models import ItemModel
+from schemas import ItemCreate, ItemPatch
+
+
+def get_items(db: Session) -> list[ItemModel]:
+    return db.query(ItemModel).order_by(ItemModel.id).all()
+
+
+def get_item(db: Session, item_id: int) -> ItemModel:
+    row = db.get(ItemModel, item_id)
+    if row is None:
+        raise ItemNotFound(item_id)
+    return row
+
+
+def _ensure_name_free(db: Session, name: str) -> None:
+    if db.query(ItemModel).filter(ItemModel.name == name).first() is not None:
+        raise DuplicateItemName(name)
+
+
+def create_item(db: Session, item: ItemCreate) -> ItemModel:
+    _ensure_name_free(db, item.name)
+    row = ItemModel(name=item.name, price=item.price, quantity=item.quantity)
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def update_item(db: Session, item_id: int, patch: ItemPatch) -> ItemModel:
+    row = get_item(db, item_id)
+    changes = {k: v for k, v in patch.model_dump(exclude_unset=True).items() if v is not None}
+    if not changes:
+        raise EmptyUpdate()
+    if "name" in changes and changes["name"] != row.name:
+        _ensure_name_free(db, changes["name"])
+    for field, value in changes.items():
+        setattr(row, field, value)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def delete_item(db: Session, item_id: int) -> None:
+    row = get_item(db, item_id)
+    if row.quantity > 0:
+        raise ItemStillInStock(item_id, row.quantity)
+    db.delete(row)
+    db.commit()
+
+
+def seed_items(db: Session) -> None:
+    if db.query(ItemModel).count() == 0:
+        db.add_all(
+            [
+                ItemModel(name="Laptop", price=999.99, quantity=5),
+                ItemModel(name="Mouse", price=19.99, quantity=50),
+            ]
+        )
+        db.commit()
+```
+
+**`main.py`** — naalu exception handlers, error handling illadha
+routes:
+
+```python title="main.py"
+import logging
+
+from fastapi import Depends, FastAPI, Request, status
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from sqlalchemy.orm import Session
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+import crud
+from database import Base, SessionLocal, engine, get_db
+from exceptions import AppError
+from schemas import ItemCreate, ItemPatch
+
+Base.metadata.create_all(bind=engine)
+
+with SessionLocal() as db:
+    crud.seed_items(db)
+
+app = FastAPI()
+logger = logging.getLogger("uvicorn.error")
+
+
+# Every error this API returns has the same shape:
+#   {"error": {"code": "...", "message": "...", "fields": [...]}}
+# so a frontend only needs one piece of code to display any of them.
+def error_response(status_code: int, code: str, message: str, fields=None):
+    body = {"error": {"code": code, "message": message}}
+    if fields:
+        body["error"]["fields"] = fields
+    return JSONResponse(status_code=status_code, content=body)
+
+
+# 1. Our own business errors (ItemNotFound, DuplicateItemName, ...).
+@app.exception_handler(AppError)
+def handle_app_error(request: Request, exc: AppError):
+    return error_response(exc.status_code, exc.code, exc.message)
+
+
+# 2. Pydantic validation failures — replaces FastAPI's default 422 body.
+@app.exception_handler(RequestValidationError)
+def handle_validation_error(request: Request, exc: RequestValidationError):
+    fields = [
+        {"field": ".".join(str(part) for part in err["loc"]), "message": err["msg"]}
+        for err in exc.errors()
+    ]
+    return error_response(
+        422, "validation_error", "Invalid request", fields
+    )
+
+
+# 3. Errors raised by FastAPI/Starlette itself — unknown URL (404),
+#    wrong method (405), or any HTTPException a route still raises.
+@app.exception_handler(StarletteHTTPException)
+def handle_http_error(request: Request, exc: StarletteHTTPException):
+    return error_response(exc.status_code, f"http_{exc.status_code}", str(exc.detail))
+
+
+# 4. Anything unexpected. Log the real error, but never send the stack
+#    trace (or database details) to the client.
+@app.exception_handler(Exception)
+def handle_unexpected_error(request: Request, exc: Exception):
+    logger.error("Unhandled error on %s %s", request.method, request.url.path, exc_info=exc)
+    return error_response(500, "internal_error", "Something went wrong")
+
+
+# The routes have no error handling at all now — crud.py raises, and
+# the handlers above turn it into a response.
+@app.get("/items")
+def list_items(db: Session = Depends(get_db)):
+    return [{"id": r.id, "name": r.name, "price": r.price, "quantity": r.quantity} for r in crud.get_items(db)]
+
+
+@app.get("/items/{item_id}")
+def get_item(item_id: int, db: Session = Depends(get_db)):
+    row = crud.get_item(db, item_id)
+    return {"id": row.id, "name": row.name, "price": row.price, "quantity": row.quantity}
+
+
+@app.post("/items", status_code=status.HTTP_201_CREATED)
+def create_item(item: ItemCreate, db: Session = Depends(get_db)):
+    row = crud.create_item(db, item)
+    return {"id": row.id, "name": row.name, "price": row.price, "quantity": row.quantity}
+
+
+@app.patch("/items/{item_id}")
+def update_item(item_id: int, patch: ItemPatch, db: Session = Depends(get_db)):
+    row = crud.update_item(db, item_id, patch)
+    return {"id": row.id, "name": row.name, "price": row.price, "quantity": row.quantity}
+
+
+@app.delete("/items/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_item(item_id: int, db: Session = Depends(get_db)):
+    crud.delete_item(db, item_id)
+
+
+# A deliberately broken route, to see handler 4 in action.
+@app.get("/boom")
+def boom():
+    return 1 / 0
+```
+
+## Line by line
+
+`database.py`, `models.py`, `schemas.py` ellam 8/b-oda same. Maarradhu
+errors *enga* decide aagudhu-nu: `crud.py` business errors raise
+pannum, `main.py` adha oru idathula HTTP responses-a maathum.
+
+**`exceptions.py`:**
+
+1. **`AppError` — ovoru business error-kum oru base class.** Idhu
+   rendu class attributes-oda oru normal Python `Exception`:
+   `status_code` (HTTP status) mattrum `code` (machine-readable name).
+   Adhoda `__init__` oru human-readable `message`-ah store pannum.
+2. **Ovoru subclass-um details-ah mattum fill pannum.** `ItemNotFound`
+   `status_code = 404`, `code = "item_not_found"` set pannum, adhoda
+   `__init__` oru `item_id` eduthu `"Item 99 not found"` message build
+   pannum. `DuplicateItemName`, `ItemStillInStock`, `EmptyUpdate` same
+   pattern dhan.
+3. **`code` programs-ku, `message` humans-ku.** Frontend
+   `"duplicate_name"`-la `switch` panni name field-ah highlight
+   pannalaam, `message`-ah user-ku apdiye kaattalaam. Messages-ah
+   apparam edha client-aiyum break pannama reword pannalaam; codes
+   stable-a irukkanum.
+
+**`crud.py`:**
+
+4. **`None` return pannama raise pannudhu.** Topic 6-la-um 8/b-la-um,
+   `get_item` `None` return pannuchu, ovoru caller-um adha check
+   pannanum. Ippo `get_item` thaane `ItemNotFound(item_id)` raise
+   pannum — so value thirumba kidaicha caller adhu real row-nu nambalaam.
+5. **`crud.py`-ku innum HTTP pathi edhuvum theriyaadhu.** Adhu
+   `HTTPException` import pannadhu, status code-ah mention-um pannadhu
+   — *enna* thappu aachu ("not found", "duplicate name")-nu mattum
+   business terms-la sollum.
+6. **8/b-oda rules inga move aagidichu:**
+   - `_ensure_name_free` `DuplicateItemName` raise pannum — `create_item`
+     -um, (name real-a maarina mattum) `update_item`-um use pannudhu.
+     Munnadi irukra `_` adhu internal helper-nu mark pannudhu.
+   - `update_item` `model_dump(exclude_unset=True)` vachi `changes`
+     build pannum, same dict comprehension-la **`None` values-aiyum
+     drop pannum**, so `{}`-um `{"price": null}`-um rendum empty-a mudinju
+     oru `EmptyUpdate` (400) raise pannum. 8/b-la avanga rendu thani
+     `400` checks.
+   - `row.quantity > 0`-a irukkumbodhu `delete_item` `ItemStillInStock`
+     raise pannum.
+
+**`main.py` — handlers:**
+
+7. **`error_response(...)` ovoru error body-aiyum build pannum**, so
+   handlers naduvula shape drift aaga mudiyaadhu. Adhula eppovum `code`,
+   `message` irukkum, `fields` irundha mattum add aagum.
+8. **Handler 1 — `@app.exception_handler(AppError)`.** Edhavadhu
+   `AppError` route-la irundhu escape aana, FastAPI crash aagama indha
+   function-ah call pannum. **Base** class-ah register pannina ovoru
+   subclass-um catch aagum, handler raise aana adhula irundhu
+   `exc.status_code`, `exc.code`, `exc.message` read pannum. Apparam
+   pudhu error add panna, `exceptions.py`-la oru pudhu subclass ezhudhunga
+   — `main.py`-la edhuvum maaradhu.
+9. **Handler 2 — `RequestValidationError`.** Pydantic validation fail
+   aana FastAPI raise panradhu idhu dhan. Handler FastAPI-oda default
+   `422` body-ah (`{"detail": [...]}`) namma shape-a replace pannum.
+   `exc.errors()` [8/a](/tanglish/docs/validation/field-validation)-la
+   paartha same list dhan; ovoru `loc`-um, `["body", "price"]` maadhiri,
+   `"body.price"`-a join aagum (`str(part)` yen-na `loc`-la numbers
+   irukkalaam, e.g. list index).
+10. **Handler 3 — Starlette-oda `HTTPException`.** Unknown URLs-ku
+    FastAPI-oda sontha `404`-um, thappana methods-ku `405`-um Starlette
+    raise pannudhu — FastAPI-ku keezha irukra framework. *Starlette*
+    class-ah register pannina (name clash avoid panna
+    `StarletteHTTPException`-a import pannirukku) rendum catch aagum —
+    edha FastAPI `HTTPException`-um kuda, yen-na adhu idhoda subclass.
+    Code `http_404`, `http_405`-nu maarum.
+11. **Handler 4 — `Exception`, catch-all.** Edha bug-um — `/boom`-oda
+    `1 / 0` maadhiri — generic `"Something went wrong"` message-oda
+    `500`-a maarum. Real error full traceback-oda (`exc_info=exc`)
+    server terminal-la log aagum, uvicorn-oda sontha logger
+    (`logging.getLogger("uvicorn.error")`) use pannradhaala uvicorn
+    output pakkathula varum. Client-ku eppovum anuppaadhu: oru stack
+    trace file paths, SQL, library versions-ah attacker-ku leak
+    pannidalaam.
+
+**`main.py` — routes:**
+
+12. **Ovoru route-um ippo "crud-ah call pannu, result-ah shape pannu"
+    mattum dhan.** `if row is None` illa, `raise HTTPException` illa.
+    `crud`-kulla edhavadhu thappa pona, exception route-ah vittu mela
+    travel aagum, matching handler answer pannum.
+13. **`/boom`** — purpose-a broken route, so real bug ezhudhama handler
+    4 work aagradha paakkalaam.
+
+## Try it
+
+```bash
+curl -i http://127.0.0.1:8000/items/99  # 404 item_not_found
+curl -i -X POST http://127.0.0.1:8000/items -H "Content-Type: application/json" -d "{\"name\": \"\", \"price\": -1}"  # 422 validation_error
+curl -i http://127.0.0.1:8000/nope  # 404 http_404
+curl -i http://127.0.0.1:8000/boom  # 500 internal_error
+```
+
+Rendavadhu request return panradhu:
+
+```json
+{
+  "error": {
+    "code": "validation_error",
+    "message": "Invalid request",
+    "fields": [
+      {"field": "body.name", "message": "String should have at least 1 character"},
+      {"field": "body.price", "message": "Input should be greater than 0"}
+    ]
+  }
+}
+```
+
+`/boom` `"Something went wrong"`-nu answer pannum. Real
+`ZeroDivisionError`-um adhoda traceback-um server terminal-ku dhan
+pogum, client-ku eppovum illa.
+
+Adutha step: [response_model](/tanglish/docs/validation/response-model)
+— ORM rows-ah direct-a return panradhu, yentha fields server-ah vittu
+pogudhu-nu exact-a control panradhu.

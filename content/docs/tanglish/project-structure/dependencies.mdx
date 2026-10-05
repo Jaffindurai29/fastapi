@@ -1,0 +1,561 @@
+---
+title: "2. Dependencies"
+description: get_db, get_item_or_404, oru Pagination class, oru X-API-Key guard irukra oru dependencies.py, so routes thangalukku venum-nadha mattum kekkum.
+---
+
+<GithubLink path="example/10/b" />
+
+[APIRouter](/tanglish/docs/project-structure/routers)-oda same folder
+layout, same API, plus oru pudhu `dependencies.py`. Adhula "oru route run
+aaguradhukku munnadi adhukku venum-na" ovoru reusable thing-um irukku:
+
+- `get_db` — database session (`database.py`-la irundhu inga move aachu);
+- `get_item_or_404` — `{item_id}`-la irundhu row-ah load pannum illana
+  `404` answer pannum, so GET, PATCH, DELETE andha code-ah thirumba
+  thirumba ezhudha vendaam;
+- `Pagination` — `?skip=&limit=`-ah padichu validate panra oru class;
+- `require_api_key` — oru guard: `POST`, `PATCH`, `DELETE`-ku ippo oru
+  `X-API-Key` header venum.
+
+| Route | Key? | Description |
+|---|---|---|
+| `GET /items?skip=0&limit=10` | no | Oru page rows. `limit` 1–100 (default 10), `skip` 0 illana adhukku mela; illana `422` |
+| `GET /items/{item_id}` | no | Oru row; illana `404` |
+| `POST /items` | yes | Insert; `201`, valid key illana `401`, name already irundha `409`, `422` |
+| `PATCH /items/{item_id}` | yes | Anuppuna fields-ah mattum maathum; `401`, empty illana `null`-na `400`, `404`, `409` |
+| `DELETE /items/{item_id}` | yes | Remove; `204`, `401`, illana `404` |
+| `GET /health` | no | `SELECT 1` run pannum; `{"status": "ok", "database": "ok"}`, illana `503` |
+
+## Folder
+
+```text
+10/b/
+├── main.py            # creates the app, include_router(...)
+├── database.py        # engine, SessionLocal, Base
+├── dependencies.py    # get_db, get_item_or_404, Pagination, require_api_key
+├── models.py          # ItemModel -> table structured_items
+├── schemas.py         # ItemCreate / ItemPatch / ItemOut
+├── crud.py            # plain database functions, no HTTP
+└── routers/
+    ├── __init__.py
+    ├── items.py       # /items — uses the dependencies above
+    └── health.py      # GET /health
+```
+
+## Code
+
+**`dependencies.py`** — pudhusu. Ovoru reusable dependency-um ore idathula:
+
+```python title="dependencies.py"
+import os
+import secrets
+
+from fastapi import Depends, Header, HTTPException, Query, status
+from sqlalchemy.orm import Session
+
+import crud
+from database import SessionLocal
+from models import ItemModel
+
+
+# 1. The dependency every route has used since topic 6.
+#    Code before `yield` runs before the route; the yielded value is
+#    what the route receives as `db`; `finally` runs after the response
+#    is ready, even if the route raised an exception, so the session is
+#    always closed and its connection goes back to the pool.
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+# 2. A dependency that depends on another dependency.
+#    item_id comes from the path (same name as {item_id}); db comes
+#    from get_db. The route gets back a real row, or never runs at all.
+def get_item_or_404(item_id: int, db: Session = Depends(get_db)) -> ItemModel:
+    row = crud.get_item(db, item_id)
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Item {item_id} not found")
+    return row
+
+
+# 3. A class as a dependency. FastAPI calls Pagination(skip=..., limit=...)
+#    with values read from the query string, and the route receives the
+#    instance. Query(...) validates them like any other parameter.
+class Pagination:
+    def __init__(
+        self,
+        skip: int = Query(default=0, ge=0, description="Rows to skip"),
+        limit: int = Query(default=10, ge=1, le=100, description="Max rows to return"),
+    ):
+        self.skip = skip
+        self.limit = limit
+
+
+# 4. A guard. It returns nothing useful; its only job is to raise 401
+#    before the route runs if the X-API-Key header is missing or wrong.
+#    FastAPI turns the parameter name x_api_key into the header name
+#    X-API-Key (underscores become hyphens, case doesn't matter).
+def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
+    expected = os.getenv("API_KEY", "dev-api-key")
+    # compare_digest takes the same time whether the first or the last
+    # character is wrong, so the key can't be guessed by timing replies.
+    if x_api_key is None or not secrets.compare_digest(x_api_key, expected):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing or invalid API key")
+```
+
+**`routers/items.py`** — ippo romba chinnadhu: routes velaiya thaane
+pannama oru row, oru page, illana oru key check-ah kekkudhu:
+
+```python title="routers/items.py"
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+
+import crud
+from dependencies import Pagination, get_db, get_item_or_404, require_api_key
+from models import ItemModel
+from schemas import ItemCreate, ItemOut, ItemPatch
+
+router = APIRouter(prefix="/items", tags=["items"])
+
+NOT_FOUND = {404: {"description": "Item not found"}}
+
+# Write routes need a valid X-API-Key header. require_api_key returns
+# nothing, so it goes in dependencies=[...] instead of a parameter.
+LOCKED = [Depends(require_api_key)]
+
+
+def ensure_name_free(db: Session, name: str) -> None:
+    if crud.get_item_by_name(db, name) is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"An item named '{name}' already exists",
+        )
+
+
+@router.get("", response_model=list[ItemOut])
+def list_items(page: Pagination = Depends(Pagination), db: Session = Depends(get_db)):
+    return crud.get_items(db, skip=page.skip, limit=page.limit)
+
+
+# No 404 code here any more: if this function runs, `row` exists.
+@router.get("/{item_id}", response_model=ItemOut, responses=NOT_FOUND)
+def get_item(row: ItemModel = Depends(get_item_or_404)):
+    return row
+
+
+@router.post("", response_model=ItemOut, status_code=status.HTTP_201_CREATED, dependencies=LOCKED)
+def create_item(item: ItemCreate, db: Session = Depends(get_db)):
+    ensure_name_free(db, item.name)
+    return crud.create_item(db, item)
+
+
+# Both get_item_or_404 and this route ask for get_db. FastAPI calls
+# get_db ONCE for this request and hands the same session to both.
+@router.patch("/{item_id}", response_model=ItemOut, responses=NOT_FOUND, dependencies=LOCKED)
+def update_item(patch: ItemPatch, row: ItemModel = Depends(get_item_or_404), db: Session = Depends(get_db)):
+    # exclude_unset=True keeps only the fields the client actually sent.
+    changes = patch.model_dump(exclude_unset=True)
+    if not changes:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Send at least one field to update")
+    if None in changes.values():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Fields cannot be set to null")
+    if "name" in changes and changes["name"] != row.name:
+        ensure_name_free(db, changes["name"])
+
+    return crud.update_item(db, row, changes)
+
+
+@router.delete("/{item_id}", status_code=status.HTTP_204_NO_CONTENT, responses=NOT_FOUND, dependencies=LOCKED)
+def delete_item(row: ItemModel = Depends(get_item_or_404), db: Session = Depends(get_db)):
+    crud.delete_item(db, row)
+```
+
+**`routers/health.py`** — 10/a-oda same, `get_db` mattum
+`dependencies`-la irundhu import aagudhu:
+
+```python title="routers/health.py"
+from fastapi import APIRouter, Depends
+from fastapi.responses import JSONResponse
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
+
+from dependencies import get_db
+
+# No prefix: this router's only route lives at /health.
+router = APIRouter(tags=["health"])
+
+
+@router.get("/health")
+def health(db: Session = Depends(get_db)):
+    try:
+        # The cheapest query there is. If it works, the database is up
+        # and the connection settings are right.
+        db.execute(text("SELECT 1"))
+    except SQLAlchemyError:
+        # 503 Service Unavailable — the app is running, but can't do its job.
+        return JSONResponse(status_code=503, content={"status": "error", "database": "unreachable"})
+    return {"status": "ok", "database": "ok"}
+```
+
+**`database.py`** — 10/a-oda same, `get_db` mattum illa:
+
+```python title="database.py"
+import os
+
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
+from sqlalchemy.orm import declarative_base, sessionmaker
+
+load_dotenv()
+
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
+MYSQL_USER = os.getenv("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
+
+# Set DATABASE_URL directly to override everything above (e.g. to point
+# at SQLite for a quick local test with no MySQL server at all).
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
+)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+# get_db() moved to dependencies.py, next to the other dependencies.
+```
+
+**`main.py`** — 10/a-la irundhu maaradhu:
+
+```python title="main.py"
+from fastapi import FastAPI
+
+import crud
+from database import Base, SessionLocal, engine
+from routers import health, items
+
+Base.metadata.create_all(bind=engine)
+
+with SessionLocal() as db:
+    crud.seed_items(db)
+
+app = FastAPI()
+
+# main.py no longer holds any routes. It builds the app and plugs in
+# each router. Every route in items.router gets the "/items" prefix and
+# the "items" tag that router was created with.
+app.include_router(items.router)
+app.include_router(health.router)
+```
+
+**`models.py`** — maaradhu:
+
+```python title="models.py"
+from sqlalchemy import Column, Float, Integer, String
+
+from database import Base
+
+
+class ItemModel(Base):
+    __tablename__ = "structured_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(50), nullable=False, unique=True)
+    price = Column(Float, nullable=False)
+    quantity = Column(Integer, nullable=False, default=0)
+```
+
+**`schemas.py`** — maaradhu:
+
+```python title="schemas.py"
+from typing import Optional
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+class ItemCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=50)
+    price: float = Field(gt=0, le=1_000_000)
+    quantity: int = Field(default=0, ge=0)
+
+    @field_validator("name")
+    @classmethod
+    def name_not_blank(cls, value: str) -> str:
+        value = value.strip()
+        if value == "":
+            raise ValueError("name must not be blank")
+        return value
+
+
+# Same rules as ItemCreate, but every field is optional — PATCH only
+# sends what changed.
+class ItemPatch(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=50)
+    price: Optional[float] = Field(default=None, gt=0, le=1_000_000)
+    quantity: Optional[int] = Field(default=None, ge=0)
+
+    @field_validator("name")
+    @classmethod
+    def name_not_blank(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        value = value.strip()
+        if value == "":
+            raise ValueError("name must not be blank")
+        return value
+
+
+# What goes back out. from_attributes lets response_model read a
+# SQLAlchemy row directly (row.name), as in 8/d.
+class ItemOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    price: float
+    quantity: int
+```
+
+**`crud.py`** — maaradhu (`get_items` already `skip`-um `limit`-um
+eduthuchu):
+
+```python title="crud.py"
+from sqlalchemy.orm import Session
+
+from models import ItemModel
+from schemas import ItemCreate
+
+
+def get_items(db: Session, skip: int = 0, limit: int | None = None) -> list[ItemModel]:
+    query = db.query(ItemModel).order_by(ItemModel.id).offset(skip)
+    if limit is not None:
+        query = query.limit(limit)
+    return query.all()
+
+
+def get_item(db: Session, item_id: int) -> ItemModel | None:
+    return db.get(ItemModel, item_id)
+
+
+def get_item_by_name(db: Session, name: str) -> ItemModel | None:
+    return db.query(ItemModel).filter(ItemModel.name == name).first()
+
+
+def create_item(db: Session, item: ItemCreate) -> ItemModel:
+    row = ItemModel(**item.model_dump())
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def update_item(db: Session, row: ItemModel, changes: dict) -> ItemModel:
+    for field, value in changes.items():
+        setattr(row, field, value)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def delete_item(db: Session, row: ItemModel) -> None:
+    db.delete(row)
+    db.commit()
+
+
+def seed_items(db: Session) -> None:
+    if db.query(ItemModel).count() == 0:
+        db.add_all(
+            [
+                ItemModel(name="Laptop", price=999.99, quantity=5),
+                ItemModel(name="Mouse", price=19.99, quantity=50),
+                ItemModel(name="Keyboard", price=49.5, quantity=20),
+            ]
+        )
+        db.commit()
+```
+
+**`.env.example`** — keezha oru pudhu optional variable:
+
+```bash title=".env.example"
+# Copy this file to .env and adjust the values for your local MySQL
+# server. All of these already have working defaults baked into the
+# code, so creating a .env is optional — the app runs with zero setup
+# if you skip this file entirely.
+
+MYSQL_HOST=127.0.0.1
+MYSQL_PORT=3306
+MYSQL_USER=root
+MYSQL_PASSWORD=
+MYSQL_DB=fastapi_learn
+
+# Set this to override everything above at once — e.g. point at SQLite
+# for a quick local try with no MySQL server running at all.
+# DATABASE_URL=sqlite:///./test.db
+
+# The key clients must send in the X-API-Key header for POST, PATCH and
+# DELETE. Defaults to "dev-api-key" if unset. Change it for anything
+# that isn't your own laptop.
+API_KEY=dev-api-key
+```
+
+## Line by line
+
+`models.py`, `schemas.py`, `crud.py`, `main.py`, router layout ellam
+[APIRouter](/tanglish/docs/project-structure/routers)-la irundhu maaradhu.
+Pudhusu `dependencies.py`, mattrum adhunaala `routers/items.py` evvalavu
+chinnadha aagudhu angradhu.
+
+**Dependency-na enna.** `Depends(...)`-ku neenga kudukkura edha function-um
+(illana class-um) oru dependency. Oru route run aaguradhukku munnadi,
+FastAPI adhoda ovoru dependency-aiyum call pannum, *avanga* parameters-ah
+request-la irundhu (path, query, headers, body, illana vera
+dependencies) oru route-oda parameters-ah fill panra maadhiriye fill
+pannum. Dependency enna return pannudho adhu route-oda argument aagum.
+Adhu `HTTPException` raise pannina, route run-e aagadhu.
+
+**`get_db` — topic 6-la irundhu use panradhu, ippo explain aagudhu:**
+
+1. **Adhu `database.py`-la irundhu `dependencies.py`-ku move aachu**,
+   mattha dependencies pakkathula. `database.py` ippo engine-um session
+   factory-um mattum dhan build pannudhu.
+2. **`return`-ku pathila `yield` use pannudhu, so rendu paadhi-a run
+   aagudhu.** Route-ku munnadi: oru session open panni, adha `yield`
+   pannum; yield aana value dhan route-ku `db`-a kidaikkum. Response
+   ready aana appuram: `yield`-ku appuram execution continue aagum,
+   `finally` session-ah close pannum.
+3. **Route raise pannaalum `finally` run aagum.** So oru `404` (illana
+   oru crash) eppovum database connection-ah leak pannadhu. Idhu illana,
+   ovoru route-kum thannoda `try`/`finally` venum.
+
+**`get_item_or_404` — innoru dependency-ah depend panra oru dependency:**
+
+4. **`item_id: int` route path-la irukra `{item_id}`-oda match aagudhu**,
+   so FastAPI adha URL-la irundhu padichu `int`-a validate pannum
+   (`/items/abc` `422`), route-laye irundha eppadi pannumo appadiye.
+5. **`db: Session = Depends(get_db)`** — oru dependency-ku thannoda
+   dependencies irukkalaam. FastAPI chain-ah unga-ku nadandhu
+   paakkum: `route → get_item_or_404 → get_db`.
+6. **Route oru row-ah mattum kekkudhu.**
+   `get_item(row: ItemModel = Depends(get_item_or_404))`-la `404` code
+   edhuvume illa: function body run aana, `row` irukku-nu artham. 10/a-la
+   ovoru route-um helper-ah kai-la call pannuchu; ippo adha marakka
+   mudiyaadhu.
+7. **Indha routes-la ippo `item_id` parameter-e illa**, aana adhu innum
+   URL-la irukku, innum `/docs`-la document aagudhu, yen-na dependency
+   adha declare pannudhu.
+
+**Rendu dharam kettaalum ovoru request-kum oru `get_db` call dhan:**
+
+8. **`PATCH`-um `DELETE`-um `get_db`-ah nera-vum kekkudhu,
+   `get_item_or_404` vazhiya-vum kekkudhu.** FastAPI ovoru dependency-oda
+   result-aiyum oru request mudiyura varaikkum cache pannum: `get_db` oru
+   dharam dhan run aagum, rendu idathukkum **same** session kidaikkum.
+9. **Adhu yen mukkiyam.** Row andha session-la dhan load aachu, so adhe
+   session-la dhan adha maathi, delete panni, commit panna mudiyum.
+   Rendu vera vera sessions-na rendu connections, row thappana
+   session-ku "sondham" aagidum. (Ovoru dharamum run aaganum-na andha
+   rare dependency `Depends(fn, use_cache=False)` vachi opt out
+   pannalaam.)
+
+**`Pagination` — oru class-ah dependency-a:**
+
+10. **FastAPI-ku callable-a edhavadhu irundha podhum, class-um
+    callable dhan.** `Pagination(skip=..., limit=...)` oru instance-ah
+    build pannum. FastAPI `__init__`-oda parameters-ah query parameters-a
+    padichu, ready aana instance-ah route-ku `page`-a pass pannum.
+11. **`Query(default=10, ge=1, le=100, ...)`** — vera edha parameter
+    maadhiriye avangala validate pannum: `?limit=500` illana `?skip=-1`
+    `422`. Yaarum oru request-la oru million rows kekka koodadhu-nu
+    `limit`-ku oru maximum irukku.
+12. **Reusable.** Vera edha list route-um
+    `page: Pagination = Depends(Pagination)` eduthu same names, defaults,
+    limits, docs vaangikkalaam. (Empty brackets-oda `Depends()` type
+    annotation-ah vachi adhe velaiya pannum; explicit form padikka
+    easy.)
+13. **`crud.get_items(db, skip=page.skip, limit=page.limit)`** — route
+    rendu numbers-ah forward mattum pannudhu; `crud.py` avangala
+    `OFFSET` mattrum `LIMIT`-a maathum.
+
+**`require_api_key` — edhuvum return pannadha oru guard:**
+
+14. **`x_api_key: str | None = Header(default=None)`** — `Header()` oru
+    request header-ah padikkum. FastAPI `x_api_key` parameter name-ah
+    `x-api-key`-a maathum (underscores hyphens aagum; header names
+    case-insensitive, so `X-API-Key` match aagum).
+15. **Default `None` purpose-a dhan.** Required `Header(...)`-na, header
+    illadha request FastAPI-oda generic `422` aagidum, client-ku "unga-ku
+    permission illa"-ku pathila oru validation error theriyum. Optional-a
+    vachadhaala "illa", "thappu" rendukkum *namma* code
+    `401 Unauthorized` answer panna mudiyudhu.
+16. **`os.getenv("API_KEY", "dev-api-key")`** — expected key environment-la
+    irundhu varudhu, ovoru request-kum padikkapadudhu, zero setup-la
+    kooda app run aaga oru default-oda.
+    [Settings](/tanglish/docs/project-structure/settings) idha oru typed
+    `Settings` class-ku move pannum.
+17. **`secrets.compare_digest(x_api_key, expected)`** — first character
+    thappa irundhaalum kadaisi character thappa irundhaalum rendu
+    strings-ah same time-la compare pannum, so replies-ah time panni
+    oru attacker key-ah oru character oru character-a guess panna
+    mudiyaadhu. Plain `==` first difference-laye nikkidum.
+18. Idhu dhan simplest auth: oru shared secret. Real per-user login
+    (passwords, tokens) indha pattern mela dhan build aagudhu.
+
+**Guard-ah write routes-ku mattum apply panradhu:**
+
+19. **`LOCKED = [Depends(require_api_key)]`** — `routers/items.py`-oda
+    top-la oru dharam define aagi, `POST`, `PATCH`, `DELETE` decorators-la
+    `dependencies=LOCKED`-a pass aagudhu.
+20. **`dependencies=[...]` dependency-ah run pannum, aana adhoda return
+    value-ah thookki podum** — guard-ku adhu dhan correct: route-ku
+    adhula irundhu edhuvum venaam, adhu illama run aaga koodadhu
+    avvalavu dhan. Decorator dependencies route-oda parameters-oda
+    dependencies-ku **munnadiye** run aagum, so illadha oru item-ku kooda
+    key illana `401` dhan.
+21. **Yen per-route, rendavadhu router illa?** Innoru option oru
+    `admin_router = APIRouter(prefix="/items", dependencies=[Depends(require_api_key)])`,
+    adhula POST/PATCH/DELETE. Oru *full group*-um lock aagi irundha
+    (`/admin`-ku keezha ellam-nu vachukkonga) adhu dhan better tool.
+    Inga adhu oru resource-ah same prefix-oda rendu routers-a split
+    pannidum, oru route protected-a illaya-nu theriya adhu yentha
+    router-la irukku-nu check pannanum. `dependencies=LOCKED`-na lock
+    route-ah define panra line-laye theriyum. Adhe `dependencies=`
+    argument `APIRouter(...)`-layum (router-la irukra ovoru route-um)
+    `FastAPI(...)`-layum (app-la irukra ovoru route-um) work aagum.
+
+## Try it
+
+```bash
+curl "http://127.0.0.1:8000/items?skip=1&limit=1"
+curl http://127.0.0.1:8000/items/1
+curl -i -X POST http://127.0.0.1:8000/items -H "Content-Type: application/json" -d "{\"name\": \"Desk\", \"price\": 120}"
+curl -X POST http://127.0.0.1:8000/items -H "X-API-Key: dev-api-key" -H "Content-Type: application/json" -d "{\"name\": \"Desk\", \"price\": 120, \"quantity\": 2}"
+curl -X PATCH http://127.0.0.1:8000/items/1 -H "X-API-Key: dev-api-key" -H "Content-Type: application/json" -d "{\"price\": 899}"
+curl -X DELETE http://127.0.0.1:8000/items/2 -H "X-API-Key: dev-api-key"
+curl -i "http://127.0.0.1:8000/items?limit=500"  # 422
+```
+
+First `POST` (key illama) `401 {"detail": "Missing or invalid API key"}`-a
+thirumbi varum; rendavadhu work aagum. `?`-um `&`-um irukra edha URL-aiyum
+quote pannunga, illana unga shell adha `&`-la cut pannidum.
+
+[/docs](http://127.0.0.1:8000/docs)-la moonu write routes-um oru
+`x-api-key` header field kaattum; read routes kaattadhu. `GET /items`
+`skip`-um `limit`-um avangaloda limits-oda kaattum, `Pagination`-la
+irundhu nera padichadhu.
+
+**Postman:** Method `POST`, URL `http://127.0.0.1:8000/items`, Headers
+tab → key `X-API-Key`, value `dev-api-key`, Body → raw → JSON:
+
+```json
+{"name": "Desk", "price": 120, "quantity": 2}
+```
+
+Adutha step: [Settings](/tanglish/docs/project-structure/settings) —
+ovoru setting-um oru typed `Settings` class-la.

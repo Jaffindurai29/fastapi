@@ -1,0 +1,494 @@
+---
+title: "1. One-to-many"
+description: A category has many items — a ForeignKey column, a relationship() on each side, and the 404/409 checks that go with them.
+---
+
+<GithubLink path="example/11/a" />
+
+Two tables that point at each other. A **category** has many **items**;
+every item belongs to exactly one category through a `category_id`
+foreign key. Creating an item in a category that doesn't exist is a
+`404`, and deleting a category that still has items is a `409`.
+Tables: `rel_categories` and `rel_items` (shared with 11/b and 11/c),
+seeded with 2 categories and 4 items.
+
+| Route | Status | Description |
+|---|---|---|
+| `GET /categories` | `200` | Every category |
+| `POST /categories` | `201`, `409` | New category; `409` if the name is taken |
+| `GET /categories/{category_id}` | `200`, `404` | One category |
+| `GET /categories/{category_id}/items` | `200`, `404` | The items in that category (`[]` if it's empty) |
+| `DELETE /categories/{category_id}` | `204`, `404`, `409` | `409` while it still has items |
+| `GET /items` | `200` | Every item, each with its `category_id` |
+| `GET /items/{item_id}` | `200`, `404` | One item |
+| `POST /items` | `201`, `404`, `422` | New item; `404` if `category_id` doesn't exist |
+
+## The folder
+
+```text
+example/11/a/
+├── .env.example
+├── __init__.py
+├── crud.py
+├── database.py
+├── main.py
+├── models.py
+├── README.md
+├── schemas.py
+├── STEPS.md
+└── routers/
+    ├── __init__.py
+    ├── categories.py
+    └── items.py
+```
+
+`__init__.py` and `routers/__init__.py` are empty files — they only
+mark the folders as packages so `from routers import categories, items`
+works.
+
+## The code
+
+**`database.py`** — env vars, `engine`/`SessionLocal`/`Base`, and the
+`get_db()` dependency (unchanged since MySQL + CRUD):
+
+```python title="database.py"
+import os
+
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+load_dotenv()
+
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
+MYSQL_USER = os.getenv("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
+
+# Set DATABASE_URL directly to override everything above (e.g. to point
+# at SQLite for a quick local test with no MySQL server at all).
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
+)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+```
+
+**`models.py`** — two tables, linked:
+
+```python title="models.py"
+from sqlalchemy import Column, Float, ForeignKey, Integer, String
+from sqlalchemy.orm import relationship
+
+from database import Base
+
+
+# The "one" side: one category has many items.
+class CategoryModel(Base):
+    __tablename__ = "rel_categories"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(50), nullable=False, unique=True)
+
+    # Not a column. A Python-side shortcut: category.items runs
+    # "SELECT * FROM rel_items WHERE category_id = <this id>" for you.
+    items = relationship("ItemModel", back_populates="category")
+
+
+# The "many" side: every item belongs to exactly one category.
+class ItemModel(Base):
+    __tablename__ = "rel_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(50), nullable=False)
+    price = Column(Float, nullable=False)
+    # The real column. ForeignKey tells the database "this must match an
+    # id in rel_categories". nullable=False: no item without a category.
+    category_id = Column(Integer, ForeignKey("rel_categories.id"), nullable=False)
+
+    # The other end of CategoryModel.items. back_populates links the two,
+    # so setting item.category also appends the item to category.items.
+    category = relationship("CategoryModel", back_populates="items")
+```
+
+**`schemas.py`** — request bodies and flat responses:
+
+```python title="schemas.py"
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class CategoryCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=50)
+
+
+class CategoryOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+
+
+class ItemCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=50)
+    price: float = Field(gt=0)
+    category_id: int
+
+
+# Flat: the item points at its category by id. 11/b nests the whole
+# category object in here instead.
+class ItemOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    price: float
+    category_id: int
+```
+
+**`crud.py`** — plain functions that talk to the database, no HTTP:
+
+```python title="crud.py"
+from sqlalchemy.orm import Session
+
+from models import CategoryModel, ItemModel
+from schemas import CategoryCreate, ItemCreate
+
+
+# --- categories ---------------------------------------------------------
+
+def get_categories(db: Session) -> list[CategoryModel]:
+    return db.query(CategoryModel).order_by(CategoryModel.id).all()
+
+
+def get_category(db: Session, category_id: int) -> CategoryModel | None:
+    return db.get(CategoryModel, category_id)
+
+
+def get_category_by_name(db: Session, name: str) -> CategoryModel | None:
+    return db.query(CategoryModel).filter(CategoryModel.name == name).first()
+
+
+def create_category(db: Session, category: CategoryCreate) -> CategoryModel:
+    row = CategoryModel(**category.model_dump())
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def count_items_in_category(db: Session, category_id: int) -> int:
+    return db.query(ItemModel).filter(ItemModel.category_id == category_id).count()
+
+
+def delete_category(db: Session, row: CategoryModel) -> None:
+    db.delete(row)
+    db.commit()
+
+
+# --- items --------------------------------------------------------------
+
+def get_items(db: Session) -> list[ItemModel]:
+    return db.query(ItemModel).order_by(ItemModel.id).all()
+
+
+def get_items_in_category(db: Session, category_id: int) -> list[ItemModel]:
+    return (
+        db.query(ItemModel)
+        .filter(ItemModel.category_id == category_id)
+        .order_by(ItemModel.id)
+        .all()
+    )
+
+
+def get_item(db: Session, item_id: int) -> ItemModel | None:
+    return db.get(ItemModel, item_id)
+
+
+def create_item(db: Session, item: ItemCreate) -> ItemModel:
+    row = ItemModel(**item.model_dump())
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+# --- seed ---------------------------------------------------------------
+
+def seed(db: Session) -> None:
+    if db.query(CategoryModel).count() == 0:
+        electronics = CategoryModel(name="Electronics")
+        books = CategoryModel(name="Books")
+        # Setting the relationship (category=...) instead of category_id:
+        # SQLAlchemy inserts the category first, then fills in the id.
+        db.add_all(
+            [
+                ItemModel(name="Laptop", price=999.99, category=electronics),
+                ItemModel(name="Mouse", price=19.99, category=electronics),
+                ItemModel(name="FastAPI Guide", price=39.0, category=books),
+                ItemModel(name="SQL Basics", price=25.5, category=books),
+            ]
+        )
+        db.commit()
+```
+
+**`routers/categories.py`** — every `/categories` route:
+
+```python title="routers/categories.py"
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+
+import crud
+from database import get_db
+from schemas import CategoryCreate, CategoryOut, ItemOut
+
+# Every route below lives under /categories (APIRouter is topic 10).
+router = APIRouter(prefix="/categories", tags=["categories"])
+
+
+@router.get("", response_model=list[CategoryOut])
+def list_categories(db: Session = Depends(get_db)):
+    return crud.get_categories(db)
+
+
+@router.post("", response_model=CategoryOut, status_code=status.HTTP_201_CREATED)
+def create_category(category: CategoryCreate, db: Session = Depends(get_db)):
+    if crud.get_category_by_name(db, category.name) is not None:
+        raise HTTPException(status_code=409, detail="Category name already exists")
+    return crud.create_category(db, category)
+
+
+@router.get("/{category_id}", response_model=CategoryOut)
+def get_category(category_id: int, db: Session = Depends(get_db)):
+    row = crud.get_category(db, category_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Category not found")
+    return row
+
+
+@router.get("/{category_id}/items", response_model=list[ItemOut])
+def list_category_items(category_id: int, db: Session = Depends(get_db)):
+    # 404 for a missing category, so the client can tell "no such
+    # category" apart from "category exists but is empty" ([]).
+    if crud.get_category(db, category_id) is None:
+        raise HTTPException(status_code=404, detail="Category not found")
+    return crud.get_items_in_category(db, category_id)
+
+
+@router.delete("/{category_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_category(category_id: int, db: Session = Depends(get_db)):
+    row = crud.get_category(db, category_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Category not found")
+    # Deleting it would leave items pointing at a category that no
+    # longer exists. Refuse instead of orphaning them.
+    count = crud.count_items_in_category(db, category_id)
+    if count > 0:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Category still has {count} item(s); move or delete them first",
+        )
+    crud.delete_category(db, row)
+```
+
+**`routers/items.py`** — every `/items` route:
+
+```python title="routers/items.py"
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+
+import crud
+from database import get_db
+from schemas import ItemCreate, ItemOut
+
+router = APIRouter(prefix="/items", tags=["items"])
+
+
+@router.get("", response_model=list[ItemOut])
+def list_items(db: Session = Depends(get_db)):
+    return crud.get_items(db)
+
+
+@router.get("/{item_id}", response_model=ItemOut)
+def get_item(item_id: int, db: Session = Depends(get_db)):
+    row = crud.get_item(db, item_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Item not found")
+    return row
+
+
+@router.post("", response_model=ItemOut, status_code=status.HTTP_201_CREATED)
+def create_item(item: ItemCreate, db: Session = Depends(get_db)):
+    # Check the foreign key ourselves. MySQL (InnoDB) would reject a bad
+    # category_id anyway, but only as an IntegrityError, i.e. a 500.
+    # SQLite doesn't enforce foreign keys by default and would happily
+    # store it. Checking in code gives a clear 404 on both.
+    if crud.get_category(db, item.category_id) is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Category {item.category_id} not found",
+        )
+    return crud.create_item(db, item)
+```
+
+**`main.py`** — creates the tables, seeds them, plugs in the routers:
+
+```python title="main.py"
+from fastapi import FastAPI
+
+import crud
+from database import Base, SessionLocal, engine
+from routers import categories, items
+
+# Creates BOTH tables, parent first: create_all reads the ForeignKey to
+# work out that rel_categories must exist before rel_items.
+Base.metadata.create_all(bind=engine)
+
+with SessionLocal() as db:
+    crud.seed(db)
+
+app = FastAPI()
+
+# One router module per resource; main.py just plugs them in.
+app.include_router(categories.router)
+app.include_router(items.router)
+```
+
+## Line by line
+
+`database.py` is the shared piece explained on the
+[MySQL + CRUD index](/en/docs/mysql-crud). What's new is two tables that
+are linked.
+
+**`models.py` — the foreign key:**
+
+1. **`category_id = Column(Integer, ForeignKey("rel_categories.id"), nullable=False)`**
+   — the link is a **real column on the "many" side**. Each item row
+   stores the `id` of its category. `ForeignKey(...)` tells the database
+   "this value must match an `id` in `rel_categories`". `nullable=False`
+   means an item can't exist without a category.
+
+   Why does the link live on the item and not on the category? A
+   category row can't hold a *list* of item ids in one column, but each
+   item can hold exactly *one* category id. In a one-to-many link, the
+   foreign key always goes on the "many" side.
+
+**`models.py` — `relationship()` and `back_populates`:**
+
+2. **`items = relationship("ItemModel", back_populates="category")`**
+   on `CategoryModel`, and
+   **`category = relationship("CategoryModel", back_populates="items")`**
+   on `ItemModel`. These are **not** columns — nothing is added to
+   either table. They are Python-side shortcuts:
+   - `category.items` gives you a list of `ItemModel` rows. SQLAlchemy
+     runs `SELECT ... FROM rel_items WHERE category_id = ?` the first
+     time you touch it.
+   - `item.category` gives you the `CategoryModel` row the item points
+     at.
+   - `back_populates` names the attribute on the **other** class, so the
+     two ends stay in sync in memory: set `item.category = books` and
+     `item` also appears in `books.items`, before anything is even
+     saved. Without it you'd have two unrelated relationships that
+     could disagree with each other.
+   - The class names are strings (`"ItemModel"`) because `ItemModel`
+     isn't defined yet when `CategoryModel` is being written;
+     SQLAlchemy resolves the name later.
+
+**`crud.py` — the seed uses the relationship, not ids:**
+
+3. **`ItemModel(name="Laptop", price=999.99, category=electronics)`** —
+   `electronics` is a brand-new `CategoryModel` that isn't in the
+   database yet, so it has no `id`. By passing `category=electronics`
+   instead of `category_id=...`, you let SQLAlchemy work out the order:
+   insert the categories first, read back their new ids, then insert the
+   items with the right `category_id`. You never touch an id by hand.
+4. **`count_items_in_category(...)`** —
+   `db.query(ItemModel).filter(ItemModel.category_id == category_id).count()`
+   becomes `SELECT count(*) ... WHERE category_id = ?`. The database
+   counts; no rows are loaded into Python just to call `len()` on them.
+
+**`main.py`:**
+
+5. **`Base.metadata.create_all(bind=engine)`** creates **both** tables,
+   parent first — it reads the `ForeignKey` to work out that
+   `rel_categories` must exist before `rel_items`. Then `main.py` only
+   plugs in the two routers.
+
+**`routers/items.py` — check the foreign key yourself:**
+
+6. **`if crud.get_category(db, item.category_id) is None: raise HTTPException(404, ...)`**
+   — why not let the database catch a bad `category_id`? Because what
+   happens depends on the database:
+   - **MySQL (InnoDB)** enforces foreign keys. The `INSERT` fails with
+     an `IntegrityError`, which nobody catches, so the client gets a
+     `500`.
+   - **SQLite** does **not** enforce foreign keys unless you turn them
+     on (`PRAGMA foreign_keys = ON`) for every connection. It would
+     happily store `category_id = 999`, pointing at nothing.
+
+   One lookup first gives a clear `404` on both. The database constraint
+   stays as the safety net. It's `404` (not `400` or `422`) because the
+   body is well-formed — it just refers to something that doesn't exist,
+   the same way `GET /categories/999` would.
+
+**`routers/categories.py`:**
+
+7. **`404` vs an empty list** in `list_category_items` — without the
+   first check, `/categories/999/items` would happily return `[]`, and
+   the client couldn't tell "no such category" from "a category with no
+   items yet". Same idea as `GET /items/{item_id}` in earlier topics.
+8. **Refuse to orphan children** in `delete_category` — deleting
+   "Electronics" while the Laptop still points at it would leave
+   `category_id = 1` aimed at nothing (on SQLite) or crash with an
+   `IntegrityError` (on MySQL). So the route counts first and answers
+   `409 Conflict`: "the request is fine, but the current state of the
+   data doesn't allow it" — the same code
+   [Status codes](/en/docs/validation/status-codes) used for a duplicate
+   name. The other common choices:
+   - **cascade** — delete the items too:
+     `relationship(..., cascade="all, delete-orphan")`;
+   - **`SET NULL`** — only possible if `category_id` is nullable.
+
+   Refusing is the safest default: nothing disappears by surprise.
+9. **`router = APIRouter(prefix="/categories", tags=["categories"])`**
+   and `@router.get("")` — the empty path plus the prefix gives exactly
+   `/categories` (no trailing slash).
+
+**`schemas.py` — flat responses:**
+
+10. **`ItemOut` has `category_id: int`** — the item points at its
+    category by id. If the client wants the category's *name*, it has to
+    make a second call. [Nested responses](/en/docs/relationships/nested-responses)
+    nests the category inside the item instead, and that turns out to
+    need some care.
+11. **`model_config = ConfigDict(from_attributes=True)`** — lets
+    `response_model` read the fields straight off a SQLAlchemy row
+    (`row.id`, `row.name`, ...) instead of needing a dict.
+
+## Try it
+
+```bash
+curl http://127.0.0.1:8000/categories/1/items
+curl -X POST http://127.0.0.1:8000/items -H "Content-Type: application/json" -d "{\"name\": \"Keyboard\", \"price\": 49, \"category_id\": 1}"
+curl -i -X POST http://127.0.0.1:8000/items -H "Content-Type: application/json" -d "{\"name\": \"Ghost\", \"price\": 5, \"category_id\": 999}"  # 404
+curl -i -X DELETE http://127.0.0.1:8000/categories/1  # 409
+```
+
+The third request answers `404 {"detail": "Category 999 not found"}`.
+The last one answers
+`409 {"detail": "Category still has 3 item(s); move or delete them first"}`
+(2 seeded items plus the Keyboard).
+
+Next: [Nested responses](/en/docs/relationships/nested-responses) —
+putting the category inside the item, without an N+1 query flood.

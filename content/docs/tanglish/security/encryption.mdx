@@ -1,0 +1,517 @@
+---
+title: "7. Encrypt & decrypt fields"
+description: Sensitive columns-ah Fernet vachi encrypt panni store pannurathu, thirumba anuppumbodhu decrypt pannurathu.
+---
+
+<GithubLink path="example/12/g" />
+
+Sila columns plain text-a store panna romba sensitive, aana password
+mathiri illama, adha **thirumba padikkanum**: support staff andha phone
+number-ku call pannanume. Inga oru customer-oda `phone` mattrum `notes`
+save aagradhukku munnadi Fernet vachi encrypt aagudhu, return
+pannumbodhu decrypt aagudhu. Indha lesson-la login illa, so focus
+muzhusum request-kum database-kum naduvula oru value-ku enna nadakkudhu
+nu dhan. Learning-only `/raw` route database-la real-a enna store
+aagirukku nu kaattum.
+
+## Hashing vs encryption vs encoding
+
+Moonume text-ah padikka mudiyaadha text-a maathura maari theriyum, aana
+reason romba vera vera:
+
+| | Reversible-a? | Key venuma? | Edhukku use pannalam | Example |
+|---|---|---|---|---|
+| **Hashing** | Illa (one-way) | Venaam | Value-ah store pannama check pannradhukku: passwords | [Password hashing](/tanglish/docs/security/password-hashing)-la pwdlib / Argon2 |
+| **Encryption** | Aamaa (two-way) | Aamaa, secret | Thirumba padikka vendiya value: phone, address, API tokens | Fernet, indha page |
+| **Encoding** | Aamaa, yaar venaalum | Venaam | Bytes-ah transport-ku safe-a maathurathu. **Security illa** | Base64, URL encoding, [JWT login](/tanglish/docs/security/jwt-login)-la JWT payload |
+
+Password hash aagudhu, yen-na server-ku adhu thirumba theva illa,
+compare panna mattum podhum. Phone number encrypt aagudhu, yen-na
+yaaravadhu adhukku call pannanum. Base64 edhaiyum maraikkaadhu: yaar
+venaalum decode pannalam.
+
+## Code
+
+`database.py` [MySQL + CRUD](/tanglish/docs/mysql-crud)-la irukra adhe
+dhan. Pudhusa `config.py` (key) mattrum `encryption.py` (rendu
+helpers). Table: `sec_customers`, rendu customers-oda seed aagirukku.
+
+**`.env.example`** — kadaisila optional `FERNET_KEY` setting:
+
+```bash title=".env.example"
+# Copy this file to .env and adjust the values for your local MySQL
+# server. All of these already have working defaults baked into the
+# code, so creating a .env is optional — the app runs with zero setup
+# if you skip this file entirely.
+
+MYSQL_HOST=127.0.0.1
+MYSQL_PORT=3306
+MYSQL_USER=root
+MYSQL_PASSWORD=
+MYSQL_DB=fastapi_learn
+
+# Set this to override everything above at once — e.g. point at SQLite
+# for a quick local try with no MySQL server running at all.
+# DATABASE_URL=sqlite:///./test.db
+
+# The key that encrypts and decrypts phone/notes. Generate your own:
+#   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+# Keep it secret and OUT OF GIT. Lose it and every encrypted value is
+# gone for good. Change it and existing rows can no longer be decrypted.
+# Leave it unset to use the dev-only key hardcoded in config.py.
+# FERNET_KEY=
+```
+
+**`config.py`** — Fernet key, satham pottu solra dev-only fallback-oda:
+
+```python title="config.py"
+import os
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# !!! DEV ONLY !!! This key is public (it's in git), so anything it
+# encrypts is readable by anyone who has this repo. It exists only so the
+# lesson runs with zero setup. Real apps: set FERNET_KEY in .env (or a
+# secrets manager) and never commit it.
+DEV_FERNET_KEY = "BxL7roHgsuzl6NLf-j9jBB6LfGEdkbzrjzR1-0j24cA="
+
+FERNET_KEY = os.getenv("FERNET_KEY", DEV_FERNET_KEY)
+```
+
+**`database.py`** — env vars, `engine`/`SessionLocal`/`Base`, mattrum `get_db()`:
+
+```python title="database.py"
+import os
+
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+load_dotenv()
+
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
+MYSQL_USER = os.getenv("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
+
+# Set DATABASE_URL directly to override everything above (e.g. to point
+# at SQLite for a quick local test with no MySQL server at all).
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
+)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+```
+
+**`encryption.py`** — oru `Fernet` object, `encrypt()` mattrum `decrypt()`:
+
+```python title="encryption.py"
+from cryptography.fernet import Fernet
+
+from config import FERNET_KEY
+
+# One Fernet object for the whole app. Fernet = AES encryption plus a
+# signature, so a tampered or wrong-key value fails loudly instead of
+# decrypting to garbage.
+fernet = Fernet(FERNET_KEY)
+
+
+def encrypt(plaintext: str) -> str:
+    # Fernet works on bytes: str -> bytes -> encrypted bytes -> str for the
+    # Text column. The result is URL-safe base64, so it stores fine.
+    return fernet.encrypt(plaintext.encode()).decode()
+
+
+def decrypt(ciphertext: str) -> str:
+    # Raises cryptography.fernet.InvalidToken if the key is wrong or the
+    # value was tampered with. main.py turns that into a 500.
+    return fernet.decrypt(ciphertext.encode()).decode()
+```
+
+**`models.py`** — search panra columns plain-a, ciphertext-ku `Text` columns:
+
+```python title="models.py"
+from sqlalchemy import Column, Integer, String, Text
+
+from database import Base
+
+
+class CustomerModel(Base):
+    __tablename__ = "sec_customers"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    # Stored as plain text: we need to search and sort by these.
+    name = Column(String(100), nullable=False)
+    email = Column(String(255), nullable=False)
+    # Stored encrypted. Text, because ciphertext is much longer than the
+    # original (a 13-character phone becomes ~100 characters).
+    phone_encrypted = Column(Text, nullable=False)
+    notes_encrypted = Column(Text, nullable=True)
+```
+
+**`schemas.py`** — ulla plain values, veliya decrypted values, plus oru raw view:
+
+```python title="schemas.py"
+from pydantic import BaseModel, ConfigDict, Field
+
+
+# What the client sends: plain values.
+class CustomerCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    email: str = Field(min_length=3, max_length=255)
+    phone: str = Field(min_length=3, max_length=30)
+    notes: str | None = Field(default=None, max_length=2000)
+
+
+# What the client gets back: decrypted values. The field names differ
+# from the columns (phone vs phone_encrypted), so main.py builds this
+# explicitly instead of using from_attributes.
+class CustomerOut(BaseModel):
+    id: int
+    name: str
+    email: str
+    phone: str
+    notes: str | None
+
+
+# LEARNING ONLY: the row exactly as stored, ciphertext and all.
+class CustomerRawOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    email: str
+    phone_encrypted: str
+    notes_encrypted: str | None
+```
+
+**`crud.py`** — ulla pogumbodhu encrypt pannudhu:
+
+```python title="crud.py"
+from sqlalchemy.orm import Session
+
+from encryption import encrypt
+from models import CustomerModel
+from schemas import CustomerCreate
+
+
+def get_customers(db: Session) -> list[CustomerModel]:
+    return db.query(CustomerModel).order_by(CustomerModel.id).all()
+
+
+def get_customer(db: Session, customer_id: int) -> CustomerModel | None:
+    return db.get(CustomerModel, customer_id)
+
+
+# Encrypt on the way IN. Plaintext phone/notes never reach the database.
+def create_customer(db: Session, customer: CustomerCreate) -> CustomerModel:
+    row = CustomerModel(
+        name=customer.name,
+        email=customer.email,
+        phone_encrypted=encrypt(customer.phone),
+        notes_encrypted=encrypt(customer.notes) if customer.notes is not None else None,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def seed_customers(db: Session) -> None:
+    if db.query(CustomerModel).count() == 0:
+        create_customer(
+            db,
+            CustomerCreate(
+                name="Ada Lovelace",
+                email="ada@example.com",
+                phone="+44 20 7946 0018",
+                notes="Prefers email. VIP.",
+            ),
+        )
+        create_customer(
+            db,
+            CustomerCreate(name="Alan Turing", email="alan@example.com", phone="+44 161 496 0000"),
+        )
+```
+
+**`main.py`** — veliya varumbodhu decrypt pannudhu, thappaana key-ah clean `500`-a maathudhu:
+
+```python title="main.py"
+import logging
+
+from cryptography.fernet import InvalidToken
+from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi.responses import JSONResponse
+from sqlalchemy.orm import Session
+
+import crud
+from database import Base, SessionLocal, engine, get_db
+from encryption import decrypt
+from models import CustomerModel
+from schemas import CustomerCreate, CustomerOut, CustomerRawOut
+
+logger = logging.getLogger("uvicorn.error")
+
+Base.metadata.create_all(bind=engine)
+
+with SessionLocal() as db:
+    crud.seed_customers(db)
+
+app = FastAPI()
+
+NOT_FOUND = {404: {"description": "Customer not found"}}
+
+
+# Wrong FERNET_KEY (or a tampered value) -> InvalidToken. That's a server
+# misconfiguration, not the client's fault, so: 500, a clear log line for
+# the developer, and nothing secret in the response.
+@app.exception_handler(InvalidToken)
+def invalid_token_handler(request: Request, exc: InvalidToken):
+    logger.error(
+        "Could not decrypt a stored value on %s %s. Is FERNET_KEY the key the "
+        "data was encrypted with?",
+        request.method,
+        request.url.path,
+    )
+    return JSONResponse(status_code=500, content={"detail": "Could not decrypt stored data"})
+
+
+# Decrypt on the way OUT.
+def to_out(row: CustomerModel) -> CustomerOut:
+    return CustomerOut(
+        id=row.id,
+        name=row.name,
+        email=row.email,
+        phone=decrypt(row.phone_encrypted),
+        notes=decrypt(row.notes_encrypted) if row.notes_encrypted is not None else None,
+    )
+
+
+def get_or_404(db: Session, customer_id: int) -> CustomerModel:
+    row = crud.get_customer(db, customer_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    return row
+
+
+@app.get("/customers", response_model=list[CustomerOut])
+def list_customers(db: Session = Depends(get_db)):
+    return [to_out(row) for row in crud.get_customers(db)]
+
+
+@app.get("/customers/{customer_id}", response_model=CustomerOut, responses=NOT_FOUND)
+def get_customer(customer_id: int, db: Session = Depends(get_db)):
+    return to_out(get_or_404(db, customer_id))
+
+
+@app.post("/customers", response_model=CustomerOut, status_code=status.HTTP_201_CREATED)
+def create_customer(customer: CustomerCreate, db: Session = Depends(get_db)):
+    return to_out(crud.create_customer(db, customer))
+
+
+# LEARNING ONLY. Shows exactly what is stored in the database so you can
+# see the ciphertext. A real app must NOT have a route like this.
+@app.get("/customers/{customer_id}/raw", response_model=CustomerRawOut, responses=NOT_FOUND)
+def get_customer_raw(customer_id: int, db: Session = Depends(get_db)):
+    return get_or_404(db, customer_id)
+```
+
+## Line by line
+
+**`config.py` — key:**
+
+1. **Fernet key-na 32 random bytes, base64-encode panninadhu.** Real
+   key-ah
+   `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`
+   vachi generate panni, `.env`-la `FERNET_KEY=...`-a podunga.
+2. **`os.getenv("FERNET_KEY", DEV_FERNET_KEY)`** — indha fallback
+   lesson zero setup-la run aaganum nu mattum dhan, comment-um adha
+   satham pottu solludhu. Andha key git-la irukku, so adhu edhaiyum
+   protect pannadhu. Real key-ku moonu rules:
+   - **Secret-a vachukonga, git-la podaadheenga.** Adhu `.env`-la
+     (git-ignored) illa oru secrets manager-la pogum. Key-um database
+     dump-um **rendum** irukra yaarum ella encrypted column-ayum padikkalam.
+   - **Key pochu-na data-vum pochu.** "Forgot my key" recovery edhuvum
+     illa. Safe-aana idathula backup pannunga, database backups-la
+     irundhu thani-a (rendaiyum oru idathula vechaa purpose-e poidum).
+   - **Summa maathidaadheenga.** Pazhaya rows pazhaya key-la encrypt
+     aagirukku, so pudhu key-la decrypt aagaadhu. Keezha key rotation
+     paarunga.
+
+**`encryption.py` — rendu helpers:**
+
+3. **`fernet = Fernet(FERNET_KEY)`** — muzhu app-kum oru object,
+   import time-la oru thadava create aagudhu. Key format thappa irundha
+   first request-la illama, inga startup-laye fail aagidum.
+4. **`encrypt()`** — Fernet `bytes`-la dhan work pannum, aana database
+   column `str` vachirukku. So value `str` → `.encode()` → encrypted
+   bytes → `.decode()` → `str`-a pogudhu. Ciphertext URL-safe base64,
+   so text column-la nalla store aagum.
+5. **`decrypt()`** — adhe trip reverse-la. Fernet-na AES encryption
+   **plus** oru signature (HMAC), so adhu secret mattum illa,
+   tamper-proof-um kooda: thappaana key illa edit panna value-na
+   silent-a garbage return pannama `InvalidToken` raise pannum.
+
+**`models.py` — endha columns encrypt aagudhu:**
+
+6. **`name` mattrum `email` plain text-a irukku** — app adhu vachi
+   search, sort pannanum, encrypted columns-la adhu mudiyaadhu (step 11
+   paarunga). Neenga eppovum search panna maateenga nu theriyura
+   columns-ah mattum encrypt pannunga.
+7. **`phone_encrypted` / `notes_encrypted` `Text`, `String(30)` illa**
+   — ciphertext input-ah vida romba neelam: chinna phone number kooda
+   kitta 100 characters aagidum. `_encrypted` suffix adutha developer-ku
+   indha columns-ah neraa padikka mudiyaadhu nu solludhu.
+
+**`crud.py` — ulla pogumbodhu encrypt:**
+
+8. **`phone_encrypted=encrypt(customer.phone)`** — plaintext phone
+   database, adhoda logs, backups edhukkum pogave pogaadhu. `notes`
+   optional, so anuppina mattum encrypt aagum; `None` `None`-a dhan
+   irukkum. Seed function-um `create_customer` vazhiya dhan pogudhu, so
+   demo rows kooda encrypted-a dhan store aagudhu.
+
+**`schemas.py` mattrum `main.py` — veliya varumbodhu decrypt:**
+
+9. **`to_out(row)` `CustomerOut`-ah kaila build pannudhu.**
+   `CustomerOut`-la `phone` irukku, row-la `phone_encrypted` irukku, so
+   `from_attributes` thaane map panna mudiyaadhu. Explicit-a build
+   pannradhu decryption nadakkura oray obvious idam-um kooda. Customer
+   return panra ella route-um idha call pannum.
+10. **`/raw` route** `from_attributes` (`CustomerRawOut`) use *pannalam*,
+    yen-na adhoda field names columns-oda match aagudhu. Neenga
+    ciphertext-ah paakanum nu mattum dhan adhu irukku. Real app
+    encrypted columns-ah eppovum return panna koodadhu, idha maari route
+    vechikka-vum koodadhu.
+11. **Same plaintext, ovoru thadavaiyum vera ciphertext.** Fernet
+    ovoru encryption-layum oru random IV-um timestamp-um kalakkum, so
+    `encrypt("555-0100")` ovoru call-kum pudhu result kudukkum. Adhu
+    nalladhu: same phone number share panra customers-ah attacker
+    kandupidikka mudiyaadhu. Aana adhoda artham **encrypted columns-la
+    search panna mudiyaadhu**:
+
+    ```python
+    # Never matches: the stored value was encrypted with a different IV.
+    db.query(CustomerModel).filter(CustomerModel.phone_encrypted == encrypt("555-0100"))
+    ```
+
+    Avangala vachi `WHERE` illa, `ORDER BY` illa, unique index illa.
+    "Indha phone-oda customer-ah kandupidi" venumna, normalise panna
+    value-oda **keyed hash**-ah
+    (`hmac.new(key, phone.encode(), "sha256").hexdigest()`) vachirukra
+    innoru column add pannunga — adhu ovoru thadavaiyum same-a *irukkum* —
+    adhula search pannunga.
+12. **`@app.exception_handler(InvalidToken)`** — thappaana key server
+    misconfiguration, client thappu illa, so adhu `500`, `4xx` illa.
+    Response body attacker-ku useful-a edhuvum sollaadhu
+    (`Could not decrypt stored data`), aana log line **ungalukku**
+    likely cause-ah solludhu: maaripona illa missing `FERNET_KEY`.
+    Indha handler illana, key pathi edhuvum hint illama verum
+    `Internal Server Error`-um neelamaana traceback-um dhan kidaikkum.
+13. **`get_or_404`** — "load pannu illa `404`" step-ku oru helper,
+    single-customer route-um `/raw` route-um share pannudhu.
+
+**Innum konjam (inga implement pannala):**
+
+14. **`MultiFernet` vachi key rotation.** Data-ah izhakkaama key-ah
+    maatha, **pudhu** key-ah first list pannunga, pazhaya key-ah
+    padikkradhukku vachukonga:
+
+    ```python
+    from cryptography.fernet import Fernet, MultiFernet
+
+    fernet = MultiFernet([Fernet(NEW_KEY), Fernet(OLD_KEY)])
+
+    fernet.encrypt(b"...")      # always uses NEW_KEY
+    fernet.decrypt(token)       # tries NEW_KEY, then OLD_KEY
+    fernet.rotate(token)        # decrypts with whichever works, re-encrypts with NEW_KEY
+    ```
+
+    Adha deploy pannunga, ovoru encrypted column-layum `rotate()` call
+    panni result-ah save panra oru one-off script run pannunga, ella
+    row-um mudinja appuram `OLD_KEY`-ah remove pannunga.
+15. **`TypeDecorator` vachi automatic encryption.** `encrypt()`/`decrypt()`
+    kaila call pannradhukku pathila, oru column-oda ovoru read/write-layum
+    SQLAlchemy adha pannidum:
+
+    ```python
+    from sqlalchemy.types import Text, TypeDecorator
+
+
+    class EncryptedText(TypeDecorator):
+        impl = Text
+        cache_ok = True
+
+        def process_bind_param(self, value, dialect):      # Python -> DB
+            return None if value is None else encrypt(value)
+
+        def process_result_value(self, value, dialect):    # DB -> Python
+            return None if value is None else decrypt(value)
+
+
+    phone = Column(EncryptedText, nullable=False)  # row.phone is plain text in Python
+    ```
+
+    Routes-la code kammi, marakka-vum mudiyaadhu, aana kannukku
+    theriyaadhu: `row.phone` padikkuravanga adhu rest-la encrypted nu
+    unaraama poidalaam. Ovoru step-um theriyanum nu indha lesson
+    explicit helpers-ah vachirukku.
+
+## Routes
+
+| Route | Description |
+|---|---|
+| `GET /customers` | Ella customers-um, phone/notes decrypt aagi |
+| `GET /customers/{customer_id}` | Oru customer, decrypted; illana `404` |
+| `POST /customers` | `name`, `email`, `phone`, optional `notes` oda body; encrypt panni, save panni, `201` |
+| `GET /customers/{customer_id}/raw` | **Learning only:** store aana maadhiriye row (ciphertext); illana `404` |
+
+Decrypt panra edha route-um, key data-oda match aagalana
+`Could not decrypt stored data`-oda `500` kudukkum.
+
+## Try it
+
+```bash
+cd example/12/g
+uvicorn main:app --reload
+```
+
+```bash
+curl -X POST http://127.0.0.1:8000/customers -H "Content-Type: application/json" -d "{\"name\": \"Grace Hopper\", \"email\": \"grace@example.com\", \"phone\": \"555-0100\", \"notes\": \"Call after 5pm\"}"
+curl http://127.0.0.1:8000/customers/3
+curl http://127.0.0.1:8000/customers/3/raw
+```
+
+Rendaavadhu request `"phone": "555-0100"` return pannum. Moonaavadhu
+idha maadhiri edhavadhu return pannum:
+
+```json
+{"id": 3, "name": "Grace Hopper", "email": "grace@example.com",
+ "phone_encrypted": "gAAAAABqw3syjOGnLeGjFcjWqi8JEwLP...", "notes_encrypted": "gAAAAABqw3sy..."}
+```
+
+**Idhaiyum try pannunga:** adhe body-ah thirumba `POST` panni rendu
+`/raw` results-ah compare pannunga: same phone, **vera** ciphertext.
+Apparam server-ah stop panni, pudhusa generate panna `FERNET_KEY`-ah
+`.env`-la pottu, thirumba start panni `GET /customers` call pannunga:
+`500`, terminal-la
+`Could not decrypt a stored value ... Is FERNET_KEY the key the data was encrypted with?`
+log aagum. `.env`-la irundhu andha line-ah eduthaa ellam thirumba
+padikka mudiyum.
+
+Adutha step: [ID hashing](/tanglish/docs/security/id-hashing) — 1, 2, 3
+ku pathila chinna, non-sequential public ids.

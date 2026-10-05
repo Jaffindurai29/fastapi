@@ -1,0 +1,190 @@
+---
+title: Security
+description: Who are you, what may you do, and what must never leak — password hashing, JWT login, roles, ownership, encryption, rate limiting and a React client.
+---
+
+<GithubLink path="example/12" />
+
+So far, anyone could call any route. This topic adds the three questions
+every real API has to answer:
+
+- **Who are you?** — *authentication*: a username and password, checked
+  against a hash, traded for a signed token.
+- **What may you do?** — *authorization*: roles (admin vs user) and
+  ownership (your rows, not someone else's).
+- **What must never leak?** — passwords, secrets, sensitive columns and
+  guessable internal ids.
+
+Each page teaches one piece on its own, in its own folder.
+[Everything together](/en/docs/security/secure-app) (12/j) puts them all
+into one "secure notes" API with a security checklist, and
+[React frontend](/en/docs/security/react) (12/react) logs in and keeps
+tokens fresh.
+
+## Same layered layout, a few new files
+
+Every letter uses the layered layout from
+[MySQL + CRUD](/en/docs/mysql-crud) (`database.py`, `models.py`,
+`schemas.py`, `crud.py`, `main.py`), plus some new files:
+
+| File | Responsibility |
+|---|---|
+| `config.py` | settings read from the environment: `SECRET_KEY`, the algorithm, token lifetimes |
+| `security.py` | password hashing and creating/decoding tokens — pure functions, no HTTP |
+| `dependencies.py` | the "locks": `get_current_user`, `require_role`, ownership checks |
+| `routers/` | 12/j only — routes split into `auth`, `users` and `notes` |
+
+## Hashing vs encryption vs encoding/signing
+
+Three different tools that are easy to mix up:
+
+| | Reversible? | Needs a key? | Use it for | In this topic |
+|---|---|---|---|---|
+| **Hashing** | No, one-way. You can only check "does this input match?" | No (a salt is stored inside the hash) | Passwords. You never need to read them back, only verify them. | [Password hashing](/en/docs/security/password-hashing), pwdlib / Argon2 |
+| **Encryption** | Yes, two-way, with the key | Yes, and whoever has it can decrypt | Sensitive data you must read back later (phone numbers, your users' API keys, ...) | [Encrypt/decrypt fields](/en/docs/security/encryption), Fernet |
+| **Encoding + signing (JWT)** | Yes, by **anyone**. The payload is just base64. | The key only **signs**. It proves the token wasn't tampered with. | Saying who someone is (`sub`) in a way they can't forge | [JWT login](/en/docs/security/jwt-login), PyJWT HS256 |
+
+The practical rules that follow:
+
+- **Never encrypt passwords. Hash them.** If passwords were encrypted,
+  whoever steals the key (or the server itself) could turn every one of
+  them back into plain text. With a hash, there is nothing to turn back:
+  even the server can only check a guess.
+- **Never put secrets in a JWT.** Anyone holding the token can read it.
+  Paste one into [jwt.io](https://jwt.io) to see for yourself.
+- **sqids ([ID hashing](/en/docs/security/id-hashing)) is encoding, not
+  security.** It hides the shape of an id, but the real protection is
+  still the [ownership check](/en/docs/security/ownership).
+
+## Seeded users
+
+Every letter that has users seeds them if its table is empty:
+
+| Username | Password | Seeded in |
+|---|---|---|
+| `alice` | `alice-password` | every letter with users |
+| `bob` | `bob-password` | every letter with users |
+| `admin` | `admin-password` | every letter with users |
+| `carol` | `carol-password` | 12/b, 12/c, 12/d, 12/i only, with `is_active=False` (log in or use her token to see `403` "Inactive user") |
+
+**Roles only exist in 12/e, 12/f and 12/j.** There, `admin` has the role
+`admin` and everyone else has `user`. In 12/a–d and 12/i, `admin` is just
+a username with no extra powers.
+
+## Tables
+
+Letters whose user model is identical share a table, because
+`create_all` never alters an existing table, so two folders can only
+share one if their models match exactly. When a letter adds a column
+(like `role`), it gets its own table instead:
+
+| Table | Used by |
+|---|---|
+| `sec_a_users` | 12/a |
+| `sec_users` (with `is_active`) | 12/b, 12/c, 12/d, 12/i |
+| `sec_rbac_users` (with `role`) and `sec_notes` | 12/e, 12/f |
+| `secure_users`, `secure_notes`, `secure_refresh_tokens` | 12/j |
+
+## Setup
+
+Same database setup as [MySQL + CRUD](/en/docs/mysql-crud) (the
+`fastapi_learn` database, `MYSQL_*` variables or a `.env`, or the SQLite
+fallback). The packages new to this topic:
+
+```bash
+pip install "pwdlib[argon2]" pyjwt cryptography sqids slowapi python-multipart
+```
+
+| Package | Why |
+|---|---|
+| `pwdlib[argon2]` | password hashing with Argon2 (the modern replacement for `passlib`) |
+| `pyjwt` | creating and verifying JSON Web Tokens |
+| `cryptography` | Fernet encryption for sensitive columns |
+| `sqids` | short, non-sequential public ids |
+| `slowapi` | rate limiting |
+| `python-multipart` | lets FastAPI read the **form** that the login route expects |
+
+Letters with tokens also read `SECRET_KEY`, `ACCESS_TOKEN_EXPIRE_MINUTES`
+and `REFRESH_TOKEN_EXPIRE_DAYS` from the environment (see each folder's
+`.env.example`). All have working development defaults, so you can skip
+them on your laptop. For anything real, generate a key:
+
+```bash
+python -c "import secrets; print(secrets.token_hex(32))"
+```
+
+## Running this topic
+
+Backend only for 12/a–12/j: pick a letter and run it.
+
+```bash
+cd example/12/a   # or b, c, d, e, f, g, h, i, j
+uvicorn main:app --reload
+```
+
+12/react needs 12/j running at the same time. In a second terminal:
+
+```bash
+cd example/12/react
+npm install
+npm run dev
+```
+
+Open the URL Vite prints (usually http://localhost:5173) and log in as
+`alice` / `alice-password`.
+
+## How logging in works (12/b onward)
+
+From [JWT login](/en/docs/security/jwt-login) on, logging in is
+`POST /token` with **form fields**, not JSON. That's what the OAuth2
+"password flow" standard says, and it's what the `/docs` page knows how
+to send. With curl, `-d` without a `Content-Type` header sends a form:
+
+```bash
+curl -X POST http://127.0.0.1:8000/token -d "username=alice&password=alice-password"
+```
+
+The answer is a token:
+
+```json
+{"access_token": "eyJhbGciOiJIUzI1NiIs...", "token_type": "bearer"}
+```
+
+Copy `access_token` and send it on every protected request, in the
+`Authorization` header:
+
+```bash
+curl http://127.0.0.1:8000/users/me -H "Authorization: Bearer <paste token>"
+```
+
+**In `/docs`:** click the **Authorize** button (top right), type
+`alice` / `alice-password`, and every locked route (shown with a padlock)
+now sends the token for you. **Logout** in the same dialog removes it
+again, so you can watch the `401`s.
+
+**In Postman:** log in with Body → x-www-form-urlencoded (`username`,
+`password`; JSON gets a `422`), then on the protected request open the
+**Authorization** tab → **Bearer Token** and paste the token.
+
+## 401 vs 403 — the two "no" answers
+
+You'll see both on almost every page, so here's the rule once:
+
+| Status | Name | Really means | Fix |
+|---|---|---|---|
+| `401` | Unauthorized | "I don't know who you are" — no token, bad token, expired token, wrong password | Log in (again) |
+| `403` | Forbidden | "I know exactly who you are, and the answer is no" — wrong role, not your row, deactivated account | Logging in again won't help |
+
+## Pages in this topic
+
+1. [Password hashing](/en/docs/security/password-hashing) — storing passwords as Argon2 hashes with pwdlib, and checking them.
+2. [JWT login](/en/docs/security/jwt-login) — `POST /token` with a username + password form, returning a signed access token.
+3. [Protected routes](/en/docs/security/protected-routes) — a `get_current_user` dependency: no valid token, no access (`401`).
+4. [Refresh tokens](/en/docs/security/refresh-tokens) — short-lived access tokens plus a longer-lived refresh token to get new ones.
+5. [Authorization by role](/en/docs/security/roles) — admin-only routes; `403` vs `401`.
+6. [Authorization by ownership](/en/docs/security/ownership) — users may only touch their own rows.
+7. [Encrypt/decrypt fields](/en/docs/security/encryption) — Fernet: encrypt sensitive columns at rest, decrypt when reading.
+8. [ID hashing](/en/docs/security/id-hashing) — sqids: short, non-sequential public ids instead of 1, 2, 3.
+9. [Rate limiting login](/en/docs/security/rate-limiting) — slowapi: `429 Too Many Requests` after too many login attempts.
+10. [Everything together](/en/docs/security/secure-app) — one "secure notes" API with all of the above, plus a production security checklist.
+11. [React frontend](/en/docs/security/react) — login UI, where to store tokens, axios interceptors that refresh and retry.

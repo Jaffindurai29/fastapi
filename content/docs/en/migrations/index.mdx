@@ -1,0 +1,124 @@
+---
+title: Database Migrations
+description: Changing a database schema safely with Alembic, instead of calling create_all at startup.
+---
+
+<GithubLink path="example/13" />
+
+Every app so far called `Base.metadata.create_all()` at startup. That
+works exactly once: it creates **missing** tables, but it never changes
+a table that's already there. Add a column to a model and `create_all`
+silently does nothing, so the code expects a column the database doesn't
+have, and the first query that selects it crashes.
+
+Migrations fix that. With [Alembic](https://alembic.sqlalchemy.org/),
+each schema change is a small Python file with an `upgrade()` and a
+`downgrade()`, numbered in order, committed to git, and applied with one
+command. The database remembers which ones it has already run, so each
+migration runs exactly once, in order, on every machine.
+
+| Why migrations | What it means |
+|---|---|
+| **Versioned** | The database stores which migrations it has run, so each runs exactly once, in order. |
+| **Reviewable** | Each change is code in git, read in a pull request like anything else. |
+| **Reversible** | Each migration has a `downgrade()` that undoes it. |
+
+## The files in `example/13/a`
+
+| File | Responsibility |
+|---|---|
+| `database.py`, `models.py`, `schemas.py`, `crud.py`, `main.py` | The app, same layers as [MySQL + CRUD](/en/docs/mysql-crud). `main.py` has **no** `create_all`. |
+| `alembic.ini` | Alembic's config: where the migrations folder is, logging. No database URL in it. |
+| `migrations/env.py` | Runs before every Alembic command: connects to the database and tells Alembic about our models. |
+| `migrations/script.py.mako` | The template new migration files are generated from. |
+| `migrations/versions/` | The migrations themselves, one file per change. |
+
+All of the Alembic files came from `alembic init migrations` and were
+then edited. The app uses its own table, `migrated_items`, so it never
+touches the `items` table from earlier topics.
+
+## Important: the database is shared
+
+Every topic in this repo uses the same `fastapi_learn` database, so it
+already holds `items`, `crud_react_items`, `validation_items`, and more.
+That matters a lot for Alembic, in two ways.
+
+**1. The `include_name` filter.** `alembic revision --autogenerate`
+writes a migration by comparing the real database against **our**
+models. It finds `items`, `crud_react_items`, ... in the database,
+can't find them in our models, and concludes they were **removed** —
+so without a filter, the generated migration would contain
+`op.drop_table("items")` and friends. Run that and you've deleted every
+other topic's data. `migrations/env.py` prevents it:
+
+```python
+def include_name(name, type_, parent_names):
+    """Only look at tables this app's models define.
+
+    fastapi_learn is shared by every topic (items, crud_react_items, ...).
+    Without this filter, autogenerate sees those tables in the database,
+    doesn't find them in our models, and writes op.drop_table() for each
+    of them. This makes autogenerate ignore every table that isn't ours.
+    """
+    if type_ == "table":
+        return name in target_metadata.tables
+    return True
+```
+
+Alembic calls this for every name it finds in the database. Returning
+`False` for a table makes Alembic act as if that table doesn't exist,
+and `target_metadata.tables` only contains `migrated_items`. So if you
+already ran topics 6, 7 or 8 with `create_all`, those tables are left
+alone. (Tested: with the filter removed and an `items` table present,
+`alembic check` reports `Detected removed table 'items'`. With it,
+`No new upgrade operations detected`.)
+
+**2. Its own version table.** Alembic keeps one row in a small
+bookkeeping table holding the id of the last migration it ran — that's
+how `upgrade head` knows what to skip. The default table name is
+`alembic_version`. This lesson uses `alembic_version_13a` instead:
+
+```python
+VERSION_TABLE = "alembic_version_13a"
+```
+
+so another project's Alembic in the same database can never overwrite
+(or be confused by) this lesson's "which migration am I on" row.
+
+## Setup
+
+```bash
+pip install alembic
+```
+
+Everything else is the [same database setup as MySQL + CRUD](/en/docs/mysql-crud#setup)
+(`sqlalchemy pymysql python-dotenv`, the `fastapi_learn` database, the
+`MYSQL_*` env vars or a `.env`, or `DATABASE_URL` for SQLite). Alembic
+reads the **same** env vars / `.env` / `DATABASE_URL` as the app, so the
+migrations always go to the database the app uses.
+
+## Running this topic
+
+Run every `alembic` command from the example folder, with your
+virtualenv active, and run the migrations **before** starting the app —
+the app no longer creates its table:
+
+```bash
+cd example/13/a
+alembic upgrade head
+uvicorn main:app --reload
+```
+
+If your shell says `alembic: command not found` (or "not recognized" on
+Windows), the venv's scripts folder isn't on your `PATH`. Run it through
+Python instead — it works for every command on these pages:
+
+```bash
+python -m alembic upgrade head
+```
+
+## Pages in this topic
+
+1. [Alembic instead of create_all](/en/docs/migrations/alembic) — two
+   hand-written migrations, `upgrade`/`downgrade`/`history`, and
+   `--autogenerate` for the next change.

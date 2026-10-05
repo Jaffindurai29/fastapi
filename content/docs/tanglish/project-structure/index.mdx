@@ -1,0 +1,173 @@
+---
+title: Project Structure
+description: Oru periya main.py-ah routers, dependencies, oru typed settings class-a split panradhu, plus oru route eppo async def-a irukkanum.
+---
+
+<GithubLink path="example/10" />
+
+[Validation & Errors](/tanglish/docs/validation) varaikkum, ovoru app-um
+ella routes-um irukra oru `main.py`, plus konjam helper modules dhan.
+Anju routes-ku adhu fine, aimbadhu routes-ku romba kashtam, mattrum API-ku
+oru resource-ku mela vandha udane adhu scale aagadhu. Indha topic real
+FastAPI projects eppadi layout pannuvaangalo appadiye app-ah split
+pannudhu:
+
+- routes **routers**-a group aagudhu (`routers/items.py`, `routers/health.py`);
+- "oru route run aaguradhukku munnadi adhukku venum-na things" ellam
+  **dependencies**-a veliya edukkapadudhu (`dependencies.py`);
+- ovoru setting-um oru typed, validated **config** class-la
+  (`config.py`).
+
+Kadaisiya, ovoru FastAPI beginner-um adutha-a kekkura question-oda
+mudiyudhu: oru route `async def`-a irukkanuma, illa plain `def`-a?
+
+| Sub-topic | Enna cover pannudhu |
+|---|---|
+| [10/a — APIRouter](/tanglish/docs/project-structure/routers) | Routes-ah oru `routers/` package-ku move panradhu; `prefix`, `tags`, `include_router`; oru `/health` check. |
+| [10/b — Dependency injection](/tanglish/docs/project-structure/dependencies) | `dependencies.py`: `get_db` explain panradhu, `get_item_or_404`, oru `Pagination` class, write routes-la oru `X-API-Key` guard. |
+| [10/c — Settings](/tanglish/docs/project-structure/settings) | `pydantic-settings`: env vars mattrum `.env`-la irundhu oru typed `Settings` class; `SecretStr`; settings-la irundhu CORS mattrum `/info`. |
+| [10/d — `async def` vs `def`](/tanglish/docs/project-structure/async-vs-sync) | Database illa. 5 concurrent requests-ah time panni, `async def`-kulla oru blocking call yen full server-aiyum freeze pannudhu-nu kaattudhu. |
+
+## Folders eppadi valarudhu
+
+Ovoru letter-um munnadi irukra letter-la irundhu start aagi oru pudhu
+idea add pannudhu. API ([Validation & Errors](/tanglish/docs/validation)-oda
+`name`/`price`/`quantity` item-la full CRUD) 10/a-la irundhu 10/c varaikkum
+same dhan; adha suthi irukra code mattum dhan re-organise aagudhu.
+
+```text
+10/c/                     where it came from
+├── main.py               10/a: no routes, just include_router(...)  (10/c: + CORS, GET /info)
+├── config.py             10/c: class Settings(BaseSettings)
+├── database.py           10/a: engine, SessionLocal, Base           (10/c: reads Settings)
+├── dependencies.py       10/b: get_db, get_item_or_404, Pagination, require_api_key
+├── models.py             10/a: ItemModel -> table structured_items
+├── schemas.py            10/a: ItemCreate / ItemPatch / ItemOut
+├── crud.py               10/a: plain database functions, no HTTP
+└── routers/
+    ├── __init__.py       10/a: makes routers/ a package (empty)
+    ├── items.py          10/a: /items                               (10/b: uses dependencies)
+    └── health.py         10/a: GET /health
+```
+
+10/d oru thani, database illadha app: verum `main.py` mattrum `demo.py`.
+
+## 10/a–10/c-ku oru table
+
+10/a, 10/b, 10/c moonum oru table-ah share pannudhu, **`structured_items`**.
+Model moonu folder-layum exact same, so same database-ku onnu appuram
+onnu run pannina, oruthar rows-ah innoruthar paapanga. 10/a-la oru "Desk"
+create pannirundha, 10/b-la adhu innum irukkum (thirumba "Desk" post
+pannina `409` varum). Oru specific id use panra example-ah try
+panradhukku munnadi, first `GET /items` run panni ippo yentha ids
+irukku-nu paarunga.
+
+Table startup-la `Base.metadata.create_all(...)` vachi automatic-a
+create aagum, empty-a irundha oru Laptop, oru Mouse, oru Keyboard seed
+aagum.
+
+## Setup
+
+Oru pudhu package, 10/c-la use aagudhu:
+
+```bash
+pip install pydantic-settings
+```
+
+Fresh-a start pannreenga-na, indha topic-ku venum-na ellam:
+
+```bash
+pip install fastapi uvicorn sqlalchemy pymysql python-dotenv pydantic-settings
+```
+
+10/a–10/c-oda database setup [MySQL + CRUD](/tanglish/docs/mysql-crud)-la
+irukra maadhiriye exact same — same `fastapi_learn` database, same
+`MYSQL_*` environment variables illana `.env` file, same SQLite fallback:
+
+```bash
+export DATABASE_URL="sqlite:///./test.db"
+```
+
+10/b oru optional variable add pannudhu, `API_KEY` (default
+`dev-api-key`), 10/c `APP_NAME`, `DEBUG`, `CORS_ORIGINS` add pannudhu.
+Ellathukkum defaults irukku, so `.env` file innum optional dhan. 10/d-ku
+database-e venaam, adhoda `demo.py` Python standard library mattum dhan
+use pannudhu.
+
+## Indha topic-ah eppadi run pannurathu
+
+Ovoru letter-aiyum adhoda folder-**kulla** irundhu run pannunga. Adhu
+dhan `from routers import items` mattrum `import crud` work aaga
+vaikkudhu (yen-nu [APIRouter page](/tanglish/docs/project-structure/routers)
+explain pannudhu):
+
+```bash
+cd example/10/a   # illana b, c
+uvicorn main:app --reload
+```
+
+10/d-ku rendu terminals venum, `--reload` venaam (reloader timings-la
+noise add pannum):
+
+```bash
+cd example/10/d
+uvicorn main:app          # terminal 1
+python demo.py            # terminal 2
+```
+
+[http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs) open pannunga:
+10/a-la irundhu, routes headings-ku keezha group aagi irukkum, ovoru
+router tag-kum onnu.
+
+## Keezha irukra ovoru page-um share panra pieces
+
+10/a-oda `database.py` topic 6-oda adhe dhan (10/b adhula irundhu
+`get_db`-ah veliya move pannudhu, 10/c settings padikka adha thirumba
+ezhudhudhu); adha line-by-line paakka
+[MySQL + CRUD index](/tanglish/docs/mysql-crud) paarunga. `schemas.py`
+(`ItemCreate`, `ItemPatch`, `ItemOut`) mattrum `crud.py` 10/a, 10/b, 10/c
+moonulayum same, [Validation & Errors](/tanglish/docs/validation)-la
+irundhu nera varudhu.
+
+**Table (`models.py`-la, 10/a–10/c):**
+
+```python
+class ItemModel(Base):
+    __tablename__ = "structured_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(50), nullable=False, unique=True)
+    price = Column(Float, nullable=False)
+    quantity = Column(Integer, nullable=False, default=0)
+```
+
+## Line by line: table (models.py-la)
+
+1. `__tablename__ = "structured_items"` — oru pudhu table, so indha
+   topic topic 6-oda `items` illana topic 8-oda `validation_items`-oda
+   collide aagadhu.
+2. `id = Column(Integer, primary_key=True, autoincrement=True)` — topic
+   6-la irundhu ovoru topic-layum irukra adhe auto-incrementing primary
+   key.
+3. `name = Column(String(50), nullable=False, unique=True)` — required,
+   50 characters varaikkum, mattrum **unique**: database rendavadhu
+   "Laptop"-ah refuse pannum. Routers first duplicates-ah check panni
+   `409` answer pannum; unique column andha check-ku pinnadi irukra
+   safety net.
+4. `price = Column(Float, nullable=False)` — required decimal number.
+5. `quantity = Column(Integer, nullable=False, default=0)` — required
+   whole number; insert adha vittutta, SQLAlchemy `0` fill pannum.
+
+**PATCH merge pannum, replace pannadhu.** Ovoru letter-oda `PATCH` route-um
+`patch.model_dump(exclude_unset=True)` use pannudhu, adhu client real-a
+anuppuna fields-ah mattum vachukkum. So `{"price": 899}` price-ah mattum
+maathum, `name`-um `quantity`-um apdiye irukkum —
+[Status codes](/tanglish/docs/validation/status-codes)-la irukra
+maadhiriye.
+
+## Indha topic-la irukra pages
+
+1. [APIRouter](/tanglish/docs/project-structure/routers) — routes `main.py`-la irundhu oru `routers/` package-ku move aagudhu.
+2. [Dependencies](/tanglish/docs/project-structure/dependencies) — session, row, pagination, oru API-key guard-ku `Depends`.
+3. [Settings](/tanglish/docs/project-structure/settings) — ella idathulayum `os.getenv`-ku pathila oru typed `Settings` class.
+4. [async def vs def](/tanglish/docs/project-structure/async-vs-sync) — indha repo-la ovoru database route-um yen plain `def`.

@@ -1,0 +1,449 @@
+---
+title: "3. Protected routes"
+description: A get_current_user dependency that reads the Bearer token, verifies it and loads the user — no valid token is 401, a deactivated account is 403.
+---
+
+<GithubLink path="example/12/c" />
+
+Using the token from [JWT login](/en/docs/security/jwt-login). A
+dependency, `get_current_active_user`, reads the
+`Authorization: Bearer ...` header, verifies the token, and loads the
+user. Any route that asks for it is locked: no token, a garbage token or
+an expired token gets `401`, and a deactivated account gets `403`.
+`/public` stays open for comparison.
+
+| Route | Description |
+|---|---|
+| `POST /token` | Form login → access token (15 min); `401` if wrong |
+| `GET /public` | No token needed |
+| `GET /users/me` | The logged-in user; `401` without a valid token, `403` if deactivated |
+| `GET /items` | Demo item list; same rules as `/users/me` |
+
+Table: `sec_users`, shared with 12/b, 12/d and 12/i. Seeded users:
+`alice`, `bob`, `admin` (password `<name>-password`), and `carol` /
+`carol-password`, who is deactivated.
+
+## The code
+
+`config.py`, `database.py`, `models.py`, `schemas.py`, `security.py`
+and `crud.py` are the same as on [JWT login](/en/docs/security/jwt-login);
+they're all here so the page stands on its own. The new file is
+`dependencies.py`.
+
+**`config.py`:**
+
+```python title="config.py"
+import os
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# Signs every token. Anyone who knows it can mint valid tokens for any
+# user, so in production set a long random value in .env, generated with:
+#   python -c "import secrets; print(secrets.token_hex(32))"
+SECRET_KEY = os.getenv("SECRET_KEY", "dev-only-secret-change-me-in-production-0123456789")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "15"))
+REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7"))
+```
+
+**`database.py`:**
+
+```python title="database.py"
+import os
+
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+load_dotenv()
+
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
+MYSQL_USER = os.getenv("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
+
+# Set DATABASE_URL directly to override everything above (e.g. to point
+# at SQLite for a quick local test with no MySQL server at all).
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
+)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+```
+
+**`models.py`:**
+
+```python title="models.py"
+from sqlalchemy import Boolean, Column, Integer, String
+
+from database import Base
+
+
+# Shared by 12/b, 12/c, 12/d and 12/i. Keep it identical in all four:
+# create_all never alters an existing table.
+class UserModel(Base):
+    __tablename__ = "sec_users"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    username = Column(String(30), nullable=False, unique=True)
+    hashed_password = Column(String(255), nullable=False)
+    is_active = Column(Boolean, nullable=False, default=True)
+```
+
+**`schemas.py`:**
+
+```python title="schemas.py"
+from pydantic import BaseModel, ConfigDict
+
+
+# The OAuth2 spec fixes these two field names, and /docs relies on them.
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+
+class UserOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    username: str
+    is_active: bool
+```
+
+**`security.py`:**
+
+```python title="security.py"
+from datetime import datetime, timedelta, timezone
+
+import jwt
+from pwdlib import PasswordHash
+
+from config import ACCESS_TOKEN_EXPIRE_MINUTES, ALGORITHM, SECRET_KEY
+
+# Argon2, exactly as in 12/a.
+password_hash = PasswordHash.recommended()
+
+
+def hash_password(password: str) -> str:
+    return password_hash.hash(password)
+
+
+def verify_password(password: str, hashed: str) -> bool:
+    return password_hash.verify(password, hashed)
+
+
+def create_access_token(username: str, expires_delta: timedelta | None = None) -> str:
+    if expires_delta is None:
+        expires_delta = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    payload = {
+        "sub": username,  # who the token is about (the "subject")
+        "exp": datetime.now(timezone.utc) + expires_delta,  # stored as a Unix timestamp
+        "type": "access",
+    }
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def decode_token(token: str) -> dict:
+    # Checks the signature AND the exp claim. Raises jwt.InvalidTokenError
+    # (or its subclass jwt.ExpiredSignatureError) if either fails.
+    # algorithms= is a whitelist: never let the token pick its own.
+    return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+```
+
+**`crud.py`:**
+
+```python title="crud.py"
+from sqlalchemy.orm import Session
+
+from models import UserModel
+from security import hash_password, verify_password
+
+
+def get_user_by_username(db: Session, username: str) -> UserModel | None:
+    return db.query(UserModel).filter(UserModel.username == username).first()
+
+
+def authenticate(db: Session, username: str, password: str) -> UserModel | None:
+    user = get_user_by_username(db, username)
+    if user is None or not verify_password(password, user.hashed_password):
+        return None
+    return user
+
+
+def seed_users(db: Session) -> None:
+    if db.query(UserModel).count() == 0:
+        db.add_all(
+            [
+                UserModel(username="alice", hashed_password=hash_password("alice-password")),
+                UserModel(username="bob", hashed_password=hash_password("bob-password")),
+                UserModel(username="admin", hashed_password=hash_password("admin-password")),
+                # Deactivated account: can log in, but the protected
+                # routes from 12/c on turn it away with 403.
+                UserModel(username="carol", hashed_password=hash_password("carol-password"), is_active=False),
+            ]
+        )
+        db.commit()
+```
+
+**`dependencies.py`** — the lock:
+
+```python title="dependencies.py"
+import jwt
+from fastapi import Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
+from sqlalchemy.orm import Session
+
+import crud
+from database import get_db
+from models import UserModel
+from security import decode_token
+
+# Reads "Authorization: Bearer <token>" and hands the <token> part to
+# the route. No header at all -> 401 "Not authenticated" automatically.
+# tokenUrl tells /docs where the "Authorize" button should log in.
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+
+def credentials_error(detail: str = "Could not validate credentials") -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail=detail,
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> UserModel:
+    try:
+        payload = decode_token(token)
+    except jwt.ExpiredSignatureError:  # subclass, so it must come first
+        raise credentials_error("Token has expired")
+    except jwt.InvalidTokenError:  # bad signature, garbage, wrong algorithm...
+        raise credentials_error()
+
+    if payload.get("type") != "access":
+        raise credentials_error()
+
+    username = payload.get("sub")
+    user = crud.get_user_by_username(db, username) if username else None
+    if user is None:  # valid token, but the account was deleted since
+        raise credentials_error()
+    return user
+
+
+# Builds on get_current_user: authenticated AND allowed in.
+def get_current_active_user(user: UserModel = Depends(get_current_user)) -> UserModel:
+    if not user.is_active:
+        # 403, not 401: we know exactly who this is, and the answer is no.
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Inactive user")
+    return user
+```
+
+**`main.py`** — one open route, two locked ones:
+
+```python title="main.py"
+from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi.security import OAuth2PasswordRequestForm
+from sqlalchemy.orm import Session
+
+import crud
+from database import Base, SessionLocal, engine, get_db
+from dependencies import get_current_active_user
+from models import UserModel
+from schemas import Token, UserOut
+from security import create_access_token
+
+Base.metadata.create_all(bind=engine)
+
+with SessionLocal() as db:
+    crud.seed_users(db)
+
+app = FastAPI()
+
+# Demo data, kept in memory: this lesson is about the lock, not the data.
+ITEMS = [
+    {"id": 1, "name": "Laptop"},
+    {"id": 2, "name": "Mouse"},
+    {"id": 3, "name": "Monitor"},
+]
+
+AUTH_ERRORS = {
+    401: {"description": "Missing, invalid or expired token"},
+    403: {"description": "Inactive user"},
+}
+
+
+@app.post("/token", response_model=Token,
+          responses={401: {"description": "Incorrect username or password"}})
+def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    user = crud.authenticate(db, form_data.username, form_data.password)
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return {"access_token": create_access_token(user.username), "token_type": "bearer"}
+
+
+# No dependency: anyone can call it.
+@app.get("/public")
+def public():
+    return {"message": "Anyone can see this"}
+
+
+# The route never touches the token. If the dependency returns, the
+# user is real, active, and their token is valid.
+@app.get("/users/me", response_model=UserOut, responses=AUTH_ERRORS)
+def read_me(current_user: UserModel = Depends(get_current_active_user)):
+    return current_user
+
+
+@app.get("/items", responses=AUTH_ERRORS)
+def list_items(current_user: UserModel = Depends(get_current_active_user)):
+    return ITEMS
+```
+
+## Line by line
+
+**How the client sends the token:**
+
+1. Every request to a locked route carries one header:
+
+   ```
+   Authorization: Bearer eyJhbGciOiJIUzI1NiIs...
+   ```
+
+   "Bearer" means "whoever bears (holds) this token is let in" — which
+   is exactly why a stolen token is as good as a stolen password until
+   it expires.
+
+**`dependencies.py`:**
+
+2. `oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")` — used as a
+   dependency, it returns the part after `Bearer `. If the header is
+   missing (or uses another scheme, like `Basic`), it answers
+   `401 Not authenticated` by itself, before your code runs.
+   `tokenUrl="token"` doesn't check anything; it tells `/docs` where the
+   **Authorize** button should send the username and password. That's
+   why login had to be an OAuth2 form at `POST /token`.
+3. `credentials_error(...)` — a small helper that builds the `401` with
+   `WWW-Authenticate: Bearer`, the header the HTTP spec expects with a
+   `401`. One place, so every failure looks the same.
+4. `get_current_user` — from token to user row, with four checks in
+   order:
+   - **Signature + expiry**: `decode_token` from the last page.
+     `jwt.ExpiredSignatureError` is a *subclass* of
+     `jwt.InvalidTokenError`, so it has to be caught **first** — if the
+     general `except` came first, it would swallow the expired case too.
+   - **Type**: only `"access"` tokens open doors. On the next page a
+     long-lived refresh token must not work here.
+   - **`sub`**: a token can be perfectly signed and still name a user
+     who no longer exists (deleted since login).
+   - **Load the user** from the database, so routes get a real row with
+     fresh data, not a stale copy from the token.
+
+   Every failure is the same `401`. Saying *why* a token is bad helps
+   attackers more than users, so the only distinct message is
+   `"Token has expired"`, which tells an honest client "log in again".
+5. `get_current_active_user` — a dependency on a dependency. It asks for
+   `get_current_user`, so FastAPI runs that first; if it returns, the
+   user is real, then this one checks `is_active`.
+
+**401 vs 403:**
+
+6. `401 Unauthorized` really means *unauthenticated*: "I don't know who
+   you are, send valid credentials". `403 Forbidden` means "I know who
+   you are, and you're not allowed". `carol`'s token is perfectly valid
+   — we know exactly who she is — so logging in again wouldn't help.
+   That's a `403`. (The official FastAPI tutorial uses `400` here; `403`
+   is the more precise code.) Splitting the check into two dependencies
+   means a route that *should* accept deactivated users (say,
+   "reactivate my account") can depend on `get_current_user` instead.
+
+**`main.py`:**
+
+7. Locking a route is one parameter:
+   `current_user: UserModel = Depends(get_current_active_user)`. If the
+   dependency raises, the route body never runs. If it returns,
+   `current_user` is a real, active user with a valid token.
+8. `list_items` doesn't even use `current_user` — asking for it is
+   enough to lock the route. `/public` has no such parameter, so it
+   stays open.
+9. `response_model=UserOut` keeps `hashed_password` out of `/users/me`,
+   as on [Password hashing](/en/docs/security/password-hashing).
+10. `AUTH_ERRORS` — only documentation: it lists `401` and `403` in
+    `/docs` for these routes.
+11. **Why `/users/me` and not `/users/{user_id}`.** The token already
+    says who you are. A `/users/{user_id}` route would have to check that
+    the id matches the token, and forgetting that check is a classic bug
+    (any logged-in user reads anyone's data — see
+    [Authorization by ownership](/en/docs/security/ownership)). Routes
+    that act "as me" should take the user from the token, never from the
+    URL.
+12. **Testing the failure paths.** `create_access_token` takes an
+    `expires_delta`, so a test can mint a token that's already expired:
+
+    ```python
+    expired = security.create_access_token("alice", timedelta(minutes=-1))
+    c.get("/users/me", headers={"Authorization": f"Bearer {expired}"})  # 401 Token has expired
+    ```
+
+13. **What's missing: staying logged in.** After 15 minutes the token
+    dies and the user has to type their password again. Making the token
+    last a week would fix that, but a stolen token would then work for a
+    week too. The next page solves it with a second, long-lived refresh
+    token.
+
+## Try it
+
+Log in, then copy `access_token` from the response into the next
+commands:
+
+```bash
+curl -X POST http://127.0.0.1:8000/token -d "username=alice&password=alice-password"
+curl http://127.0.0.1:8000/users/me -H "Authorization: Bearer <paste token>"
+curl http://127.0.0.1:8000/items -H "Authorization: Bearer <paste token>"
+curl http://127.0.0.1:8000/public
+```
+
+And the ways to fail:
+
+```bash
+curl -i http://127.0.0.1:8000/users/me  # 401 Not authenticated
+curl -i http://127.0.0.1:8000/users/me -H "Authorization: Bearer garbage"  # 401 Could not validate credentials
+curl -X POST http://127.0.0.1:8000/token -d "username=carol&password=carol-password"
+curl -i http://127.0.0.1:8000/users/me -H "Authorization: Bearer <paste carol token>"  # 403 Inactive user
+```
+
+| What you send | Status | `detail` |
+|---|---|---|
+| No `Authorization` header | `401` | `Not authenticated` |
+| A token that isn't valid (garbage, edited, wrong key) | `401` | `Could not validate credentials` |
+| An expired token | `401` | `Token has expired` |
+| A valid token for `carol` (deactivated) | `403` | `Inactive user` |
+
+**Try this too:** to see an expired token without waiting 15 minutes,
+put `ACCESS_TOKEN_EXPIRE_MINUTES=1` in `.env`, restart, log in, wait a
+minute, and call `/users/me` again.
+
+**/docs:** click **Authorize** (top right), enter `alice` /
+`alice-password`, and every locked route (shown with a padlock) now
+sends the token for you. Click **Logout** in the same dialog to try them
+without it.
+
+Next: [Refresh tokens](/en/docs/security/refresh-tokens) — staying
+logged in without long-lived access tokens.

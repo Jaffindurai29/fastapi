@@ -1,0 +1,391 @@
+---
+title: "2. Status codes"
+description: HTTPException mattrum sariyaana error code choose panradhu — 400 vs 404 vs 409 — ellathukkum 404 sollama, 500-la crash aagama.
+---
+
+<GithubLink path="example/8/b" />
+
+Ellathukkum `404` answer pannama (illana `500`-la crash aagama)
+**sariyaana** error code choose panradhu. Idhu
+[8/a](/tanglish/docs/validation/field-validation)-oda app-ku `PATCH`
+mattrum `DELETE` add pannudhu, so ovoru code-kum real situations
+irukku. 8/a-oda `validation_items` table-ah share pannudhu.
+
+| Route | Success | Errors |
+|---|---|---|
+| `GET /items` | `200` | — |
+| `GET /items/{item_id}` | `200` | `404` missing |
+| `POST /items` | `201` | `409` name already taken, `422` invalid body |
+| `PATCH /items/{item_id}` | `200` | `400` empty body or `null` value, `404` missing, `409` new name taken, `422` invalid |
+| `DELETE /items/{item_id}` | `204` | `404` missing, `409` still in stock |
+
+## Code
+
+**`database.py`** — topic 6-oda same:
+
+```python title="database.py"
+import os
+
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+load_dotenv()
+
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
+MYSQL_USER = os.getenv("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
+
+# Set DATABASE_URL directly to override everything above (e.g. to point
+# at SQLite for a quick local test with no MySQL server at all).
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
+)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+```
+
+**`models.py`** — 8/a-oda same `validation_items` table:
+
+```python title="models.py"
+from sqlalchemy import Column, Float, Integer, String
+
+from database import Base
+
+
+class ItemModel(Base):
+    __tablename__ = "validation_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(50), nullable=False, unique=True)
+    price = Column(Float, nullable=False)
+    quantity = Column(Integer, nullable=False, default=0)
+```
+
+**`schemas.py`** — 8/a-oda `ItemCreate`, plus oru pudhu `ItemPatch`:
+
+```python title="schemas.py"
+from typing import Optional
+
+from pydantic import BaseModel, Field, field_validator
+
+
+class ItemCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=50)
+    price: float = Field(gt=0, le=1_000_000)
+    quantity: int = Field(default=0, ge=0)
+
+    @field_validator("name")
+    @classmethod
+    def name_not_blank(cls, value: str) -> str:
+        value = value.strip()
+        if value == "":
+            raise ValueError("name must not be blank")
+        return value
+
+
+# Same rules as ItemCreate, but every field is optional — PATCH only
+# sends what changed.
+class ItemPatch(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=50)
+    price: Optional[float] = Field(default=None, gt=0, le=1_000_000)
+    quantity: Optional[int] = Field(default=None, ge=0)
+
+    @field_validator("name")
+    @classmethod
+    def name_not_blank(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        value = value.strip()
+        if value == "":
+            raise ValueError("name must not be blank")
+        return value
+```
+
+**`crud.py`** — `get_item_by_name`, `update_item`, `delete_item` add
+pannudhu:
+
+```python title="crud.py"
+from sqlalchemy.orm import Session
+
+from models import ItemModel
+from schemas import ItemCreate
+
+
+def get_items(db: Session) -> list[ItemModel]:
+    return db.query(ItemModel).order_by(ItemModel.id).all()
+
+
+def get_item(db: Session, item_id: int) -> ItemModel | None:
+    return db.get(ItemModel, item_id)
+
+
+def get_item_by_name(db: Session, name: str) -> ItemModel | None:
+    return db.query(ItemModel).filter(ItemModel.name == name).first()
+
+
+def create_item(db: Session, item: ItemCreate) -> ItemModel:
+    row = ItemModel(name=item.name, price=item.price, quantity=item.quantity)
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def update_item(db: Session, row: ItemModel, changes: dict) -> ItemModel:
+    for field, value in changes.items():
+        setattr(row, field, value)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def delete_item(db: Session, row: ItemModel) -> None:
+    db.delete(row)
+    db.commit()
+
+
+def seed_items(db: Session) -> None:
+    if db.query(ItemModel).count() == 0:
+        db.add_all(
+            [
+                ItemModel(name="Laptop", price=999.99, quantity=5),
+                ItemModel(name="Mouse", price=19.99, quantity=50),
+            ]
+        )
+        db.commit()
+```
+
+**`main.py`** — ovoru failure-kum yosichu choose panna status code:
+
+```python title="main.py"
+from fastapi import Depends, FastAPI, HTTPException, status
+from sqlalchemy.orm import Session
+
+import crud
+from database import Base, SessionLocal, engine, get_db
+from schemas import ItemCreate, ItemPatch
+
+Base.metadata.create_all(bind=engine)
+
+with SessionLocal() as db:
+    crud.seed_items(db)
+
+app = FastAPI()
+
+
+def to_dict(row):
+    return {"id": row.id, "name": row.name, "price": row.price, "quantity": row.quantity}
+
+
+def get_item_or_404(db: Session, item_id: int):
+    row = crud.get_item(db, item_id)
+    if row is None:
+        # 404 Not Found — the thing the URL points at doesn't exist.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Item {item_id} not found",
+        )
+    return row
+
+
+@app.get("/items")
+def list_items(db: Session = Depends(get_db)):
+    return [to_dict(row) for row in crud.get_items(db)]
+
+
+@app.get("/items/{item_id}")
+def get_item(item_id: int, db: Session = Depends(get_db)):
+    return to_dict(get_item_or_404(db, item_id))
+
+
+@app.post("/items", status_code=status.HTTP_201_CREATED)
+def create_item(item: ItemCreate, db: Session = Depends(get_db)):
+    if crud.get_item_by_name(db, item.name) is not None:
+        # 409 Conflict — the request is valid, but clashes with data
+        # that's already stored.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"An item named '{item.name}' already exists",
+        )
+    return to_dict(crud.create_item(db, item))
+
+
+@app.patch("/items/{item_id}")
+def update_item(item_id: int, patch: ItemPatch, db: Session = Depends(get_db)):
+    row = get_item_or_404(db, item_id)
+
+    # exclude_unset=True keeps only the fields the client actually sent.
+    changes = patch.model_dump(exclude_unset=True)
+    if not changes:
+        # 400 Bad Request — well-formed JSON, but it asks for nothing.
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Send at least one field to update",
+        )
+    if None in changes.values():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Fields cannot be set to null",
+        )
+
+    new_name = changes.get("name")
+    if new_name is not None and new_name != row.name:
+        if crud.get_item_by_name(db, new_name) is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"An item named '{new_name}' already exists",
+            )
+
+    return to_dict(crud.update_item(db, row, changes))
+
+
+@app.delete("/items/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_item(item_id: int, db: Session = Depends(get_db)):
+    row = get_item_or_404(db, item_id)
+    if row.quantity > 0:
+        # 409 again — a business rule, not a malformed request.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Item {item_id} still has {row.quantity} in stock; set quantity to 0 first",
+        )
+    crud.delete_item(db, row)
+```
+
+## Line by line
+
+`database.py`, `models.py`, `ItemCreate` ellam
+[8/a](/tanglish/docs/validation/field-validation)-oda same. Pudhusu:
+`ItemPatch`, innum rendu routes, mattrum ovoru failure-kum purpose-a
+choose panna status code.
+
+**`main.py` — errors raise panradhu:**
+
+1. **`raise HTTPException(...)` route-ah stop panni oru error
+   anuppum.** `status_code` HTTP status, `detail` JSON body-a maarum:
+   `{"detail": "Item 99 not found"}`. `status` module numbers-ku names
+   kudukkudhu — verum `404`-ku pathila `status.HTTP_404_NOT_FOUND` — so
+   code enna artham-nu padikkumbodhe puriyum.
+2. **`get_item_or_404` copy-paste-ah thookudhu.** `GET`, `PATCH`,
+   `DELETE` moonukkum "row-ah kandupidi illana 404 answer pannu" venum,
+   so adhu oru helper-la irukku. `HTTPException` oru *exception*
+   dhaane, so helper-kulla irundhu raise pannaalum full request-um
+   mudinjidum — route oru return value-ah check pannave vendaam. Helper
+   return aana, row irukku-nu artham.
+
+**`POST` — duplicates-ku `409`:**
+
+3. **Duplicate check insert-ku *munnadiye* run aagudhu:**
+   `crud.get_item_by_name(db, item.name)` andha name-oda already oru
+   row irukka-nu paakkum, irundha route `409 Conflict` raise pannum.
+   Idhu 8/a-oda `500`-ah fix pannudhu. Yen `409`, `422` illa? Body
+   perfect-a valid — ovoru Pydantic rule-aiyum pass pannuchu — aana
+   **already irukra data-oda conflict aagudhu**. Check-ku-um insert-ku-um
+   naduvula rendu requests race panna, safety net-a `unique=True`
+   column apdiye irukku.
+
+**`schemas.py` — `ItemPatch`:**
+
+4. **Ovoru field-um optional, same rules.** `PATCH` maarinadha mattum
+   anuppum, so ovoru field-um `default=None`-oda `Optional[...]`.
+   `Field(gt=0)` mattrum mattha rules anuppina edhukkum innum apply
+   aagum — `{"price": -1}` innum `422` dhan. Validator first
+   `if value is None: return value` check pannum, yen-na `None`-ku
+   `.strip()` illa.
+
+**`PATCH` — `400`, `404`, `409`:**
+
+5. **`patch.model_dump(exclude_unset=True)` — client real-a enna
+   anuppunaanga?** `{"price": 899}` body-ku idhu `{"price": 899}`
+   kudukkum, `{"name": None, "price": 899, "quantity": None}` **illa**.
+   Yentha fields explicit-a set aachu, yedhu defaults-la irundhu
+   fill aachu-nu Pydantic nyabagam vachukkum; `exclude_unset=True`
+   first type-ah mattum vachukkum. Adhunaala dhan oru generic
+   `crud.update_item` `setattr` vachi edha combination fields-aiyum
+   apply panna mudiyudhu.
+6. **Empty `{}` na `400`.** Adhu empty dict kudukkum, so
+   `if not changes:` `400 Bad Request` raise pannum — request valid
+   JSON, validation pass aachu, aana edhuvum kekkala.
+7. **`null` explicit-a reject aagudhu.** `{"price": null}` "set" dhan,
+   so `exclude_unset`-ah survive pannidum. Aana columns
+   `nullable=False`, so adha write pannina database `500`-oda crash
+   aagum. `if None in changes.values():` check adhukku pathila `400`
+   answer pannum.
+8. **Rename-um conflicts-ku check pannum — aana name real-a maarina
+   mattum.** `new_name != row.name` na, Laptop-ku mela
+   `PATCH {"name": "Laptop"}` panna problem illa; illana adhu thannoda
+   thaane "conflict" aagidum.
+
+**`DELETE` — `409` mattrum `204`:**
+
+9. **Business rule-um `409` dhan.** `row.quantity > 0`-a irukra
+   varaikkum `DELETE` refuse pannum. Request-la edhuvum malformed illa —
+   adhu item-oda *current state*-oda conflict aagudhu. Message client-ku
+   eppadi fix pannanum-nu sollum: first quantity-ah 0 aakkunga.
+10. **`DELETE` `204 No Content` return pannum** (decorator-la irukra
+    `status_code=status.HTTP_204_NO_CONTENT` moolama), function edhuvum
+    return pannadhu. Definition-padi `204`-ku body illa.
+
+**`crud.py`:**
+
+11. `get_item_by_name` — `.filter(ItemModel.name == name).first()`
+    first matching row-ah illana `None`-ah return pannum.
+12. `update_item(db, row, changes)` — dict-ah loop panni
+    `setattr(row, field, value)` pannum, adhu `row.price = 899`-ah
+    generic-a ezhudhinadhu dhan. Idhu id illa, row-ah eduthukkum, yen-na
+    `main.py` already adha fetch pannidichu.
+13. `delete_item(db, row)` — `db.delete(row)` apparam `db.commit()`.
+    `crud.py`-ku innum HTTP pathi edhuvum theriyaadhu: ovoru status-code
+    decision-um `main.py`-la dhan.
+
+## Yentha code eppo?
+
+| Code | Meaning | Inga example |
+|---|---|---|
+| `400 Bad Request` | Request well-formed dhan, aana artham illa | `PATCH` with `{}` |
+| `404 Not Found` | URL-la irukra thing exist aagala | `GET /items/999` |
+| `409 Conflict` | Valid request, aana stored data-oda clash | duplicate name; stock-la irukkumbodhe delete |
+| `422 Unprocessable Content` | Body/params validation rule-ah break pannuchu | `price: -1` (FastAPI idha unga-ku anuppum) |
+| `500 Internal Server Error` | Unga code crash aachu. Purpose-a eppovum anuppadheenga | — |
+
+## Try it
+
+`-i` status line-ah print pannum, so ovoru code-aiyum paakkalaam. Idha
+order-a run pannunga — `409`, `400`, `409`, `200`, apparam `204`
+expect pannunga:
+
+```bash
+curl -i -X POST http://127.0.0.1:8000/items -H "Content-Type: application/json" -d "{\"name\": \"Laptop\", \"price\": 1}"
+curl -i -X PATCH http://127.0.0.1:8000/items/1 -H "Content-Type: application/json" -d "{}"
+curl -i -X DELETE http://127.0.0.1:8000/items/1
+curl -i -X PATCH http://127.0.0.1:8000/items/1 -H "Content-Type: application/json" -d "{\"quantity\": 0}"
+curl -i -X DELETE http://127.0.0.1:8000/items/1
+```
+
+(Item 1-ah already munnadi delete pannirundha, first
+`curl http://127.0.0.1:8000/items` run panni irukra oru id-ah use
+pannunga.)
+
+**Postman:** Method `PATCH`, URL `http://127.0.0.1:8000/items/1`, Body →
+raw → JSON:
+
+```json
+{"price": 899}
+```
+
+Adutha step: [Exception handlers](/tanglish/docs/validation/exception-handlers)
+— ovoru error-kum oru consistent shape, error handling edhuvume illadha
+routes.

@@ -1,0 +1,11 @@
+{
+  "title": "Relationships",
+  "pages": [
+    "index",
+    "one-to-many",
+    "nested-responses",
+    "many-to-many",
+    "transactions",
+    "soft-delete"
+  ]
+}

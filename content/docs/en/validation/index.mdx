@@ -1,0 +1,146 @@
+---
+title: Validation & Errors
+description: Strict about what comes in, precise about what goes out when something is wrong, and careful about which fields leave the server.
+---
+
+<GithubLink path="example/8" />
+
+[MySQL + CRUD](/en/docs/mysql-crud) trusted whatever the client sent and
+only ever answered `404`. This topic makes the API:
+
+- **strict about what comes in** — validation rules on every field, so
+  bad input is rejected before your route even runs;
+- **precise about what goes out when something is wrong** — the right
+  status code for each failure, and one consistent error shape;
+- **careful about which fields leave the server at all** — a
+  `response_model` that filters internal columns out of every response.
+
+The item now has three fields instead of one, so there's actually
+something to validate: `name` (unique), `price`, and `quantity`.
+
+## Same layered layout
+
+Every letter uses the same split you already know from
+[MySQL + CRUD](/en/docs/mysql-crud):
+
+| File | Responsibility |
+|---|---|
+| `database.py` | env vars, `engine`, `SessionLocal`, `Base`, `get_db()` — byte-for-byte the same as topic 6 |
+| `models.py` | `ItemModel` — the SQLAlchemy table |
+| `schemas.py` | Pydantic models — now with validation rules |
+| `crud.py` | plain functions that talk to the database |
+| `main.py` | the `FastAPI()` app and its routes |
+| `exceptions.py` | **8/c only** — `AppError` and its subclasses, business errors that each carry a status code and an error code |
+
+## Two tables, not one
+
+- **8/a, 8/b and 8/c share one table, `validation_items`.** Their
+  `models.py` files are identical, so if you run them one after another
+  against the same database, they see each other's rows. If you
+  created a "Desk" in 8/a, it's still there in 8/b — and posting "Desk"
+  again in 8/b gives you a `409`, which is exactly the point.
+- **8/d has its own table, `response_model_items`**, because it adds two
+  columns (`supplier_cost` and `created_at`). Giving it a separate table
+  means the 8/a–c table never has to change shape under you.
+
+Both tables are created automatically on startup by
+`Base.metadata.create_all(...)` and seeded with a "Laptop" and a "Mouse"
+if they're empty.
+
+## Which status code when?
+
+The one table to remember from this topic. [8/b](/en/docs/validation/status-codes)
+uses every one of these on purpose (except `500`):
+
+| Code | Meaning | Example here |
+|---|---|---|
+| `400 Bad Request` | The request is well-formed, but makes no sense | `PATCH` with `{}` — valid JSON that asks for nothing |
+| `404 Not Found` | The thing in the URL doesn't exist | `GET /items/999` |
+| `409 Conflict` | A valid request that clashes with what's stored | a duplicate name; deleting an item that's still in stock |
+| `422 Unprocessable Content` | The body or a parameter broke a validation rule | `price: -1`, `/items/abc` — FastAPI sends this for you |
+| `500 Internal Server Error` | Your code crashed | never send this on purpose — it means a bug |
+
+A quick way to choose: if Pydantic can tell from the request alone that
+it's wrong, it's a `422` (and FastAPI does it for you). If you need the
+database to know it's wrong, it's a `404` (not there) or a `409`
+(clashes with what's there). If it's valid but meaningless, it's a
+`400`.
+
+## Setup
+
+No new packages — `Field`, `field_validator` and `ConfigDict` all come
+with Pydantic, which FastAPI already installed. If you're starting fresh:
+
+```bash
+pip install fastapi uvicorn sqlalchemy pymysql python-dotenv
+```
+
+The database setup is exactly the same as
+[MySQL + CRUD](/en/docs/mysql-crud) — same `fastapi_learn` database,
+same `MYSQL_*` environment variables or `.env` file, same SQLite
+fallback:
+
+```bash
+export DATABASE_URL="sqlite:///./test.db"
+```
+
+## Running this topic
+
+Backend only. Pick a letter and run it:
+
+```bash
+cd example/8/a   # or b, c, d
+uvicorn main:app --reload
+```
+
+Open [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs) to try every
+route from the browser — the Swagger UI shows the validation rules and
+(in 8/d) the exact response schemas.
+
+## The pieces every page below shares
+
+`database.py` is identical in all four folders — and identical to topic
+6's. See the [MySQL + CRUD index](/en/docs/mysql-crud) for it explained
+line by line.
+
+**The table (in `models.py`, 8/a–8/c):**
+
+```python
+class ItemModel(Base):
+    __tablename__ = "validation_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(50), nullable=False, unique=True)
+    price = Column(Float, nullable=False)
+    quantity = Column(Integer, nullable=False, default=0)
+```
+
+## Line by line: the table (in models.py)
+
+1. `__tablename__ = "validation_items"` — a new table, so this topic
+   doesn't collide with topic 6's single-column `items` table.
+2. `id = Column(Integer, primary_key=True, autoincrement=True)` — same
+   auto-incrementing primary key as before.
+3. `name = Column(String(50), nullable=False, unique=True)` — up to 50
+   characters, required, and **unique**: the database itself refuses a
+   second "Laptop". This is the last line of defence; 8/a shows what
+   happens when it's the *only* line of defence (a `500`), and 8/b adds a
+   proper check in front of it.
+4. `price = Column(Float, nullable=False)` — a required decimal number.
+5. `quantity = Column(Integer, nullable=False, default=0)` — a required
+   whole number; if the insert leaves it out, SQLAlchemy fills in `0`.
+
+Notice the column rules and the Pydantic rules overlap on purpose:
+`String(50)` in the table matches `max_length=50` in the schema. The
+schema rejects bad input politely with a `422`; the column is the
+safety net if something ever slips past.
+
+8/d's `models.py` is the same plus two columns — it's covered on the
+[response_model page](/en/docs/validation/response-model).
+
+## Pages in this topic
+
+1. [Field validation](/en/docs/validation/field-validation) — `Field(...)` rules, a `@field_validator`, and what a `422` looks like.
+2. [Status codes](/en/docs/validation/status-codes) — `HTTPException` and picking `400` vs `404` vs `409`.
+3. [Exception handlers](/en/docs/validation/exception-handlers) — one consistent error shape for every error the API can return.
+4. [response_model](/en/docs/validation/response-model) — return ORM rows directly, hide internal fields, `201`/`204`.

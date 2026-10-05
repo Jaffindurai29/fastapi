@@ -1,0 +1,458 @@
+---
+title: "2. Nested responses"
+description: Ovoru item-kulla category, category-kulla items — selectinload/joinedload eppadi N+1 query problem-ah niruthudhu.
+---
+
+<GithubLink path="example/11/b" />
+
+[One-to-many](/tanglish/docs/relationships/one-to-many)-oda same
+tables, aana vera responses. Ippo oru item `category_id` mattum illa,
+adhoda **full category**-aiyum kondu varum; oru category adhoda
+**items list**-ah kondu varum. Routes related rows-ah munnadiye
+`selectinload` / `joinedload` vachi load pannum, so items list-ku
+ovoru item-kum oru query illa — mothama **2 queries** dhan.
+Read-only: data add panna 11/a use pannunga.
+
+| Route | Status | Response |
+|---|---|---|
+| `GET /items` | `200` | `list[ItemOut]`, ovvonnulayum nested `category` |
+| `GET /items/{item_id}` | `200`, `404` | `ItemOut` |
+| `GET /categories` | `200` | `list[CategoryOut]` (items illa) |
+| `GET /categories/{category_id}` | `200`, `404` | `CategoryWithItems` |
+
+## Folder
+
+```text
+example/11/b/
+├── .env.example
+├── __init__.py
+├── crud.py
+├── database.py
+├── main.py
+├── models.py
+├── README.md
+├── schemas.py
+├── STEPS.md
+└── routers/
+    ├── __init__.py
+    ├── categories.py
+    └── items.py
+```
+
+## Code
+
+**`database.py`** — maarala:
+
+```python title="database.py"
+import os
+
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+load_dotenv()
+
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
+MYSQL_USER = os.getenv("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
+
+# Set DATABASE_URL directly to override everything above (e.g. to point
+# at SQLite for a quick local test with no MySQL server at all).
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
+)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+```
+
+**`models.py`** — 11/a-oda exact same, adhanala dhan rendum tables
+share pannalaam:
+
+```python title="models.py"
+from sqlalchemy import Column, Float, ForeignKey, Integer, String
+from sqlalchemy.orm import relationship
+
+from database import Base
+
+
+# The "one" side: one category has many items.
+class CategoryModel(Base):
+    __tablename__ = "rel_categories"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(50), nullable=False, unique=True)
+
+    # Not a column. A Python-side shortcut: category.items runs
+    # "SELECT * FROM rel_items WHERE category_id = <this id>" for you.
+    items = relationship("ItemModel", back_populates="category")
+
+
+# The "many" side: every item belongs to exactly one category.
+class ItemModel(Base):
+    __tablename__ = "rel_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(50), nullable=False)
+    price = Column(Float, nullable=False)
+    # The real column. ForeignKey tells the database "this must match an
+    # id in rel_categories". nullable=False: no item without a category.
+    category_id = Column(Integer, ForeignKey("rel_categories.id"), nullable=False)
+
+    # The other end of CategoryModel.items. back_populates links the two,
+    # so setting item.category also appends the item to category.items.
+    category = relationship("CategoryModel", back_populates="items")
+```
+
+**`schemas.py`** — kulla vera schemas irukra schemas:
+
+```python title="schemas.py"
+from pydantic import BaseModel, ConfigDict
+
+
+class CategoryOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+
+
+# A cut-down item with NO category field. Used inside CategoryWithItems,
+# where the category is already the outer object. If we reused ItemOut
+# there, every item would repeat its category, which would list its
+# items, which would repeat the category... forever.
+class ItemSummary(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    price: float
+
+
+# An item with its category nested inside, instead of category_id.
+# from_attributes reads row.category (the relationship) and turns that
+# CategoryModel into a CategoryOut.
+class ItemOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    price: float
+    category: CategoryOut
+
+
+# A category with its items nested inside (read from row.items).
+class CategoryWithItems(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    items: list[ItemSummary]
+```
+
+**`crud.py`** — same queries, ippo munnadiye enna load pannanum-nu
+SQLAlchemy-kitta solludhu:
+
+```python title="crud.py"
+from sqlalchemy.orm import Session, joinedload, selectinload
+
+from models import CategoryModel, ItemModel
+
+
+# --- categories ---------------------------------------------------------
+
+def get_categories(db: Session) -> list[CategoryModel]:
+    return db.query(CategoryModel).order_by(CategoryModel.id).all()
+
+
+def get_category_with_items(db: Session, category_id: int) -> CategoryModel | None:
+    # selectinload: after loading the category, run ONE more query
+    # "SELECT ... FROM rel_items WHERE category_id IN (...)" and attach
+    # the results to category.items.
+    return (
+        db.query(CategoryModel)
+        .options(selectinload(CategoryModel.items))
+        .filter(CategoryModel.id == category_id)
+        .first()
+    )
+
+
+# --- items --------------------------------------------------------------
+
+def get_items(db: Session) -> list[ItemModel]:
+    # Without .options(...) this would be the N+1 problem: 1 query for
+    # the items, then 1 more per item the moment Pydantic reads
+    # item.category. selectinload makes it 2 queries total, however
+    # many items there are.
+    return (
+        db.query(ItemModel)
+        .options(selectinload(ItemModel.category))
+        .order_by(ItemModel.id)
+        .all()
+    )
+
+
+def get_item(db: Session, item_id: int) -> ItemModel | None:
+    # joinedload: fetch the item AND its category in a single query
+    # with a JOIN. Good fit for "one row plus its parent".
+    return (
+        db.query(ItemModel)
+        .options(joinedload(ItemModel.category))
+        .filter(ItemModel.id == item_id)
+        .first()
+    )
+
+
+# --- seed ---------------------------------------------------------------
+
+# Same tables and same seed data as 11/a, so whichever runs first fills
+# them and the other one skips.
+def seed(db: Session) -> None:
+    if db.query(CategoryModel).count() == 0:
+        electronics = CategoryModel(name="Electronics")
+        books = CategoryModel(name="Books")
+        db.add_all(
+            [
+                ItemModel(name="Laptop", price=999.99, category=electronics),
+                ItemModel(name="Mouse", price=19.99, category=electronics),
+                ItemModel(name="FastAPI Guide", price=39.0, category=books),
+                ItemModel(name="SQL Basics", price=25.5, category=books),
+            ]
+        )
+        db.commit()
+```
+
+**`routers/categories.py`:**
+
+```python title="routers/categories.py"
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+
+import crud
+from database import get_db
+from schemas import CategoryOut, CategoryWithItems
+
+router = APIRouter(prefix="/categories", tags=["categories"])
+
+
+@router.get("", response_model=list[CategoryOut])
+def list_categories(db: Session = Depends(get_db)):
+    return crud.get_categories(db)
+
+
+@router.get("/{category_id}", response_model=CategoryWithItems)
+def get_category(category_id: int, db: Session = Depends(get_db)):
+    row = crud.get_category_with_items(db, category_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Category not found")
+    return row
+```
+
+**`routers/items.py`:**
+
+```python title="routers/items.py"
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+
+import crud
+from database import get_db
+from schemas import ItemOut
+
+router = APIRouter(prefix="/items", tags=["items"])
+
+
+@router.get("", response_model=list[ItemOut])
+def list_items(db: Session = Depends(get_db)):
+    return crud.get_items(db)
+
+
+@router.get("/{item_id}", response_model=ItemOut)
+def get_item(item_id: int, db: Session = Depends(get_db)):
+    row = crud.get_item(db, item_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Item not found")
+    return row
+```
+
+**`main.py`:**
+
+```python title="main.py"
+from fastapi import FastAPI
+
+import crud
+from database import Base, SessionLocal, engine
+from routers import categories, items
+
+Base.metadata.create_all(bind=engine)
+
+with SessionLocal() as db:
+    crud.seed(db)
+
+app = FastAPI()
+
+app.include_router(categories.router)
+app.include_router(items.router)
+```
+
+## Line by line
+
+Ella changes-um `schemas.py` (JSON eppadi irukkum) mattrum `crud.py`
+(rows eppadi load aagum)-la dhan. Routers 11/a-oda maadhiriye
+irukku.
+
+**`schemas.py` — nesting:**
+
+1. **`ItemOut`-la `category: CategoryOut`** — innoru schema type-oda
+   oru field. `from_attributes=True` irukradhala Pydantic `row.category`-ah
+   read pannum. Adhu 11/a-oda `relationship()`, so adhu oru
+   `CategoryModel` object, Pydantic adha item-ah convert panra maadhiriye
+   `CategoryOut`-a convert pannum. Result: JSON object-kulla JSON object:
+
+   ```json
+   {"id": 3, "name": "FastAPI Guide", "price": 39.0, "category": {"id": 2, "name": "Books"}}
+   ```
+
+2. **`CategoryWithItems`-la `items: list[ItemSummary]`** — adhe idea
+   opposite direction-la: `row.items` `ItemModel` rows-oda list,
+   ovvonnum `ItemSummary`-a maarum.
+
+3. **`ItemOut` illama yen `ItemSummary`?** `items: list[ItemOut]`
+   vachirundha enna nadakkum-nu follow pannunga:
+
+   ```text
+   category -> items[0] (ItemOut) -> category -> items[0] -> category -> ...
+   ```
+
+   Ovoru item-kulla adhoda category, adhukulla adhoda items, adhukulla
+   thirumba category... Relationships rendu pakkamum point pannudhu, so
+   "ellathaiyum" nest pannina mudive illa. Oru level-la cut pannaalum,
+   andha category-oda ovoru item-kulla-um same category repeat aagum.
+   Fix: inner position-ku oru chinna second schema — `ItemSummary`-la
+   `category` field **illa**. `CategoryWithItems`-kulla category dhan
+   outer object, so client-ku adhu already theriyum.
+
+   Rule of thumb: **oru response-la oru direction-la mattum nest
+   pannunga**, inner objects-ku back-reference illadha schema kudunga.
+
+**N+1 problem:**
+
+4. 11/a maadhiri query vachi `GET /items`-ku plain lazy loading enna
+   pannudhu-nu paarunga:
+
+   ```python
+   rows = db.query(ItemModel).all()   # 1 query: SELECT ... FROM rel_items
+   ```
+
+   Apparam Pydantic ovoru `ItemOut`-aiyum build panni `row.category`-ah
+   read pannum. Category load aagala, so SQLAlchemy andha item-kaga
+   angeye **innoru** query run pannum:
+
+   ```text
+   SELECT ... FROM rel_items                          -- 1
+   SELECT ... FROM rel_categories WHERE id = 1        -- for Laptop
+   SELECT ... FROM rel_categories WHERE id = 2        -- for FastAPI Guide
+   ...one more per different category...
+   ```
+
+   Adhu **list-ku 1 query + related rows-ku N queries varaikkum** —
+   adhanala dhan "N+1". Real counts:
+
+   | Request | `.options(...)` illama | Fix-oda |
+   |---|---|---|
+   | `GET /items`, 2 categories-la 4 seeded items | **3** (1 + 2) | **2** (`selectinload`) |
+   | `GET /items`, 500 categories-la 500 items | **501** | **2** (`selectinload`) |
+   | `GET /items/3`, oru item plus adhoda category | 2 | **1** (`joinedload`) |
+   | `GET /categories/1`, oru category plus adhoda items | 2 | **2** (`selectinload`) |
+
+   Seeded data-ku yen 5 illama 3 mattum? Andha category already session-la
+   load aagirundha SQLAlchemy lookup-ah skip pannum, so rendavadhu
+   Electronics item-kum rendavadhu Books item-kum extra cost illa. 500
+   vera vera categories-la 500 items-na skip panna edhuvum illa: oru
+   request-ku 501 queries, ovvonnum MySQL-ku oru round trip. Opposite
+   direction — categories list, ovvonnum `.items` read pannum — eppovum
+   exact-a 1 + ovoru category-kum onnu.
+
+   Error edhuvum varaadhu, JSON-um correct, adhanala dhan N+1 miss
+   panradhu romba easy. Adhu apparam "indha endpoint slow aayiduchu"-nu
+   mattum dhan theriyum.
+
+**`crud.py` — fixes:**
+
+5. **`get_items`-la `selectinload(ItemModel.category)`** — oru extra
+   query-la fix pannum:
+
+   ```text
+   SELECT ... FROM rel_items ORDER BY id                       -- 1
+   SELECT ... FROM rel_categories WHERE id IN (1, 2)           -- 2
+   ```
+
+   First result-la irundhu ella `category_id`-aiyum collect panni,
+   ellathaiyum orey time-la fetch pannum. 4 items-o 4000 items-o,
+   **mothama 2 queries**. Apparam Pydantic `row.category` read pannum
+   bodhu, adhu already ange irukkum.
+
+6. **`get_item`-la `joinedload(ItemModel.category)`** — orey query-la
+   pannum:
+
+   ```text
+   SELECT ... FROM rel_items LEFT OUTER JOIN rel_categories ON ... WHERE rel_items.id = ?
+   ```
+
+   Oru query dhan, yen-na category columns item-oda same row-la
+   thirumbi varudhu. Gavanichu paarunga, `.options(...)` attach panna
+   mudiyanum-nu `get_item` `db.get(...)`-ku pathila `.filter(...).first()`
+   use pannudhu.
+
+7. **`get_category_with_items`-la `selectinload(CategoryModel.items)`**
+   — 2 queries: category, apparam adhoda items
+   (`WHERE category_id IN (...)`).
+
+   **Edha choose pannurathu:**
+   - **`joinedload`** "many-to-one"-ku (oru item-oda single category),
+     especially oru row-ku. JOIN konjam columns add pannum, avlo dhan.
+   - **`selectinload`** "one-to-many" lists-ku (oru category-oda items).
+     Anga JOIN pannina ovoru item row-layum category columns repeat
+     aagum; `IN (...)` query adha avoid pannum.
+
+8. **`get_categories`-la `.options(...)` edhuvum illa** — `CategoryOut`-la
+   `items` field illa, so `row.items` read aagave aagaadhu, lazy edhuvum
+   fire aagaadhu. Response real-a use panradha mattum load pannunga.
+
+**Queries-ah neengale paarunga:**
+
+9. `database.py`-la `create_engine`-ku `echo=True` pass pannunga, ovoru
+   SQL statement-um uvicorn console-la print aagum. `get_items`-la
+   irundhu `.options(...)`-ah remove panni, `GET /items` call panni,
+   `SELECT`-ah count pannunga; thirumba pottu thirumba count pannunga.
+   Real use-la `echo=True`-ah on-la vidaadheenga: ovoru query-aiyum log
+   pannum.
+
+## Try it
+
+```bash
+curl http://127.0.0.1:8000/items/3
+curl http://127.0.0.1:8000/categories/1
+curl -i http://127.0.0.1:8000/categories/999  # 404
+```
+
+```json
+{"id": 1, "name": "Electronics", "items": [{"id": 1, "name": "Laptop", "price": 999.99}, {"id": 2, "name": "Mouse", "price": 19.99}]}
+```
+
+Category-kulla irukra items-la `category` field **illa** — purpose-a
+dhan, step 3 paarunga.
+
+Adutha step: [Many-to-many](/tanglish/docs/relationships/many-to-many)
+— association table moola tags.

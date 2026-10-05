@@ -1,0 +1,407 @@
+---
+title: "2. JWT login"
+description: POST /token password-ah check panni 15 nimishathula expire aagura oru signed JSON Web Token kudukkum — yaar venumnaalum read pannalaam, yaaraalum forge panna mudiyaadhu.
+---
+
+<GithubLink path="example/12/b" />
+
+Ippo login oru **token** return pannum: password-ku pathila client
+adutha requests-la anuppura oru signed string. `POST /token` password-ah
+check pannum ([Password hashing](/tanglish/docs/security/password-hashing)-la
+maadhiri Argon2) apparam 15 nimishathula expire aagura oru JWT
+kudukkum. `GET /token/inspect` oru token-ah piriche kaattum — yaar
+venumnaalum adha **read** pannalaam, aana server mattum dhan valid-aana
+onna **create** panna mudiyum-nu paakalaam.
+
+| Route | Description |
+|---|---|
+| `POST /token` | Form fields `username`, `password` → `access_token` + `token_type: "bearer"`; thappu-na `401` |
+| `GET /token/inspect?token=...` | Header + payload (key **illama** read pannadhu), plus signature mattrum expiry sari-yaa-nu; JWT-e illana `400` |
+
+Table: `sec_users`, 12/c, 12/d, 12/i-oda share aagudhu. Seeded users:
+`alice`, `bob`, `admin` (password `<name>-password`), mattrum `carol` /
+`carol-password` (deactivated, adutha page-la irundhu idhu matter
+aagum).
+
+## Code
+
+**`config.py`** — secret key mattrum token lifetimes, environment-la
+irundhu:
+
+```python title="config.py"
+import os
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# Signs every token. Anyone who knows it can mint valid tokens for any
+# user, so in production set a long random value in .env, generated with:
+#   python -c "import secrets; print(secrets.token_hex(32))"
+SECRET_KEY = os.getenv("SECRET_KEY", "dev-only-secret-change-me-in-production-0123456789")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "15"))
+REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7"))
+```
+
+**`database.py`** — topic 6-oda same:
+
+```python title="database.py"
+import os
+
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+load_dotenv()
+
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
+MYSQL_USER = os.getenv("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
+
+# Set DATABASE_URL directly to override everything above (e.g. to point
+# at SQLite for a quick local test with no MySQL server at all).
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
+)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+```
+
+**`models.py`** — `sec_users`, ippo `is_active`-oda:
+
+```python title="models.py"
+from sqlalchemy import Boolean, Column, Integer, String
+
+from database import Base
+
+
+# Shared by 12/b, 12/c, 12/d and 12/i. Keep it identical in all four:
+# create_all never alters an existing table.
+class UserModel(Base):
+    __tablename__ = "sec_users"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    username = Column(String(30), nullable=False, unique=True)
+    hashed_password = Column(String(255), nullable=False)
+    is_active = Column(Boolean, nullable=False, default=True)
+```
+
+**`schemas.py`** — token response, mattrum oru safe user shape:
+
+```python title="schemas.py"
+from pydantic import BaseModel, ConfigDict
+
+
+# The OAuth2 spec fixes these two field names, and /docs relies on them.
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+
+class UserOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    username: str
+    is_active: bool
+```
+
+**`security.py`** — hashing (munnadi maadhiri) plus tokens create panni
+check panradhu:
+
+```python title="security.py"
+from datetime import datetime, timedelta, timezone
+
+import jwt
+from pwdlib import PasswordHash
+
+from config import ACCESS_TOKEN_EXPIRE_MINUTES, ALGORITHM, SECRET_KEY
+
+# Argon2, exactly as in 12/a.
+password_hash = PasswordHash.recommended()
+
+
+def hash_password(password: str) -> str:
+    return password_hash.hash(password)
+
+
+def verify_password(password: str, hashed: str) -> bool:
+    return password_hash.verify(password, hashed)
+
+
+def create_access_token(username: str, expires_delta: timedelta | None = None) -> str:
+    if expires_delta is None:
+        expires_delta = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    payload = {
+        "sub": username,  # who the token is about (the "subject")
+        "exp": datetime.now(timezone.utc) + expires_delta,  # stored as a Unix timestamp
+        "type": "access",
+    }
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def decode_token(token: str) -> dict:
+    # Checks the signature AND the exp claim. Raises jwt.InvalidTokenError
+    # (or its subclass jwt.ExpiredSignatureError) if either fails.
+    # algorithms= is a whitelist: never let the token pick its own.
+    return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+```
+
+**`crud.py`** — look up, authenticate, seed:
+
+```python title="crud.py"
+from sqlalchemy.orm import Session
+
+from models import UserModel
+from security import hash_password, verify_password
+
+
+def get_user_by_username(db: Session, username: str) -> UserModel | None:
+    return db.query(UserModel).filter(UserModel.username == username).first()
+
+
+def authenticate(db: Session, username: str, password: str) -> UserModel | None:
+    user = get_user_by_username(db, username)
+    if user is None or not verify_password(password, user.hashed_password):
+        return None
+    return user
+
+
+def seed_users(db: Session) -> None:
+    if db.query(UserModel).count() == 0:
+        db.add_all(
+            [
+                UserModel(username="alice", hashed_password=hash_password("alice-password")),
+                UserModel(username="bob", hashed_password=hash_password("bob-password")),
+                UserModel(username="admin", hashed_password=hash_password("admin-password")),
+                # Deactivated account: can log in, but the protected
+                # routes from 12/c on turn it away with 403.
+                UserModel(username="carol", hashed_password=hash_password("carol-password"), is_active=False),
+            ]
+        )
+        db.commit()
+```
+
+**`main.py`** — login route mattrum inspect route:
+
+```python title="main.py"
+import jwt
+from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi.security import OAuth2PasswordRequestForm
+from sqlalchemy.orm import Session
+
+import crud
+from database import Base, SessionLocal, engine, get_db
+from schemas import Token
+from security import create_access_token, decode_token
+
+Base.metadata.create_all(bind=engine)
+
+with SessionLocal() as db:
+    crud.seed_users(db)
+
+app = FastAPI()
+
+
+# OAuth2PasswordRequestForm reads FORM fields `username` and `password`
+# (not JSON). That's what the OAuth2 spec says, and it's what the
+# "Authorize" button in /docs sends.
+@app.post("/token", response_model=Token,
+          responses={401: {"description": "Incorrect username or password"}})
+def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    user = crud.authenticate(db, form_data.username, form_data.password)
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return {"access_token": create_access_token(user.username), "token_type": "bearer"}
+
+
+# Teaching route: what's inside a token, and is it genuine?
+@app.get("/token/inspect", responses={400: {"description": "Not a JWT at all"}})
+def inspect_token(token: str):
+    try:
+        # No key needed: the header and payload are only base64.
+        header = jwt.get_unverified_header(token)
+        payload = jwt.decode(token, options={"verify_signature": False})
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=400, detail="Not a JWT")
+
+    try:
+        # The real check: signature + expiry, using SECRET_KEY.
+        verified = decode_token(token)
+        return {"header": header, "payload": payload, "valid": True, "verified_payload": verified}
+    except jwt.InvalidTokenError as exc:
+        return {"header": header, "payload": payload, "valid": False, "error": str(exc)}
+```
+
+## Line by line
+
+**Yen token-e venum:**
+
+1. HTTP requests-ku naduvula ungala marandhudum. Token illana, client
+   ovoru call-layum password anuppanum. Adhukku pathila, password-ah
+   **oru thadava** `POST /token`-ku anuppi, "idhu alice, 10:15 varaikkum"
+   nu sollura oru signed token-ah vaangum. Adutha ella request-um
+   token-ah carry pannum, server signature-ah mattum check pannaa
+   podhum — password lookup illa.
+
+**JWT-kulla enna irukku:**
+
+2. JWT na dots-aala join aana moonu base64url chunks,
+   `header.payload.signature`:
+
+   ```
+   eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhbGljZSIsImV4cCI6MTc5MTE5Njc3NSwidHlwZSI6ImFjY2VzcyJ9.NsiOoyiFzply8_zi-_4uHbrN66UwKP3twAZ6mv1BYPo
+   ```
+
+   Mudhal rendu chunks-ah decode pannunga (edhavadhu base64 decoder
+   podhum, key venaam), idhu kidaikkum:
+
+   ```jsonc
+   // header: how it was signed
+   {"alg": "HS256", "typ": "JWT"}
+
+   // payload: the "claims"
+   {"sub": "alice", "exp": 1791196775, "type": "access"}
+   ```
+
+   - `sub` ("subject") — token yaarai pathi-nu.
+   - `exp` ("expires") — oru Unix timestamp: 1 January 1970 UTC-la
+     irundhu evlo seconds. Andha moment-ku appuram token dead.
+   - `type` — namma sontha claim, `"access"`; appuram access tokens-ah
+     refresh tokens-la irundhu pirikkum.
+   - Moonavadhu chunk, **signature**, mudhal rendu chunks-oda
+     HMAC-SHA256, `SECRET_KEY` vachi. Adhu verum bytes; read panna
+     onnum illa.
+
+3. **Base64 encryption illa.** Header mattrum payload *encode* mattum
+   dhan aagirukku, so token kaila irukra yaar venumnaalum read
+   pannalaam. `/token/inspect` key-e illama decode panni idha prove
+   pannudhu (`jwt.get_unverified_header` mattrum
+   `verify_signature: False`). So **payload-la secrets eppovum
+   podadheenga**: passwords illa, hashes illa, card numbers illa.
+   Username mattrum expiry fine. (Real code signature check-ah debugging-ku
+   mattum dhan off pannum, access decide panna eppovum illa.)
+4. **Signature yaarum tamper pannala-nu prove pannum.** Payload-la oru
+   character maathunga (`"sub": "alice"`-ah `"admin"`-a) — signature
+   match aagadhu, yen-na `SECRET_KEY` therinjavanga mattum dhan matching
+   signature compute panna mudiyum. Apparam `/token/inspect`
+   `decode_token` vachi real check run pannum, tamper aana token
+   `"valid": false`-oda `"Signature verification failed"` nu varum,
+   adhoda payload `admin` nu irundhaalum.
+
+**`config.py`:**
+
+5. `SECRET_KEY` — idhu therinjavanga yaar perlayum token mint
+   pannalaam, so adhu `.env`-la irukkum (git-la eppovum illa), neelama
+   random-a irukkanum. Default laptop-la ok, aana adhu public (indha
+   repo-la irukku), so real-a enga-yum use pannadheenga. Key 32 bytes-ku
+   kammiya irundha PyJWT `InsecureKeyLengthWarning` print pannum. Key-ah
+   maathina ellarum logout aagiduvaanga, pazhaya tokens verify aagaadhu.
+6. `ALGORITHM = "HS256"` — SHA-256-oda HMAC: oru shared secret sign-um
+   pannum, verify-um pannum.
+7. `ACCESS_TOKEN_EXPIRE_MINUTES` (15) mattrum `REFRESH_TOKEN_EXPIRE_DAYS`
+   (7, [Refresh tokens](/tanglish/docs/security/refresh-tokens)-la
+   irundhu use aagum) — environment variables eppovum strings, adhanaala
+   `int(os.getenv(...))`.
+
+**`security.py`:**
+
+8. `create_access_token` — payload build panni `jwt.encode` vachi sign
+   pannum. `"exp": datetime.now(timezone.utc) + expires_delta` oru real
+   `datetime`; step 2-la paartha Unix timestamp-a PyJWT maathidum.
+   Eppovum timezone-aware UTC use pannunga, local time illa.
+   `expires_delta` parameter-a irukradhu tests already-expired token
+   create panna dhan.
+9. **Token expiry: tokens thaanaave saagum.** Thirudina token expire
+   aagura varaikkum thirudina login dhan, so adhu short-lived-a
+   irukkanum. `decode_token` (`jwt.decode`) signature **mattrum** `exp`
+   rendaiyum check pannum. Expired token-ku `jwt.ExpiredSignatureError`,
+   vera edhavadhu thappu-na `jwt.InvalidTokenError` (adhoda parent
+   class) raise pannum. Server edhuvum store pannala — expiry signed
+   payload-kulla irukra number-aala mattum dhan enforce aagudhu, adha
+   yaaraalum maatha mudiyaadhu.
+10. `algorithms=[ALGORITHM]` — oru whitelist. Token-oda sontha header-la
+    irukra `alg`-ah eppovum nambaadheenga; oru classic attack adha `none`-a
+    set panni server signature-ah skip pannum-nu hope pannum.
+
+**`models.py` mattrum `crud.py`:**
+
+11. `sec_users` `is_active` add pannudhu, 12/b, 12/c, 12/d, 12/i
+    naalum share pannudhu, so model naalu-layum identical. `carol`
+    `is_active=False`-oda seed aagura. Ava inga innum token vaangalaam;
+    adutha page-la dhan adhu check aagum.
+12. `authenticate` — 12/a-oda rendu checks oru `if`-la: missing user
+    illana wrong password, rendum `None` return pannum.
+
+**`main.py`:**
+
+13. `form_data: OAuth2PasswordRequestForm = Depends()` — **form fields**
+    `username`, `password` read pannum (JSON illa), yen-na OAuth2
+    "password flow" spec adha dhan solludhu. Spec-ah follow panradhaala
+    dhan adutha page-la `/docs`-oda **Authorize** button ungalukku login
+    pannum. Forms read panna `python-multipart` package venum; JSON
+    anuppina `422`.
+14. `return {"access_token": ..., "token_type": "bearer"}` — rendu key
+    names-um same spec fix pannudhu, adhanaala dhan `schemas.py`-la
+    `Token`-ku exact-a andha rendu fields. "bearer" na "indha token-ah
+    vachirukra (bear panra) yaar-a irundhaalum ulla vidu".
+15. Missing user-kum wrong password-kum same `401`,
+    [Password hashing](/tanglish/docs/security/password-hashing)-la
+    maadhiri.
+16. `inspect_token` — first key **illama** decode pannum (JWT-e illana
+    `400`), apparam real `decode_token` try panni PyJWT-oda error
+    message-oda `valid` true illa false report pannum.
+17. **Enna missing: token-ah use panra edhuvum.** Innum protected
+    routes illa. Adutha page `Authorization: Bearer ...` read panni,
+    token-ah verify panni, user-ah load panra oru dependency add pannum.
+
+## Try it
+
+```bash
+curl -X POST http://127.0.0.1:8000/token -d "username=alice&password=alice-password"
+curl -i -X POST http://127.0.0.1:8000/token -d "username=alice&password=wrong"  # 401
+curl "http://127.0.0.1:8000/token/inspect?token=<paste token>"
+```
+
+Valid token idhu maadhiri inspect aagum:
+
+```json
+{
+  "header": {"alg": "HS256", "typ": "JWT"},
+  "payload": {"sub": "alice", "exp": 1791196775, "type": "access"},
+  "valid": true,
+  "verified_payload": {"sub": "alice", "exp": 1791196775, "type": "access"}
+}
+```
+
+**Idhaiyum try pannunga:** unga token-ah [jwt.io](https://jwt.io)-la
+paste pannunga. Key theriyaamale `"sub": "alice"` kaattum. Anga payload-ah
+`"sub": "admin"`-a edit panni, pudhu token-ah copy panni inga inspect
+pannunga: payload `admin` nu sollum, aana `"valid": false, "error":
+"Signature verification failed"`. 15 nimisham wait panni original
+token-ah inspect pannunga: `"Signature has expired"`.
+
+**Postman:** `POST http://127.0.0.1:8000/token`, Body →
+x-www-form-urlencoded → keys `username` = `alice`, `password` =
+`alice-password`.
+
+Adutha step: [Protected routes](/tanglish/docs/security/protected-routes) —
+token vachi routes-ah lock panradhu.

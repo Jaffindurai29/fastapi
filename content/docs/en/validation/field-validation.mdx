@@ -1,0 +1,295 @@
+---
+title: "1. Field validation"
+description: Rejecting bad input before your code runs, with Field rules, a field_validator, and FastAPI's automatic 422.
+---
+
+<GithubLink path="example/8/a" />
+
+The `POST` body now has rules: `name` 1–50 characters and not blank,
+`price` above 0, `quantity` 0 or more. Break any rule and FastAPI
+answers `422 Unprocessable Content` with a list of exactly what was
+wrong — and your route function never runs.
+
+| Route | Description |
+|---|---|
+| `GET /items` | Every row |
+| `GET /items/{item_id}` | One row; `404` if missing, `422` if the id isn't a number |
+| `POST /items` | Insert a row; `201`, or `422` if the body breaks a rule |
+
+## The code
+
+**`database.py`** — env vars, `engine`/`SessionLocal`/`Base`, and the
+`get_db()` dependency (same as topic 6):
+
+```python title="database.py"
+import os
+
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+load_dotenv()
+
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
+MYSQL_USER = os.getenv("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
+
+# Set DATABASE_URL directly to override everything above (e.g. to point
+# at SQLite for a quick local test with no MySQL server at all).
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
+)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+```
+
+**`models.py`** — the `validation_items` table, now with three columns:
+
+```python title="models.py"
+from sqlalchemy import Column, Float, Integer, String
+
+from database import Base
+
+
+class ItemModel(Base):
+    __tablename__ = "validation_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(50), nullable=False, unique=True)
+    price = Column(Float, nullable=False)
+    quantity = Column(Integer, nullable=False, default=0)
+```
+
+**`schemas.py`** — the request body, with validation rules:
+
+```python title="schemas.py"
+from pydantic import BaseModel, Field, field_validator
+
+
+class ItemCreate(BaseModel):
+    # Field(...) adds rules on top of the type. If any rule fails, FastAPI
+    # answers 422 before your route function even runs.
+    name: str = Field(min_length=1, max_length=50)
+    price: float = Field(gt=0, le=1_000_000)
+    quantity: int = Field(default=0, ge=0)
+
+    # A rule Field() can't express: "   " passes min_length=1, but it's
+    # still blank. Raising ValueError here becomes a 422 too.
+    @field_validator("name")
+    @classmethod
+    def name_not_blank(cls, value: str) -> str:
+        value = value.strip()
+        if value == "":
+            raise ValueError("name must not be blank")
+        return value
+```
+
+**`crud.py`** — plain functions that talk to the database:
+
+```python title="crud.py"
+from sqlalchemy.orm import Session
+
+from models import ItemModel
+from schemas import ItemCreate
+
+
+def get_items(db: Session) -> list[ItemModel]:
+    return db.query(ItemModel).order_by(ItemModel.id).all()
+
+
+def get_item(db: Session, item_id: int) -> ItemModel | None:
+    return db.get(ItemModel, item_id)
+
+
+def create_item(db: Session, item: ItemCreate) -> ItemModel:
+    row = ItemModel(name=item.name, price=item.price, quantity=item.quantity)
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def seed_items(db: Session) -> None:
+    if db.query(ItemModel).count() == 0:
+        db.add_all(
+            [
+                ItemModel(name="Laptop", price=999.99, quantity=5),
+                ItemModel(name="Mouse", price=19.99, quantity=50),
+            ]
+        )
+        db.commit()
+```
+
+**`main.py`** — the `FastAPI()` app and its routes:
+
+```python title="main.py"
+from fastapi import Depends, FastAPI, HTTPException, status
+from sqlalchemy.orm import Session
+
+import crud
+from database import Base, SessionLocal, engine, get_db
+from schemas import ItemCreate
+
+Base.metadata.create_all(bind=engine)
+
+with SessionLocal() as db:
+    crud.seed_items(db)
+
+app = FastAPI()
+
+
+def to_dict(row):
+    return {"id": row.id, "name": row.name, "price": row.price, "quantity": row.quantity}
+
+
+@app.get("/items")
+def list_items(db: Session = Depends(get_db)):
+    return [to_dict(row) for row in crud.get_items(db)]
+
+
+# item_id: int is validation too — /items/abc never reaches this function,
+# FastAPI answers 422 on its own.
+@app.get("/items/{item_id}")
+def get_item(item_id: int, db: Session = Depends(get_db)):
+    row = crud.get_item(db, item_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Item not found")
+    return to_dict(row)
+
+
+@app.post("/items", status_code=status.HTTP_201_CREATED)
+def create_item(item: ItemCreate, db: Session = Depends(get_db)):
+    return to_dict(crud.create_item(db, item))
+```
+
+## Line by line
+
+`database.py` is the same as topic 6, and `models.py` is explained on
+the [index page](/en/docs/validation). Everything new is in
+`schemas.py` — and `main.py` gets the payoff for free.
+
+**`schemas.py`:**
+
+1. **`Field(...)` adds rules on top of the type.** The type annotation
+   (`str`, `float`, `int`) already makes Pydantic reject the wrong kind
+   of value — `"price": "cheap"` fails. `Field(...)` lets you go
+   further and say *which* values of that type are acceptable:
+   - `name: str = Field(min_length=1, max_length=50)` — at least 1 and
+     at most 50 characters. `min_length`/`max_length` work on strings
+     (and lists). The `50` matches the `String(50)` column, so anything
+     that passes validation is guaranteed to fit in the table.
+   - `price: float = Field(gt=0, le=1_000_000)` — `gt` means "greater
+     than" (so `0` itself is rejected), `le` means "less than or equal".
+     There's also `ge` ("greater or equal") and `lt` ("less than").
+     `1_000_000` is just Python's way of writing one million readably.
+   - `quantity: int = Field(default=0, ge=0)` — zero or more. Because it
+     has a `default`, it's **optional** in the request: leave it out and
+     you get `0`. `name` and `price` have no default, so they're
+     **required** — leave one out and you get a `422` with type
+     `missing`.
+2. **`@field_validator("name")` — for rules `Field` can't express.**
+   `"   "` is three characters long, so it passes `min_length=1`, but
+   it's obviously still blank. A validator is a plain method where you
+   can write any check you like:
+   - `@field_validator("name")` tells Pydantic which field this method
+     checks. `@classmethod` is required by Pydantic — the validator runs
+     while the object is being built, before there's an instance to
+     call it on.
+   - It runs **after** the type and `Field` checks, so `value` is
+     already guaranteed to be a string of 1–50 characters.
+   - `value = value.strip()` removes spaces from both ends.
+   - `raise ValueError("name must not be blank")` — a `ValueError`
+     raised here doesn't crash anything; Pydantic catches it and turns
+     it into one more entry in the `422` list, with the message
+     prefixed as `"Value error, name must not be blank"`.
+   - `return value` — whatever the validator **returns** is the value
+     your route sees. So `"  Desk "` is stored as `"Desk"`: the
+     validator both checks *and* cleans the input.
+
+**`crud.py`:**
+
+3. Nothing about validation lives here. `create_item` copies the three
+   fields into a new `ItemModel` — it can trust them completely,
+   because they already passed every rule. `seed_items` adds a "Laptop"
+   and a "Mouse" on first startup.
+
+**`main.py`:**
+
+4. **No validation code at all.** The route just declares
+   `item: ItemCreate`. If the body breaks any rule, `create_item` is
+   **never called** — FastAPI answers `422` on its own. Inside the
+   function, every field is guaranteed valid. That's the main payoff:
+   no `if price <= 0: ...` checks scattered through your routes.
+5. **`status_code=status.HTTP_201_CREATED`** on the `POST` decorator —
+   a successful create answers `201 Created` instead of the default
+   `200 OK`. The `status` module gives the numbers readable names.
+6. **`to_dict(row)`** — still building the response by hand, as in
+   topic 6. [8/d](/en/docs/validation/response-model) replaces this with
+   `response_model`.
+7. **Path parameters are validated too.** `item_id: int` means
+   `/items/abc` gets a `422` (type `int_parsing`, location
+   `["path", "item_id"]`) without your code running — the comment above
+   the route points this out.
+
+**Reading a `422` response:**
+
+8. Each entry in the `detail` list has:
+   - `loc` — where the problem is: `["body", "price"]`,
+     `["path", "item_id"]`.
+   - `msg` — a human-readable reason.
+   - `type` — a machine-readable reason: `greater_than`, `missing`,
+     `string_too_long`, `value_error`, ...
+
+   **All** failures are reported at once, not just the first one, so a
+   form can highlight every bad field in one round trip:
+
+```json
+{
+  "detail": [
+    {"type": "value_error", "loc": ["body", "name"], "msg": "Value error, name must not be blank", "...": "..."},
+    {"type": "greater_than", "loc": ["body", "price"], "msg": "Input should be greater than 0", "...": "..."}
+  ]
+}
+```
+
+**What validation *can't* catch:**
+
+9. **Duplicates.** Pydantic only sees the request — it has no idea
+   what's already in the database. So posting "Laptop" a second time
+   passes validation, reaches `crud.create_item`, hits the
+   `unique=True` column, and the database raises an `IntegrityError`.
+   Nothing catches it, so FastAPI answers `500 Internal Server Error`.
+   Checking against stored data is the route's job — that's
+   [8/b](/en/docs/validation/status-codes).
+
+## Try it
+
+```bash
+curl -X POST http://127.0.0.1:8000/items -H "Content-Type: application/json" -d "{\"name\": \"Desk\", \"price\": 120, \"quantity\": 2}"
+curl -i -X POST http://127.0.0.1:8000/items -H "Content-Type: application/json" -d "{\"name\": \"   \", \"price\": -5}"  # 422, two errors
+curl -i http://127.0.0.1:8000/items/abc  # 422, int_parsing
+curl -i -X POST http://127.0.0.1:8000/items -H "Content-Type: application/json" -d "{\"name\": \"Laptop\", \"price\": 1}"  # 500, duplicate
+```
+
+**Postman:** Method `POST`, URL `http://127.0.0.1:8000/items`, Body →
+raw → JSON:
+
+```json
+{"name": "Desk", "price": 120, "quantity": 2}
+```
+
+Next: [Status codes](/en/docs/validation/status-codes) — turning that
+`500` into a proper `409`, and picking the right code for every failure.

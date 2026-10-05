@@ -1,0 +1,379 @@
+---
+title: "2. Search, filter, sort"
+description: Optional filters added to the query one at a time, and Literal as a whitelist for the sort column.
+---
+
+<GithubLink path="example/9/b" />
+
+The same paged `GET /items` as
+[skip/limit pagination](/en/docs/pagination/skip-limit), now with
+optional filters (search by name, category, price range) and a choice
+of sort column and direction. Send any combination, or none.
+
+| Route | Description |
+|---|---|
+| `GET /items` | One page of rows, filtered and sorted. All parameters optional (below) |
+| `GET /items/{item_id}` | One row; `404` if missing |
+
+| Query parameter | Effect | Default |
+|---|---|---|
+| `search` | Name contains this text, case-insensitive | not applied |
+| `category` | Exact category (`books`, `electronics`, `toys`, `kitchen`, `garden`) | not applied |
+| `min_price` / `max_price` | Price range, inclusive | not applied |
+| `sort_by` | `id`, `name`, `price` or `created_at` | `id` |
+| `order` | `asc` or `desc` | `asc` |
+| `skip` / `limit` | Paging, as in 9/a | `0` / `10` |
+
+## The code
+
+**`database.py`** — env vars, `engine`/`SessionLocal`/`Base`, and the
+`get_db()` dependency:
+
+```python title="database.py"
+import os
+
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+load_dotenv()
+
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
+MYSQL_USER = os.getenv("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
+
+# Set DATABASE_URL directly to override everything above (e.g. to point
+# at SQLite for a quick local test with no MySQL server at all).
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
+)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+```
+
+**`models.py`** — the `catalog_items` table:
+
+```python title="models.py"
+from sqlalchemy import Column, DateTime, Float, Integer, String, func
+
+from database import Base
+
+
+# 9/a–9/d all use this exact model, so they can share one table.
+class ItemModel(Base):
+    __tablename__ = "catalog_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(100), nullable=False)
+    category = Column(String(50), nullable=False)
+    price = Column(Float, nullable=False)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+```
+
+**`schemas.py`** — unchanged from 9/a:
+
+```python title="schemas.py"
+from datetime import datetime
+
+from pydantic import BaseModel, ConfigDict
+
+
+class ItemOut(BaseModel):
+    # Read attributes off the SQLAlchemy row (see 8/d).
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    category: str
+    price: float
+    created_at: datetime
+```
+
+**`crud.py`** — a query built up one filter at a time:
+
+```python title="crud.py"
+from typing import Literal
+
+from sqlalchemy.orm import Session
+
+from models import ItemModel
+
+# The only columns a client may sort by. main.py's Literal type already
+# guarantees sort_by is one of these keys, so this lookup can't fail.
+SORT_COLUMNS = {
+    "id": ItemModel.id,
+    "name": ItemModel.name,
+    "price": ItemModel.price,
+    "created_at": ItemModel.created_at,
+}
+
+
+def get_items(
+    db: Session,
+    skip: int,
+    limit: int,
+    search: str | None,
+    category: str | None,
+    min_price: float | None,
+    max_price: float | None,
+    sort_by: Literal["id", "name", "price", "created_at"],
+    order: Literal["asc", "desc"],
+) -> list[ItemModel]:
+    # Start with "every row" and narrow it down one step at a time.
+    # Nothing is sent to the database until .all() at the end.
+    query = db.query(ItemModel)
+
+    # Only add a filter when the client actually sent that parameter.
+    if search is not None:
+        # ilike = case-insensitive LIKE. %...% means "contains".
+        query = query.filter(ItemModel.name.ilike(f"%{search}%"))
+    if category is not None:
+        query = query.filter(ItemModel.category == category)
+    if min_price is not None:
+        query = query.filter(ItemModel.price >= min_price)
+    if max_price is not None:
+        query = query.filter(ItemModel.price <= max_price)
+
+    column = SORT_COLUMNS[sort_by]
+    column = column.desc() if order == "desc" else column.asc()
+    # id as a tie-breaker: rows with the same price (or created_at) still
+    # come back in a fixed order, so pages never overlap.
+    query = query.order_by(column, ItemModel.id)
+
+    return query.offset(skip).limit(limit).all()
+
+
+def get_item(db: Session, item_id: int) -> ItemModel | None:
+    return db.get(ItemModel, item_id)
+
+
+# 25 rows across 5 categories, so paging and filtering have something to do.
+SEED = [
+    ("Python Crash Course", "books", 29.99),
+    ("Clean Code", "books", 34.5),
+    ("The Pragmatic Programmer", "books", 42.0),
+    ("Dune", "books", 9.99),
+    ("Cooking for Engineers", "books", 18.75),
+    ("Laptop", "electronics", 999.99),
+    ("Mouse", "electronics", 19.99),
+    ("Mechanical Keyboard", "electronics", 89.0),
+    ("USB-C Cable", "electronics", 7.49),
+    ("27in Monitor", "electronics", 249.0),
+    ("Noise-Cancelling Headphones", "electronics", 199.95),
+    ("Building Blocks Set", "toys", 49.99),
+    ("Rubber Duck", "toys", 3.5),
+    ("Remote Control Car", "toys", 64.0),
+    ("Jigsaw Puzzle 1000pc", "toys", 15.0),
+    ("Plush Bear", "toys", 12.25),
+    ("Chef's Knife", "kitchen", 79.0),
+    ("Cast Iron Pan", "kitchen", 45.5),
+    ("Coffee Grinder", "kitchen", 59.99),
+    ("Measuring Cups", "kitchen", 8.99),
+    ("Garden Hose", "garden", 27.0),
+    ("Pruning Shears", "garden", 22.5),
+    ("Tomato Seeds", "garden", 2.99),
+    ("Watering Can", "garden", 14.0),
+    ("Lawn Mower", "garden", 329.0),
+]
+
+
+def seed_items(db: Session) -> None:
+    if db.query(ItemModel).count() == 0:
+        db.add_all(
+            [ItemModel(name=n, category=c, price=p) for n, c, p in SEED]
+        )
+        db.commit()
+```
+
+**`main.py`** — more query parameters, all optional:
+
+```python title="main.py"
+from typing import Literal
+
+from fastapi import Depends, FastAPI, HTTPException
+from sqlalchemy.orm import Session
+
+import crud
+from database import Base, SessionLocal, engine, get_db
+from schemas import ItemOut
+
+Base.metadata.create_all(bind=engine)
+
+with SessionLocal() as db:
+    crud.seed_items(db)
+
+app = FastAPI()
+
+NOT_FOUND = {404: {"description": "Item not found"}}
+
+
+# Every parameter is optional. "= None" means "not sent", and crud.py
+# skips that filter entirely.
+@app.get("/items", response_model=list[ItemOut])
+def list_items(
+    search: str | None = None,
+    category: str | None = None,
+    min_price: float | None = None,
+    max_price: float | None = None,
+    # Literal = a whitelist. Anything else (e.g. sort_by=password) is a 422
+    # before our code runs, so a user string never reaches order_by().
+    sort_by: Literal["id", "name", "price", "created_at"] = "id",
+    order: Literal["asc", "desc"] = "asc",
+    skip: int = 0,
+    limit: int = 10,
+    db: Session = Depends(get_db),
+):
+    return crud.get_items(
+        db,
+        skip=skip,
+        limit=limit,
+        search=search,
+        category=category,
+        min_price=min_price,
+        max_price=max_price,
+        sort_by=sort_by,
+        order=order,
+    )
+
+
+@app.get("/items/{item_id}", response_model=ItemOut, responses=NOT_FOUND)
+def get_item(item_id: int, db: Session = Depends(get_db)):
+    row = crud.get_item(db, item_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Item not found")
+    return row
+```
+
+## Line by line
+
+`database.py` and `models.py` are the shared pieces explained on the
+[index page](/en/docs/pagination), and `schemas.py` is the same
+`ItemOut` as [9/a](/en/docs/pagination/skip-limit). Below covers what's
+new in `main.py` and `crud.py`.
+
+**`main.py`:**
+
+1. `search: str | None = None` (and `category`, `min_price`,
+   `max_price`) — **optional parameters default to `None`**, and
+   `None` means "the client didn't send this one". That's different
+   from an empty or zero value: `?min_price=0` is a real filter
+   ("0 or more"), while a missing `min_price` is no filter at all.
+2. The types still apply whenever a value *is* sent: `min_price` is a
+   `float`, so `?min_price=19.99` arrives as the number `19.99`, and
+   `?min_price=cheap` is a `422` (`float_parsing`).
+3. `sort_by: Literal["id", "name", "price", "created_at"] = "id"` —
+   `Literal[...]` is a **whitelist**. FastAPI checks the value against
+   the list and answers `422` for anything else, so `crud.py` only
+   ever sees one of those four strings. `?sort_by=password` never
+   reaches your code.
+4. `order: Literal["asc", "desc"] = "asc"` — the same trick for the
+   direction.
+5. Bonus: because FastAPI knows every allowed value, `/docs` shows
+   `sort_by` and `order` as **dropdowns** instead of free text boxes.
+6. `return crud.get_items(db, skip=skip, ..., order=order)` — the
+   route does no filtering itself; it just passes every parameter
+   through to `crud.py` by name.
+
+**`crud.py`:**
+
+7. `query = db.query(ItemModel)` — **start broad**. This doesn't
+   touch the database yet; it's only a *description* of a query
+   ("every row of `catalog_items`").
+8. `if search is not None: query = query.filter(...)` and the three
+   siblings — **narrow step by step**. Each `.filter(...)` returns a
+   new description with one more `WHERE` condition, joined to the
+   others with `AND`. Nothing runs until `.all()` at the very end, so
+   building it in six steps costs exactly the same as writing it in
+   one line.
+9. The `if ... is not None` checks are the whole trick. Without them
+   you'd need a separate query for every combination of filters (16
+   combinations for four filters). With them, one function handles
+   every mix — `?category=electronics&max_price=100&sort_by=price`
+   just adds two `WHERE` conditions and one `ORDER BY`, with no new
+   code.
+10. `ItemModel.name.ilike(f"%{search}%")` — `LIKE '%chef%'` matches
+    any name with `chef` somewhere inside (`%` means "any characters,
+    or none"). The `i` in `ilike` makes it **case-insensitive**, so
+    `chef`, `CHEF` and `Chef` all find `Chef's Knife`. SQLAlchemy turns
+    it into whatever the database understands (`lower(name) LIKE
+    lower(...)` on MySQL).
+11. **Not SQL injection.** The search text is sent to the database as
+    a **bound parameter**, not pasted into the SQL string, so
+    `?search=' OR 1=1 --` is just a strange name to look for. A `%` or
+    `_` typed by the user still acts as a wildcard inside the pattern,
+    which is harmless here.
+12. `ItemModel.category == category`, `ItemModel.price >= min_price`,
+    `ItemModel.price <= max_price` — plain comparisons; SQLAlchemy
+    turns each into a `WHERE` clause. Both price bounds are inclusive.
+13. `SORT_COLUMNS = {...}` — **map the whitelisted name to a real
+    column yourself.** Unlike a search value, a column name can't be a
+    bound parameter, so the sort column is the one place where user
+    input would end up *in* the SQL. Two safe rules follow: never pass
+    a user string to `order_by()` (`order_by(text(sort_by))` would let
+    a client sort by a column you never meant to expose, or worse,
+    inject SQL), and always look the name up in a dict of real
+    `ItemModel` columns. Since `Literal` already guarantees `sort_by`
+    is one of the four keys, `SORT_COLUMNS[sort_by]` can't fail.
+14. `column = column.desc() if order == "desc" else column.asc()` —
+    turns the column into `price DESC` or `price ASC`.
+15. `query.order_by(column, ItemModel.id)` — **a tie-breaker.** 9/a's
+    rule ("order before paging") only works if the order is
+    **unique**. All 25 seed rows have the same `created_at` (they were
+    inserted together), so `ORDER BY created_at` alone leaves their
+    order up to the database again, and pages could overlap. Adding
+    `id` as a second sort key breaks every tie.
+16. `query.offset(skip).limit(limit).all()` — **filter, then sort, then
+    page**, in that order. Paging first would mean "take 10 rows, then
+    filter them", which could leave you with 2 rows on a page that
+    should have 10.
+17. A filter that matches nothing (`?category=furniture`) is `200` with
+    `[]`, not an error — the query ran fine and found no rows.
+18. **What's still missing.** `?limit=1000000` still returns
+    everything, `?search=a` matches almost every row, and you can only
+    pick one category at a time.
+    [Query(...) validation](/en/docs/pagination/query-validation)
+    adds rules to every parameter.
+
+## Try it
+
+```bash
+curl "http://127.0.0.1:8000/items?search=chef"
+curl "http://127.0.0.1:8000/items?category=electronics&max_price=100&sort_by=price"
+curl "http://127.0.0.1:8000/items?sort_by=price&order=desc&limit=3"
+curl -i "http://127.0.0.1:8000/items?sort_by=password"  # 422
+curl "http://127.0.0.1:8000/items?category=furniture"
+```
+
+1. `Chef's Knife` — `chef`, `CHEF` and `Chef` all match.
+2. Electronics under 100, cheapest first: `USB-C Cable`, `Mouse`,
+   `Mechanical Keyboard`.
+3. The three most expensive items: `Laptop`, `Lawn Mower`,
+   `27in Monitor`.
+4. `422`, because `sort_by` only accepts the four listed columns:
+
+```json
+{"detail": [{"type": "literal_error", "loc": ["query", "sort_by"], "msg": "Input should be 'id', 'name', 'price' or 'created_at'", "input": "password", "...": "..."}]}
+```
+
+5. `[]` — no rows match, and that's a `200`.
+
+**Postman:** Method `GET`, URL `http://127.0.0.1:8000/items`, then add
+the parameters you want in the **Params** tab. Untick a row to leave
+that filter out without deleting it.
+
+Next: [Query(...) validation](/en/docs/pagination/query-validation) —
+rules on every parameter, a repeatable `category`, and a Pydantic model
+for query params.

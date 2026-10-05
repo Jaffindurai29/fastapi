@@ -1,0 +1,408 @@
+---
+title: "8. ID hashing"
+description: Short, non-sequential public ids with sqids instead of exposing 1, 2, 3.
+---
+
+<GithubLink path="example/12/h" />
+
+URLs like `/items/1`, `/items/2`, `/items/3` tell the world how many
+rows you have and invite people to try the next number. Here the
+database still uses plain integer ids, but the API only ever shows a
+short, non-sequential **public id** like `igPHZLIU`, made with
+[sqids](https://sqids.org/python). `/items/1` is now a `404`. There's
+no login in this lesson.
+
+## What's wrong with `/items/1`?
+
+Sequential ids leak information:
+
+- **Counting.** Sign up, create an item, get id `5231`: the site has
+  about 5,000 items. Do it again next month and you know its growth
+  rate. Competitors love this.
+- **Enumeration.** If `/items/41` exists, so do `40` and `42`. A loop
+  from 1 to 100,000 scrapes everything.
+
+Sqids turns each integer into a short string that *looks* random:
+1 → `igPHZLIU`, 2 → `uclL2dH9`. The database keeps its fast integer
+primary key. Only the API's view of the id changes.
+
+## The code
+
+`database.py` is the same as in [MySQL + CRUD](/en/docs/mysql-crud).
+New here are `config.py` (the alphabet) and `ids.py` (encode/decode).
+Table: `public_id_items`, seeded with three items.
+
+**`.env.example`** — the optional `SQIDS_ALPHABET` setting at the bottom:
+
+```bash title=".env.example"
+# Copy this file to .env and adjust the values for your local MySQL
+# server. All of these already have working defaults baked into the
+# code, so creating a .env is optional — the app runs with zero setup
+# if you skip this file entirely.
+
+MYSQL_HOST=127.0.0.1
+MYSQL_PORT=3306
+MYSQL_USER=root
+MYSQL_PASSWORD=
+MYSQL_DB=fastapi_learn
+
+# Set this to override everything above at once — e.g. point at SQLite
+# for a quick local try with no MySQL server running at all.
+# DATABASE_URL=sqlite:///./test.db
+
+# The alphabet sqids uses to build public ids. Shuffling it gives your
+# app its own ids (it works like a salt). Every character must be
+# unique, at least 3 characters. Pick it ONCE: changing it later changes
+# every public id and breaks every link anyone has saved. To make your own:
+#   python -c "import random,string; a=list(string.ascii_letters+string.digits); random.shuffle(a); print(''.join(a))"
+# SQIDS_ALPHABET=DpNyH4T2PcXBCbfRnV8s6qg7kwrhAOGLKQ0Uaot1ix9zvSjZMEuldWeFIYJm35
+```
+
+**`config.py`** — the shuffled alphabet and the minimum id length:
+
+```python title="config.py"
+import os
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# a-z, A-Z, 0-9 in a shuffled order. Change it (once, before launch) so
+# your ids differ from everyone else running this code.
+SQIDS_ALPHABET = os.getenv(
+    "SQIDS_ALPHABET", "DpNyH4T2PcXBCbfRnV8s6qg7kwrhAOGLKQ0Uaot1ix9zvSjZMEuldWeFIYJm35"
+)
+# Pad short ids so id 1 isn't a tell-tale 1-2 character string.
+SQIDS_MIN_LENGTH = 8
+```
+
+**`database.py`** — env vars, `engine`/`SessionLocal`/`Base`, and `get_db()`:
+
+```python title="database.py"
+import os
+
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+load_dotenv()
+
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
+MYSQL_USER = os.getenv("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
+
+# Set DATABASE_URL directly to override everything above (e.g. to point
+# at SQLite for a quick local test with no MySQL server at all).
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
+)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+```
+
+**`ids.py`** — `encode_id()` and `decode_id()`:
+
+```python title="ids.py"
+from sqids import Sqids
+
+from config import SQIDS_ALPHABET, SQIDS_MIN_LENGTH
+
+sqids = Sqids(alphabet=SQIDS_ALPHABET, min_length=SQIDS_MIN_LENGTH)
+
+
+def encode_id(n: int) -> str:
+    """Database id (int) -> public id (str), e.g. 1 -> 'igPHZLIU'."""
+    return sqids.encode([n])
+
+
+def decode_id(public_id: str) -> int | None:
+    """Public id -> database id, or None if it isn't one we'd ever hand out."""
+    numbers = sqids.decode(public_id)  # [] for characters not in the alphabet
+    if len(numbers) != 1:  # garbage, or several numbers packed into one id
+        return None
+    # sqids can decode several different strings to the same number. Only
+    # accept the one string encode_id would produce, so every row has
+    # exactly ONE valid public id.
+    if encode_id(numbers[0]) != public_id:
+        return None
+    return numbers[0]
+```
+
+**`models.py`** — still a plain auto-increment integer primary key:
+
+```python title="models.py"
+from sqlalchemy import Column, Float, Integer, String
+
+from database import Base
+
+
+class ItemModel(Base):
+    __tablename__ = "public_id_items"
+
+    # Still a plain auto-increment integer. Public ids are computed from
+    # it on the way out; nothing extra is stored.
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(50), nullable=False)
+    price = Column(Float, nullable=False)
+```
+
+**`schemas.py`** — `ItemOut.id` is a `str`, built by `from_row()`:
+
+```python title="schemas.py"
+from pydantic import BaseModel, Field
+
+from ids import encode_id
+from models import ItemModel
+
+
+class ItemCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=50)
+    price: float = Field(gt=0)
+
+
+class ItemOut(BaseModel):
+    id: str  # the PUBLIC id, never the database integer
+    name: str
+    price: float
+
+    # Built explicitly instead of from_attributes: row.id is an int and
+    # must be encoded first. One obvious place where that happens.
+    @classmethod
+    def from_row(cls, row: ItemModel) -> "ItemOut":
+        return cls(id=encode_id(row.id), name=row.name, price=row.price)
+```
+
+**`crud.py`** — only ever sees real integer ids:
+
+```python title="crud.py"
+from sqlalchemy.orm import Session
+
+from models import ItemModel
+from schemas import ItemCreate
+
+
+# crud.py only ever deals with real integer ids. Encoding/decoding
+# public ids is the route's job (main.py).
+
+def get_items(db: Session) -> list[ItemModel]:
+    return db.query(ItemModel).order_by(ItemModel.id).all()
+
+
+def get_item(db: Session, item_id: int) -> ItemModel | None:
+    return db.get(ItemModel, item_id)
+
+
+def create_item(db: Session, item: ItemCreate) -> ItemModel:
+    row = ItemModel(**item.model_dump())
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def delete_item(db: Session, row: ItemModel) -> None:
+    db.delete(row)
+    db.commit()
+
+
+def seed_items(db: Session) -> None:
+    if db.query(ItemModel).count() == 0:
+        db.add_all(
+            [
+                ItemModel(name="Laptop", price=999.99),
+                ItemModel(name="Mouse", price=19.99),
+                ItemModel(name="Keyboard", price=49.5),
+            ]
+        )
+        db.commit()
+```
+
+**`main.py`** — decodes at the edge, `404` for everything bad:
+
+```python title="main.py"
+from fastapi import Depends, FastAPI, HTTPException, status
+from sqlalchemy.orm import Session
+
+import crud
+from database import Base, SessionLocal, engine, get_db
+from ids import decode_id
+from models import ItemModel
+from schemas import ItemCreate, ItemOut
+
+Base.metadata.create_all(bind=engine)
+
+with SessionLocal() as db:
+    crud.seed_items(db)
+
+app = FastAPI()
+
+NOT_FOUND = {404: {"description": "Item not found"}}
+
+
+# public id -> row, or 404. An invalid public id and an unknown one get
+# the SAME answer, so the client can't tell which it was.
+def get_item_or_404(db: Session, public_id: str) -> ItemModel:
+    item_id = decode_id(public_id)
+    row = crud.get_item(db, item_id) if item_id is not None else None
+    if row is None:
+        raise HTTPException(status_code=404, detail="Item not found")
+    return row
+
+
+@app.get("/items", response_model=list[ItemOut])
+def list_items(db: Session = Depends(get_db)):
+    return [ItemOut.from_row(row) for row in crud.get_items(db)]
+
+
+# public_id: str, not int. "/items/1" is now just an unknown string -> 404.
+@app.get("/items/{public_id}", response_model=ItemOut, responses=NOT_FOUND)
+def get_item(public_id: str, db: Session = Depends(get_db)):
+    return ItemOut.from_row(get_item_or_404(db, public_id))
+
+
+@app.post("/items", response_model=ItemOut, status_code=status.HTTP_201_CREATED)
+def create_item(item: ItemCreate, db: Session = Depends(get_db)):
+    return ItemOut.from_row(crud.create_item(db, item))
+
+
+@app.delete("/items/{public_id}", status_code=status.HTTP_204_NO_CONTENT, responses=NOT_FOUND)
+def delete_item(public_id: str, db: Session = Depends(get_db)):
+    crud.delete_item(db, get_item_or_404(db, public_id))
+```
+
+## Line by line
+
+**`config.py` — the alphabet works like a salt:**
+
+1. **`SQIDS_ALPHABET`** — the 62 characters a-z, A-Z, 0-9 in a
+   shuffled order. With sqids' default alphabet, anyone could decode
+   your ids with one line of Python. A shuffled alphabet makes the
+   mapping yours. It's still only obscurity, not a real secret (see
+   step 9).
+2. **Pick it once.** Changing the alphabet changes every public id, so
+   every bookmarked or shared link breaks. Generate your own before
+   launch:
+   `python -c "import random,string; a=list(string.ascii_letters+string.digits); random.shuffle(a); print(''.join(a))"`.
+3. **`SQIDS_MIN_LENGTH = 8`** — pads small numbers, so the first rows
+   don't stand out with tell-tale 1-2 character ids.
+
+**`ids.py`:**
+
+4. **`encode_id(n)`** — sqids encodes a *list* of numbers into one
+   string; we always pass one. Nothing is stored: the public id is
+   recomputed every time from the integer, so existing rows get one for
+   free and there's no extra column to keep in sync.
+5. **`decode_id(public_id)`** returns the integer, or `None` for
+   anything we didn't hand out:
+   - `sqids.decode()` returns `[]` for characters that aren't in the
+     alphabet, and several numbers if the string packs more than one.
+     `len(numbers) != 1` rejects both.
+   - **The re-encode check matters.** With the default alphabet,
+     `igPHZLIU`, `igPHZLI` and even `ig` **all** decode to `1`. Without
+     the check, one row would have many valid URLs: caches and "have I
+     seen this id?" logic get confused, and it gives an attacker a way
+     to probe the encoding. Encoding the number back and comparing it
+     to the input keeps exactly one canonical id per row.
+
+**`schemas.py`:**
+
+6. **`id: str`** — the public id, never the database integer.
+7. **`from_row()` instead of `from_attributes=True`.** `from_attributes`
+   would copy `row.id` (an int) into `id: str` and fail. Pydantic has
+   other options (a `@field_serializer("id")` or a `@computed_field`),
+   but they hide the conversion inside the model. One explicit
+   `from_row` keeps it obvious: **every** response goes through it, so
+   the integer can never leak by accident.
+
+**`crud.py` and `main.py`:**
+
+8. **`crud.py` never sees a public id.** It works with integers only;
+   converting happens only in the routes, at the edge of the app.
+9. **`get_item_or_404(db, public_id)`** — decode, then look up. The
+   path parameter is `public_id: str`, not `int`, so `/items/1` is no
+   longer a `422`: it's just a string that isn't a valid public id, so
+   `404`. An invalid id and a valid-but-deleted one get the **same**
+   `404 Item not found`, so the client learns nothing from the
+   difference.
+10. **Every route returns `ItemOut.from_row(...)`** — list, get one,
+    and create. `DELETE` returns `204` with no body, so there's nothing
+    to encode.
+
+## What sqids is NOT
+
+- **Not encryption.** The ids are reversible by design, and anyone who
+  learns your alphabet (it's in your code and your `.env`) can decode
+  them. Don't put secrets in them, and don't rely on them being
+  unguessable.
+- **Not access control.** If Alice can see Bob's note just by knowing
+  its id, hiding the id only slows her down. You still need the
+  ownership check from [Ownership](/en/docs/security/ownership) on every
+  route. Public ids reduce what leaks; they don't decide who's allowed.
+
+## Alternatives
+
+| | Pros | Cons |
+|---|---|---|
+| **Sqids** (this page) | Short, URL-friendly, no extra column, integer PK stays | Obscurity only, alphabet must never change |
+| **UUID4** column (`uuid.uuid4()`) | Truly random, nothing to keep secret | 36 chars, a second indexed column (or a bigger, slower PK) |
+| **UUID7** | Random **and** time-ordered, indexes nicely | Reveals creation time, still long |
+| Random token column (`secrets.token_urlsafe(8)`) | Short and truly random | Must store it and handle (rare) collisions |
+
+Use a UUID when ids must be unguessable on their own (e.g. "anyone with
+the link can view"). Use sqids when you just don't want to advertise row
+counts and sequences.
+
+## Routes
+
+| Route | Description |
+|---|---|
+| `GET /items` | Every item, each with its public `id` |
+| `GET /items/{public_id}` | One item; `404` if the id is invalid **or** unknown |
+| `POST /items` | Body with `name` and `price`; `201`, returns the new public id |
+| `DELETE /items/{public_id}` | `204`; `404` if invalid or unknown |
+
+With the default alphabet in `config.py`, the seeded items get these
+ids (yours differ if you set your own `SQIDS_ALPHABET`, so copy them
+from `GET /items`):
+
+| Database id | Public id |
+|---|---|
+| 1 | `igPHZLIU` |
+| 2 | `uclL2dH9` |
+| 3 | `z67LIUj6` |
+
+## Try it
+
+```bash
+cd example/12/h
+uvicorn main:app --reload
+```
+
+```bash
+curl http://127.0.0.1:8000/items
+curl http://127.0.0.1:8000/items/igPHZLIU
+curl http://127.0.0.1:8000/items/1  # 404
+curl http://127.0.0.1:8000/items/ig  # 404
+curl -X POST http://127.0.0.1:8000/items -H "Content-Type: application/json" -d "{\"name\": \"Monitor\", \"price\": 199}"
+curl -X DELETE http://127.0.0.1:8000/items/z67LIUj6
+```
+
+`/items/1` is no longer a valid id at all. `ig` actually *decodes* to
+1, but it isn't the one id we hand out for that row, so the re-encode
+check in `decode_id` rejects it too.
+
+Next: [Rate limiting](/en/docs/security/rate-limiting) —
+`429 Too Many Requests` after too many login attempts.

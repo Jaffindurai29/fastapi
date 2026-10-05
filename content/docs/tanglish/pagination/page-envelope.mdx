@@ -1,0 +1,410 @@
+---
+title: "4. Page envelope"
+description: Offsets-ku pathila page numbers, mattrum items, total, page, size, pages kondu varra response.
+---
+
+<GithubLink path="example/9/d" />
+
+`GET /items` ippo `skip`/`limit`-ku pathila **page numbers**-la
+(`?page=2&size=10`) pesudhu, ovoru page-ayum oru **envelope**-la wrap
+pannudhu — total-a evlo rows match aagudhu, adhu evlo pages-nu
+solludhu. [9/b](/tanglish/docs/pagination/filter-sort)-oda filters,
+sort innum work aagum, `total` avanga match panra rows-ah mattum dhan
+count pannum.
+
+| Route | Description |
+|---|---|
+| `GET /items?page=1&size=10` | Envelope-kulla oru page; `search`, `category`, `min_price`, `max_price`, `sort_by`, `order`-um vaangum |
+| `GET /items/{item_id}` | Oru row; illana `404` |
+
+`page` `1` illa adhukku mela irukkanum, `size` `1`–`100`. Matha
+parameters 9/b maadhiri work aagum, 9/c-oda rules-oda (`search` 2–50
+characters, prices `>= 0`).
+
+## Code
+
+**`database.py`** — env vars, `engine`/`SessionLocal`/`Base`, mattrum
+`get_db()` dependency:
+
+```python title="database.py"
+import os
+
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+load_dotenv()
+
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
+MYSQL_USER = os.getenv("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
+
+# Set DATABASE_URL directly to override everything above (e.g. to point
+# at SQLite for a quick local test with no MySQL server at all).
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
+)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+```
+
+**`models.py`** — `catalog_items` table:
+
+```python title="models.py"
+from sqlalchemy import Column, DateTime, Float, Integer, String, func
+
+from database import Base
+
+
+# 9/a–9/d all use this exact model, so they can share one table.
+class ItemModel(Base):
+    __tablename__ = "catalog_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(100), nullable=False)
+    category = Column(String(50), nullable=False)
+    price = Column(Float, nullable=False)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+```
+
+**`schemas.py`** — `ItemOut`, kooda `ItemPage` envelope:
+
+```python title="schemas.py"
+from datetime import datetime
+
+from pydantic import BaseModel, ConfigDict
+
+
+class ItemOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    category: str
+    price: float
+    created_at: datetime
+
+
+# The envelope: one page of rows, plus what a frontend needs to draw
+# "Page 2 of 3" and know whether a Next button makes sense.
+class ItemPage(BaseModel):
+    items: list[ItemOut]
+    total: int  # rows matching the filters, across ALL pages
+    page: int
+    size: int
+    pages: int  # ceil(total / size)
+```
+
+**`crud.py`** — filter, count, apparam sort panni oru page cut:
+
+```python title="crud.py"
+from typing import Literal
+
+from sqlalchemy.orm import Session
+
+from models import ItemModel
+
+SORT_COLUMNS = {
+    "id": ItemModel.id,
+    "name": ItemModel.name,
+    "price": ItemModel.price,
+    "created_at": ItemModel.created_at,
+}
+
+
+def get_items_page(
+    db: Session,
+    page: int,
+    size: int,
+    search: str | None,
+    category: str | None,
+    min_price: float | None,
+    max_price: float | None,
+    sort_by: Literal["id", "name", "price", "created_at"],
+    order: Literal["asc", "desc"],
+) -> tuple[list[ItemModel], int]:
+    # 1. Build the filtered query, exactly as in 9/b.
+    query = db.query(ItemModel)
+    if search is not None:
+        query = query.filter(ItemModel.name.ilike(f"%{search}%"))
+    if category is not None:
+        query = query.filter(ItemModel.category == category)
+    if min_price is not None:
+        query = query.filter(ItemModel.price >= min_price)
+    if max_price is not None:
+        query = query.filter(ItemModel.price <= max_price)
+
+    # 2. Count it NOW: same filters, but before offset/limit. Counting
+    #    db.query(ItemModel) instead would give 25 even when the filter
+    #    only matches 5, and the page numbers would be wrong.
+    total = query.count()
+
+    # 3. Then sort and cut out one page. page 1 -> rows 0..size-1,
+    #    page 2 -> rows size..2*size-1, and so on.
+    column = SORT_COLUMNS[sort_by]
+    column = column.desc() if order == "desc" else column.asc()
+    offset = (page - 1) * size
+    rows = query.order_by(column, ItemModel.id).offset(offset).limit(size).all()
+
+    return rows, total
+
+
+def get_item(db: Session, item_id: int) -> ItemModel | None:
+    return db.get(ItemModel, item_id)
+
+
+# 25 rows across 5 categories, so paging and filtering have something to do.
+SEED = [
+    ("Python Crash Course", "books", 29.99),
+    ("Clean Code", "books", 34.5),
+    ("The Pragmatic Programmer", "books", 42.0),
+    ("Dune", "books", 9.99),
+    ("Cooking for Engineers", "books", 18.75),
+    ("Laptop", "electronics", 999.99),
+    ("Mouse", "electronics", 19.99),
+    ("Mechanical Keyboard", "electronics", 89.0),
+    ("USB-C Cable", "electronics", 7.49),
+    ("27in Monitor", "electronics", 249.0),
+    ("Noise-Cancelling Headphones", "electronics", 199.95),
+    ("Building Blocks Set", "toys", 49.99),
+    ("Rubber Duck", "toys", 3.5),
+    ("Remote Control Car", "toys", 64.0),
+    ("Jigsaw Puzzle 1000pc", "toys", 15.0),
+    ("Plush Bear", "toys", 12.25),
+    ("Chef's Knife", "kitchen", 79.0),
+    ("Cast Iron Pan", "kitchen", 45.5),
+    ("Coffee Grinder", "kitchen", 59.99),
+    ("Measuring Cups", "kitchen", 8.99),
+    ("Garden Hose", "garden", 27.0),
+    ("Pruning Shears", "garden", 22.5),
+    ("Tomato Seeds", "garden", 2.99),
+    ("Watering Can", "garden", 14.0),
+    ("Lawn Mower", "garden", 329.0),
+]
+
+
+def seed_items(db: Session) -> None:
+    if db.query(ItemModel).count() == 0:
+        db.add_all(
+            [ItemModel(name=n, category=c, price=p) for n, c, p in SEED]
+        )
+        db.commit()
+```
+
+**`main.py`** — `page`/`size` ulla, envelope veliya:
+
+```python title="main.py"
+import math
+from typing import Literal
+
+from fastapi import Depends, FastAPI, HTTPException, Query
+from sqlalchemy.orm import Session
+
+import crud
+from database import Base, SessionLocal, engine, get_db
+from schemas import ItemOut, ItemPage
+
+Base.metadata.create_all(bind=engine)
+
+with SessionLocal() as db:
+    crud.seed_items(db)
+
+app = FastAPI()
+
+NOT_FOUND = {404: {"description": "Item not found"}}
+
+
+# page/size instead of skip/limit: clients think in page numbers, the
+# database thinks in offsets. crud.py does the conversion.
+@app.get("/items", response_model=ItemPage)
+def list_items(
+    search: str | None = Query(None, min_length=2, max_length=50),
+    category: str | None = None,
+    min_price: float | None = Query(None, ge=0),
+    max_price: float | None = Query(None, ge=0),
+    sort_by: Literal["id", "name", "price", "created_at"] = "id",
+    order: Literal["asc", "desc"] = "asc",
+    page: int = Query(1, ge=1, description="Page number, starting at 1"),
+    size: int = Query(10, ge=1, le=100, description="Rows per page (max 100)"),
+    db: Session = Depends(get_db),
+):
+    rows, total = crud.get_items_page(
+        db,
+        page=page,
+        size=size,
+        search=search,
+        category=category,
+        min_price=min_price,
+        max_price=max_price,
+        sort_by=sort_by,
+        order=order,
+    )
+    # A page past the end isn't an error: items is just [], and total/pages
+    # still tell the client where the real data ends.
+    return {
+        "items": rows,  # ORM rows; ItemPage turns each into an ItemOut
+        "total": total,
+        "page": page,
+        "size": size,
+        "pages": math.ceil(total / size),
+    }
+
+
+@app.get("/items/{item_id}", response_model=ItemOut, responses=NOT_FOUND)
+def get_item(item_id: int, db: Session = Depends(get_db)):
+    row = crud.get_item(db, item_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Item not found")
+    return row
+```
+
+## Line by line
+
+`database.py` mattrum `models.py` share aagra pieces, adha
+[index page](/tanglish/docs/pagination)-la explain pannirukkom. Keezha
+envelope-ah paarpom.
+
+**Yen idhu:**
+
+1. **Frontend-ku `total` venum.** 10 rows-oda verum list oru UI
+   kekkura kelvigalukku answer panna mudiyaadhu: "Next page irukka?",
+   "Evlo page buttons draw pannanum?", "'25 results'-la enna
+   podanum?". 9/a–9/c-la theriya ore vazhi, adutha page-ah request
+   panni adhu empty-a-nu paakkaradhu dhan. Oru extra number, total,
+   moonu kelviyum answer pannidum.
+
+**`schemas.py`:**
+
+2. `class ItemPage(BaseModel)` — envelope. `items: list[ItemOut]`
+   munnadi paartha same `ItemOut`-oda list, so ovoru row-um innum same
+   allowed-fields filter vazhiya dhan veliya pogum.
+3. `total` — **ella** pages-layum filters-ku match aagra rows, indha
+   page-la mattum illa. `page`, `size` ketta value-ah thirumba
+   solludhu, `pages` na `total` evlo pages-ah fill pannum-nu.
+4. Verum list-ku pathila **object** return pannradhu, munnadiye
+   `items` read panra clients-ah break pannama, later innum keys
+   (`next_page` maadhiri) add panna room vidudhu.
+
+**`main.py`:**
+
+5. `page: int = Query(1, ge=1, ...)` mattrum
+   `size: int = Query(10, ge=1, le=100, ...)` — `skip`/`limit` idea
+   dhan, friendly-aana units-la: manushanga "page 3"-nu ninaippaanga,
+   databases "20 skip pannu"-nu ninaikkum. Pages 1-la start aagudhu,
+   so `ge=1` `?page=0`, `?page=-1` rendaiyum `422` aakkudhu. `size`
+   9/c-oda 100 ceiling-ah vachukkudhu.
+6. `search`, `min_price`, `max_price` `Query(...)` moola 9/c-oda
+   rules-ah vachukkudhu; `category` thirumba single `str`, 9/b
+   maadhiri.
+7. `@app.get("/items", response_model=ItemPage)` — response ippo oru
+   object, `list[ItemOut]` illa.
+8. `rows, total = crud.get_items_page(...)` — crud function **rendu**
+   things-ah tuple-a return pannudhu, idhu avangala unpack pannudhu.
+9. `return {"items": rows, "total": total, ...}` — oru plain dict,
+   adhoda `items`-la raw ORM rows. `response_model=ItemPage` dict-ah
+   validate panni ovoru row-ayum `ItemOut`-a maathum (`ItemOut`-la
+   irukra `from_attributes=True` dhan adhai allow pannudhu).
+10. `"pages": math.ceil(total / size)` — oru **ceiling division**. 10
+    per page-la 25 rows na 2.5, andha half page-kum oru page venum, so
+    **mela** round pannunga: 3. Exact fit exact-a-ve irukkum
+    (25 / 25 = 1), 0 rows na 0 pages.
+11. **Range-ku veliya irukra pages errors illa.** 3 pages-la `?page=9`
+    `"items": []`-oda `200` return pannum, 9/a-oda `?skip=100`-ku
+    eduththa same choice. Makkal padichitte irukkumbodhu rows delete
+    aagum; data 2 pages-a shrink aagumbodhu page 3-la irukra client-ku
+    crash illa, empty page-um pudhu `pages` value-um kidaikkanum.
+    `page` innum `1` illa adhukku mela-nu check aagudhu, yen-na page
+    0-ku eppovum artham illa.
+
+**`crud.py`:**
+
+12. Step 1 filtered `query`-ah 9/b maadhiri-ye build pannudhu — broad-a
+    start panni, anuppuna parameters-ku mattum `.filter(...)` add
+    pannum.
+13. `total = query.count()` — **same filters-oda, paging-ku munnadi
+    count pannunga.** Indha point-la `query`-la ella `WHERE`-um irukku,
+    aana `ORDER BY`, `OFFSET`, `LIMIT` innum illa. `.count()`
+    `SELECT count(*) FROM (that query)` run panni oru number return
+    pannum. Rendu rules dhan idha correct aakkudhu:
+    - **Same filters.** `?category=toys` `total: 5` kudukkanum, 25
+      illa. `total` full table-ah count pannina
+      (`db.query(ItemModel).count()`), `size=10`-la toys-ku UI 3 pages
+      draw pannum, pages 2, 3 empty-a irukkum. Adhe `query` object-ah
+      reuse pannradhunaala count-um page-um vera vera aaga chance-e
+      illa.
+    - **`offset`/`limit`-ku munnadi.** `.limit(size)`-ku appuram count
+      pannina "indha page-la evlo"-nu answer varum, adhu maximum `size`
+      dhan — adhu client-ku `len(items)`-la irundhe theriyum.
+14. Adhu **ovoru request-kum rendu queries** (oru count, oru page).
+    Total-ku idhu dhan normal price.
+15. `offset = (page - 1) * size` — **page → offset.** `- 1` yen-na
+    page 1 edhaiyum skip pannaadhu:
+
+    | `page` | `size` | `offset` | Rows |
+    |---|---|---|---|
+    | 1 | 10 | 0 | 1–10 |
+    | 2 | 10 | 10 | 11–20 |
+    | 3 | 10 | 20 | 21–25 (5 mattum dhan micham) |
+    | 3 | 2 | 4 | 5–6 |
+
+16. `query.order_by(column, ItemModel.id).offset(offset).limit(size).all()`
+    — apparam sort (9/b-oda `id` tie-breaker-oda) panni oru page cut
+    pannum.
+17. `return rows, total` — rendum `main.py`-ku tuple-a thirumba
+    pogudhu, so adhu envelope build pannalaam.
+
+## Try it
+
+```bash
+curl "http://127.0.0.1:8000/items?page=2"
+curl "http://127.0.0.1:8000/items?category=toys&size=2&page=3"
+curl "http://127.0.0.1:8000/items?page=9"
+curl -i "http://127.0.0.1:8000/items?page=0"  # 422
+curl "http://127.0.0.1:8000/items?category=furniture"
+```
+
+1. Rows 11–20, `"total": 25, "page": 2, "size": 10, "pages": 3`-oda.
+2. Kadaisi toy. 5 rows mattum dhan toys, so numbers filter aana set-ah
+   describe pannudhu, full table-ah illa:
+
+```json
+{
+  "items": [{"id": 16, "name": "Plush Bear", "category": "toys", "price": 12.25, "created_at": "..."}],
+  "total": 5,
+  "page": 3,
+  "size": 2,
+  "pages": 3
+}
+```
+
+3. Kadaisi page-ah thaandi: `"items": []`-oda `200`, `total`/`pages`
+   innum data enga mudiyudhu-nu solludhu.
+4. `422` — pages 1-la dhan start aagum:
+
+```json
+{"detail": [{"type": "greater_than_equal", "loc": ["query", "page"], "msg": "Input should be greater than or equal to 1", "...": "..."}]}
+```
+
+5. Edhuvum match aagadha filter: `"total": 0, "pages": 0`, empty
+   `items` list.
+
+**Postman:** Method `GET`, URL `http://127.0.0.1:8000/items`, apparam
+**Params** tab-la `page`, `size`, venum filters add pannunga. `page`-ah
+maathi resend panni results-ah step-by-step paarunga.
+
+Thirumba [topic overview](/tanglish/docs/pagination)-ku.
+
+Adutha topic: [Project Structure](/tanglish/docs/project-structure) — routers, dependencies, settings, async vs sync.

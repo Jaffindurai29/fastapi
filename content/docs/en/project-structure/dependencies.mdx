@@ -1,0 +1,554 @@
+---
+title: "2. Dependencies"
+description: A dependencies.py with get_db, get_item_or_404, a Pagination class and an X-API-Key guard, so routes just ask for what they need.
+---
+
+<GithubLink path="example/10/b" />
+
+Same folder layout and API as [APIRouter](/en/docs/project-structure/routers),
+plus a new `dependencies.py` that holds every reusable "thing a route
+needs before it can run":
+
+- `get_db` — the database session (moved here from `database.py`);
+- `get_item_or_404` — loads the row from `{item_id}` or answers `404`, so
+  GET, PATCH and DELETE no longer repeat that code;
+- `Pagination` — a class that reads and validates `?skip=&limit=`;
+- `require_api_key` — a guard: `POST`, `PATCH` and `DELETE` now need an
+  `X-API-Key` header.
+
+| Route | Key? | Description |
+|---|---|---|
+| `GET /items?skip=0&limit=10` | no | A page of rows. `limit` 1–100 (default 10), `skip` 0 or more; `422` otherwise |
+| `GET /items/{item_id}` | no | One row; `404` if missing |
+| `POST /items` | yes | Insert; `201`, `401` without a valid key, `409` if the name is taken, `422` |
+| `PATCH /items/{item_id}` | yes | Change only the fields sent; `401`, `400` if empty or `null`, `404`, `409` |
+| `DELETE /items/{item_id}` | yes | Remove; `204`, `401`, or `404` |
+| `GET /health` | no | Runs `SELECT 1`; `{"status": "ok", "database": "ok"}`, or `503` |
+
+## The folder
+
+```text
+10/b/
+├── main.py            # creates the app, include_router(...)
+├── database.py        # engine, SessionLocal, Base
+├── dependencies.py    # get_db, get_item_or_404, Pagination, require_api_key
+├── models.py          # ItemModel -> table structured_items
+├── schemas.py         # ItemCreate / ItemPatch / ItemOut
+├── crud.py            # plain database functions, no HTTP
+└── routers/
+    ├── __init__.py
+    ├── items.py       # /items — uses the dependencies above
+    └── health.py      # GET /health
+```
+
+## The code
+
+**`dependencies.py`** — new. Every reusable dependency in one place:
+
+```python title="dependencies.py"
+import os
+import secrets
+
+from fastapi import Depends, Header, HTTPException, Query, status
+from sqlalchemy.orm import Session
+
+import crud
+from database import SessionLocal
+from models import ItemModel
+
+
+# 1. The dependency every route has used since topic 6.
+#    Code before `yield` runs before the route; the yielded value is
+#    what the route receives as `db`; `finally` runs after the response
+#    is ready, even if the route raised an exception, so the session is
+#    always closed and its connection goes back to the pool.
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+# 2. A dependency that depends on another dependency.
+#    item_id comes from the path (same name as {item_id}); db comes
+#    from get_db. The route gets back a real row, or never runs at all.
+def get_item_or_404(item_id: int, db: Session = Depends(get_db)) -> ItemModel:
+    row = crud.get_item(db, item_id)
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Item {item_id} not found")
+    return row
+
+
+# 3. A class as a dependency. FastAPI calls Pagination(skip=..., limit=...)
+#    with values read from the query string, and the route receives the
+#    instance. Query(...) validates them like any other parameter.
+class Pagination:
+    def __init__(
+        self,
+        skip: int = Query(default=0, ge=0, description="Rows to skip"),
+        limit: int = Query(default=10, ge=1, le=100, description="Max rows to return"),
+    ):
+        self.skip = skip
+        self.limit = limit
+
+
+# 4. A guard. It returns nothing useful; its only job is to raise 401
+#    before the route runs if the X-API-Key header is missing or wrong.
+#    FastAPI turns the parameter name x_api_key into the header name
+#    X-API-Key (underscores become hyphens, case doesn't matter).
+def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
+    expected = os.getenv("API_KEY", "dev-api-key")
+    # compare_digest takes the same time whether the first or the last
+    # character is wrong, so the key can't be guessed by timing replies.
+    if x_api_key is None or not secrets.compare_digest(x_api_key, expected):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing or invalid API key")
+```
+
+**`routers/items.py`** — much shorter now: routes ask for a row,
+a page, or a key check instead of doing the work themselves:
+
+```python title="routers/items.py"
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+
+import crud
+from dependencies import Pagination, get_db, get_item_or_404, require_api_key
+from models import ItemModel
+from schemas import ItemCreate, ItemOut, ItemPatch
+
+router = APIRouter(prefix="/items", tags=["items"])
+
+NOT_FOUND = {404: {"description": "Item not found"}}
+
+# Write routes need a valid X-API-Key header. require_api_key returns
+# nothing, so it goes in dependencies=[...] instead of a parameter.
+LOCKED = [Depends(require_api_key)]
+
+
+def ensure_name_free(db: Session, name: str) -> None:
+    if crud.get_item_by_name(db, name) is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"An item named '{name}' already exists",
+        )
+
+
+@router.get("", response_model=list[ItemOut])
+def list_items(page: Pagination = Depends(Pagination), db: Session = Depends(get_db)):
+    return crud.get_items(db, skip=page.skip, limit=page.limit)
+
+
+# No 404 code here any more: if this function runs, `row` exists.
+@router.get("/{item_id}", response_model=ItemOut, responses=NOT_FOUND)
+def get_item(row: ItemModel = Depends(get_item_or_404)):
+    return row
+
+
+@router.post("", response_model=ItemOut, status_code=status.HTTP_201_CREATED, dependencies=LOCKED)
+def create_item(item: ItemCreate, db: Session = Depends(get_db)):
+    ensure_name_free(db, item.name)
+    return crud.create_item(db, item)
+
+
+# Both get_item_or_404 and this route ask for get_db. FastAPI calls
+# get_db ONCE for this request and hands the same session to both.
+@router.patch("/{item_id}", response_model=ItemOut, responses=NOT_FOUND, dependencies=LOCKED)
+def update_item(patch: ItemPatch, row: ItemModel = Depends(get_item_or_404), db: Session = Depends(get_db)):
+    # exclude_unset=True keeps only the fields the client actually sent.
+    changes = patch.model_dump(exclude_unset=True)
+    if not changes:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Send at least one field to update")
+    if None in changes.values():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Fields cannot be set to null")
+    if "name" in changes and changes["name"] != row.name:
+        ensure_name_free(db, changes["name"])
+
+    return crud.update_item(db, row, changes)
+
+
+@router.delete("/{item_id}", status_code=status.HTTP_204_NO_CONTENT, responses=NOT_FOUND, dependencies=LOCKED)
+def delete_item(row: ItemModel = Depends(get_item_or_404), db: Session = Depends(get_db)):
+    crud.delete_item(db, row)
+```
+
+**`routers/health.py`** — the same as 10/a, except `get_db` is imported
+from `dependencies`:
+
+```python title="routers/health.py"
+from fastapi import APIRouter, Depends
+from fastapi.responses import JSONResponse
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
+
+from dependencies import get_db
+
+# No prefix: this router's only route lives at /health.
+router = APIRouter(tags=["health"])
+
+
+@router.get("/health")
+def health(db: Session = Depends(get_db)):
+    try:
+        # The cheapest query there is. If it works, the database is up
+        # and the connection settings are right.
+        db.execute(text("SELECT 1"))
+    except SQLAlchemyError:
+        # 503 Service Unavailable — the app is running, but can't do its job.
+        return JSONResponse(status_code=503, content={"status": "error", "database": "unreachable"})
+    return {"status": "ok", "database": "ok"}
+```
+
+**`database.py`** — the same as 10/a, minus `get_db`:
+
+```python title="database.py"
+import os
+
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
+from sqlalchemy.orm import declarative_base, sessionmaker
+
+load_dotenv()
+
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
+MYSQL_USER = os.getenv("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
+
+# Set DATABASE_URL directly to override everything above (e.g. to point
+# at SQLite for a quick local test with no MySQL server at all).
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
+)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+# get_db() moved to dependencies.py, next to the other dependencies.
+```
+
+**`main.py`** — unchanged from 10/a:
+
+```python title="main.py"
+from fastapi import FastAPI
+
+import crud
+from database import Base, SessionLocal, engine
+from routers import health, items
+
+Base.metadata.create_all(bind=engine)
+
+with SessionLocal() as db:
+    crud.seed_items(db)
+
+app = FastAPI()
+
+# main.py no longer holds any routes. It builds the app and plugs in
+# each router. Every route in items.router gets the "/items" prefix and
+# the "items" tag that router was created with.
+app.include_router(items.router)
+app.include_router(health.router)
+```
+
+**`models.py`** — unchanged:
+
+```python title="models.py"
+from sqlalchemy import Column, Float, Integer, String
+
+from database import Base
+
+
+class ItemModel(Base):
+    __tablename__ = "structured_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(50), nullable=False, unique=True)
+    price = Column(Float, nullable=False)
+    quantity = Column(Integer, nullable=False, default=0)
+```
+
+**`schemas.py`** — unchanged:
+
+```python title="schemas.py"
+from typing import Optional
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+class ItemCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=50)
+    price: float = Field(gt=0, le=1_000_000)
+    quantity: int = Field(default=0, ge=0)
+
+    @field_validator("name")
+    @classmethod
+    def name_not_blank(cls, value: str) -> str:
+        value = value.strip()
+        if value == "":
+            raise ValueError("name must not be blank")
+        return value
+
+
+# Same rules as ItemCreate, but every field is optional — PATCH only
+# sends what changed.
+class ItemPatch(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=50)
+    price: Optional[float] = Field(default=None, gt=0, le=1_000_000)
+    quantity: Optional[int] = Field(default=None, ge=0)
+
+    @field_validator("name")
+    @classmethod
+    def name_not_blank(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        value = value.strip()
+        if value == "":
+            raise ValueError("name must not be blank")
+        return value
+
+
+# What goes back out. from_attributes lets response_model read a
+# SQLAlchemy row directly (row.name), as in 8/d.
+class ItemOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    price: float
+    quantity: int
+```
+
+**`crud.py`** — unchanged (`get_items` already took `skip` and `limit`):
+
+```python title="crud.py"
+from sqlalchemy.orm import Session
+
+from models import ItemModel
+from schemas import ItemCreate
+
+
+def get_items(db: Session, skip: int = 0, limit: int | None = None) -> list[ItemModel]:
+    query = db.query(ItemModel).order_by(ItemModel.id).offset(skip)
+    if limit is not None:
+        query = query.limit(limit)
+    return query.all()
+
+
+def get_item(db: Session, item_id: int) -> ItemModel | None:
+    return db.get(ItemModel, item_id)
+
+
+def get_item_by_name(db: Session, name: str) -> ItemModel | None:
+    return db.query(ItemModel).filter(ItemModel.name == name).first()
+
+
+def create_item(db: Session, item: ItemCreate) -> ItemModel:
+    row = ItemModel(**item.model_dump())
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def update_item(db: Session, row: ItemModel, changes: dict) -> ItemModel:
+    for field, value in changes.items():
+        setattr(row, field, value)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def delete_item(db: Session, row: ItemModel) -> None:
+    db.delete(row)
+    db.commit()
+
+
+def seed_items(db: Session) -> None:
+    if db.query(ItemModel).count() == 0:
+        db.add_all(
+            [
+                ItemModel(name="Laptop", price=999.99, quantity=5),
+                ItemModel(name="Mouse", price=19.99, quantity=50),
+                ItemModel(name="Keyboard", price=49.5, quantity=20),
+            ]
+        )
+        db.commit()
+```
+
+**`.env.example`** — one new optional variable at the bottom:
+
+```bash title=".env.example"
+# Copy this file to .env and adjust the values for your local MySQL
+# server. All of these already have working defaults baked into the
+# code, so creating a .env is optional — the app runs with zero setup
+# if you skip this file entirely.
+
+MYSQL_HOST=127.0.0.1
+MYSQL_PORT=3306
+MYSQL_USER=root
+MYSQL_PASSWORD=
+MYSQL_DB=fastapi_learn
+
+# Set this to override everything above at once — e.g. point at SQLite
+# for a quick local try with no MySQL server running at all.
+# DATABASE_URL=sqlite:///./test.db
+
+# The key clients must send in the X-API-Key header for POST, PATCH and
+# DELETE. Defaults to "dev-api-key" if unset. Change it for anything
+# that isn't your own laptop.
+API_KEY=dev-api-key
+```
+
+## Line by line
+
+`models.py`, `schemas.py`, `crud.py`, `main.py` and the router layout
+are unchanged from [APIRouter](/en/docs/project-structure/routers).
+What's new is `dependencies.py`, and how much shorter `routers/items.py`
+gets because of it.
+
+**What a dependency is.** A dependency is any function (or class) you
+hand to `Depends(...)`. Before a route runs, FastAPI calls each of its
+dependencies, filling in *their* parameters from the request (path,
+query, headers, body, or other dependencies) exactly the way it fills
+in a route's. Whatever the dependency returns becomes the route's
+argument. If it raises `HTTPException`, the route never runs.
+
+**`get_db` — the one you've used since topic 6, now explained:**
+
+1. **It moved from `database.py` into `dependencies.py`**, next to the
+   other dependencies. `database.py` now only builds the engine and
+   session factory.
+2. **It uses `yield` instead of `return`, so it runs in two halves.**
+   Before the route: open a session, then `yield` it; the yielded value
+   is what the route gets as `db`. After the response is ready:
+   execution resumes after `yield`, and `finally` closes the session.
+3. **`finally` runs even if the route raised.** So a `404` (or a crash)
+   never leaks a database connection. Without this, every route would
+   need its own `try`/`finally`.
+
+**`get_item_or_404` — a dependency that depends on another one:**
+
+4. **`item_id: int` matches `{item_id}` in the route path**, so FastAPI
+   reads it from the URL and validates it as an `int` (`/items/abc` is a
+   `422`), just like it would on the route itself.
+5. **`db: Session = Depends(get_db)`** — a dependency can have its own
+   dependencies. FastAPI walks the chain for you:
+   `route → get_item_or_404 → get_db`.
+6. **The route just asks for a row.** `get_item(row: ItemModel = Depends(get_item_or_404))`
+   has no `404` code at all: if the function body runs, `row` exists.
+   In 10/a every route called the helper by hand; now it can't be
+   forgotten.
+7. **There's no `item_id` parameter on these routes any more**, yet it's
+   still in the URL and still documented in `/docs`, because the
+   dependency declares it.
+
+**One `get_db` call per request, even when it's asked for twice:**
+
+8. **`PATCH` and `DELETE` ask for `get_db` directly *and* through
+   `get_item_or_404`.** FastAPI caches each dependency's result for the
+   length of one request: `get_db` runs once, and both places receive
+   the **same** session.
+9. **Why that matters.** The row was loaded in that session, so it can
+   be changed, deleted and committed in it. Two different sessions
+   would mean two connections and a row "belonging" to the wrong one.
+   (The rare dependency that must run every time can opt out with
+   `Depends(fn, use_cache=False)`.)
+
+**`Pagination` — a class as a dependency:**
+
+10. **FastAPI only needs something callable, and a class is callable.**
+    `Pagination(skip=..., limit=...)` builds an instance. FastAPI reads
+    `__init__`'s parameters as query parameters and passes the finished
+    instance to the route as `page`.
+11. **`Query(default=10, ge=1, le=100, ...)`** validates them like any
+    other parameter: `?limit=500` or `?skip=-1` is a `422`. `limit` has a
+    maximum so nobody can ask for a million rows in one request.
+12. **Reusable.** Any other list route can take
+    `page: Pagination = Depends(Pagination)` and get the same names,
+    defaults, limits and docs. (`Depends()` with empty parentheses does
+    the same thing, using the type annotation; the explicit form is
+    easier to read.)
+13. **`crud.get_items(db, skip=page.skip, limit=page.limit)`** — the
+    route just forwards the two numbers; `crud.py` turns them into
+    `OFFSET` and `LIMIT`.
+
+**`require_api_key` — a guard that returns nothing:**
+
+14. **`x_api_key: str | None = Header(default=None)`** — `Header()` reads
+    a request header. FastAPI converts the parameter name `x_api_key` to
+    `x-api-key` (underscores become hyphens; header names are
+    case-insensitive, so `X-API-Key` matches).
+15. **The default is `None` on purpose.** With a required `Header(...)`,
+    a missing header would be FastAPI's generic `422`, and the client
+    would see a validation error instead of "you're not allowed".
+    Making it optional lets *our* code answer `401 Unauthorized` for
+    both "missing" and "wrong".
+16. **`os.getenv("API_KEY", "dev-api-key")`** — the expected key comes
+    from the environment, read on every request, with a default so the
+    app still runs with zero setup.
+    [Settings](/en/docs/project-structure/settings) moves this into a
+    typed `Settings` class.
+17. **`secrets.compare_digest(x_api_key, expected)`** — compares the two
+    strings in the same amount of time whether the first or the last
+    character is wrong, so an attacker can't guess the key one
+    character at a time by timing the replies. A plain `==` stops at the
+    first difference.
+18. This is the simplest kind of auth: one shared secret. Real per-user
+    login (passwords, tokens) builds on exactly this pattern.
+
+**Applying the guard only to write routes:**
+
+19. **`LOCKED = [Depends(require_api_key)]`** — defined once at the top of
+    `routers/items.py`, then passed as `dependencies=LOCKED` on the
+    `POST`, `PATCH` and `DELETE` decorators.
+20. **`dependencies=[...]` runs the dependency but throws its return
+    value away**, which is right for a guard: the route doesn't need
+    anything from it, it just must not run without it. Decorator
+    dependencies also run **before** the route's own parameters'
+    dependencies, so a missing key is a `401` even for an item that
+    doesn't exist.
+21. **Why per-route, not a second router?** The other option was an
+    `admin_router = APIRouter(prefix="/items", dependencies=[Depends(require_api_key)])`
+    holding POST/PATCH/DELETE. That's the better tool when a *whole
+    group* is locked (say, everything under `/admin`). Here it would
+    split one resource across two routers with the same prefix, and
+    you'd have to check which router a route is on to know whether it's
+    protected. With `dependencies=LOCKED` the lock is visible right on
+    the line that defines the route. The same `dependencies=` argument
+    also works on `APIRouter(...)` (every route on the router) and on
+    `FastAPI(...)` (every route in the app).
+
+## Try it
+
+```bash
+curl "http://127.0.0.1:8000/items?skip=1&limit=1"
+curl http://127.0.0.1:8000/items/1
+curl -i -X POST http://127.0.0.1:8000/items -H "Content-Type: application/json" -d "{\"name\": \"Desk\", \"price\": 120}"
+curl -X POST http://127.0.0.1:8000/items -H "X-API-Key: dev-api-key" -H "Content-Type: application/json" -d "{\"name\": \"Desk\", \"price\": 120, \"quantity\": 2}"
+curl -X PATCH http://127.0.0.1:8000/items/1 -H "X-API-Key: dev-api-key" -H "Content-Type: application/json" -d "{\"price\": 899}"
+curl -X DELETE http://127.0.0.1:8000/items/2 -H "X-API-Key: dev-api-key"
+curl -i "http://127.0.0.1:8000/items?limit=500"  # 422
+```
+
+The first `POST` (no key) comes back
+`401 {"detail": "Missing or invalid API key"}`; the second one works.
+Quote any URL with `?` and `&` in it, or your shell will cut it at the
+`&`.
+
+In [/docs](http://127.0.0.1:8000/docs), the three write routes show an
+`x-api-key` header field; the read routes don't. `GET /items` shows
+`skip` and `limit` with their limits, read straight from `Pagination`.
+
+**Postman:** Method `POST`, URL `http://127.0.0.1:8000/items`, Headers
+tab → key `X-API-Key`, value `dev-api-key`, Body → raw → JSON:
+
+```json
+{"name": "Desk", "price": 120, "quantity": 2}
+```
+
+Next: [Settings](/en/docs/project-structure/settings) — every setting in
+one typed `Settings` class.

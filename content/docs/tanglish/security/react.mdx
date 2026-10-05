@@ -1,0 +1,728 @@
+---
+title: "11. React login UI"
+description: Login panni, tokens store panni, axios interceptors vachi automatic-a refresh panra oru React frontend.
+---
+
+<GithubLink path="example/12/j" label="Backend on GitHub" />{" "}
+<GithubLink path="example/12/react" label="Frontend on GitHub" />
+
+[Everything together](/tanglish/docs/security/secure-app)-la irukra
+secure notes API-ku oru React frontend. Neenga login pannuveenga, oru
+pair tokens kidaikkum, adhukku appuram ovoru request-um
+`Authorization: Bearer ...`-ah eduthuttu pogum, endha component-um adha
+pathi yosikka vendaam. Access token expire aana, app amaidhiya refresh
+token-ah oru pudhu pair-ku maathi, request-ah retry pannum.
+
+[React + MySQL](/tanglish/docs/mysql-react) plain `axios.get(...)` vachi
+API-ah call pannuchu, yaarum login panna vendaam. Ippo ovoru request-kum
+token venum, tokens expire aagum, oru `401`-ku "veliya po" illama
+"summa refresh pannu" nu artham irukkalaam. Andha logic-ah ovoru button
+handler-layum vechaa kuzhappam aagidum, so ellam oray file-la,
+`src/api.js`-la irukku. Appo `App.jsx` munnadi paatha React apps
+maadhiriye thirumba theriyum.
+
+```
+react/
+├── src/api.js     # axios instance, token storage, the two interceptors
+├── src/App.jsx    # login form + notes list + "try the security rules" buttons
+└── src/main.jsx
+```
+
+## Indha topic-ah run pannurathu
+
+[Everything together](/tanglish/docs/security/secure-app)-oda backend-um
+indha frontend-um orey nerathula run aaganum:
+
+1. **One-time database setup** ([MySQL + CRUD](/tanglish/docs/mysql-crud)
+   maadhiriye, already panniyirundha skip pannunga):
+
+   ```bash
+   pip install "pwdlib[argon2]" pyjwt slowapi pydantic-settings python-multipart
+   ```
+
+   ```sql
+   CREATE DATABASE fastapi_learn;
+   ```
+
+   `MYSQL_*` variables export pannunga, illa `example/12/j/.env.example`-ah
+   `example/12/j/.env`-a copy panni edit pannunga. Rendum skip
+   pannalum paravaa illa; defaults ulla irukku. MySQL kaila illaya?
+   Adhukku pathila `DATABASE_URL="sqlite:///./test.db"` set pannunga.
+   `SECRET_KEY`-ku-um development default irukku; `ENVIRONMENT=production`-la
+   run pannumbodhu mattum dhan **kandippa** set pannanum.
+
+2. **Terminal 1 — backend:**
+
+   ```bash
+   cd example/12/j
+   uvicorn main:app --reload
+   ```
+
+3. **Terminal 2 — frontend:**
+
+   ```bash
+   cd example/12/react
+   npm install
+   npm run dev
+   ```
+
+4. Vite print panra URL-ah open pannunga (vazhakkama
+   [http://localhost:5173](http://localhost:5173)), `alice` /
+   `alice-password`-a login pannunga.
+
+Frontend-ku munnadi backend-ah start pannunga: UI-la irukra ovoru
+button-um adha neraa call pannum. Page-oda origin backend-oda
+`CORS_ORIGINS`-la onna irukkanum (`localhost:5173`-um
+`127.0.0.1:5173`-um default-a allowed), illana browser ovoru
+response-ayum block pannidum.
+
+## Code
+
+**`src/api.js`** — axios instance, token storage, rendu interceptors-um.
+Tokens pathi ellame inga dhan:
+
+```js title="src/api.js"
+import axios from "axios";
+
+// Where the FastAPI backend (12/j) is running.
+export const API_URL = "http://127.0.0.1:8000";
+
+// ---------------------------------------------------------------------------
+// Token storage
+//
+// Access token: kept in a plain module variable, i.e. in memory only. It
+// disappears on page reload, and that's fine: it only lives 15 minutes
+// anyway, and we can get a fresh one with the refresh token.
+//
+// Refresh token: kept in localStorage so a page reload doesn't log you out.
+// Trade-off: any JavaScript running on this page can read localStorage, so
+// an XSS bug (e.g. rendering untrusted HTML) could steal it. The stronger
+// option is an httpOnly cookie, which JavaScript can't read at all, but
+// that needs the backend to set/read cookies and to defend against CSRF
+// (cookies are sent automatically, even by other sites' forms). For a
+// learning app, localStorage + rotation on the backend is a reasonable
+// middle ground.
+// ---------------------------------------------------------------------------
+
+const REFRESH_KEY = "refresh_token";
+let accessToken = null;
+
+export function saveTokens({ access_token, refresh_token }) {
+  accessToken = access_token;
+  localStorage.setItem(REFRESH_KEY, refresh_token);
+}
+
+export function clearTokens() {
+  accessToken = null;
+  localStorage.removeItem(REFRESH_KEY);
+}
+
+// For the demo button in App.jsx: replace the access token with junk so
+// the next request gets a 401 and you can watch the refresh happen.
+export function breakAccessToken() {
+  accessToken = "not-a-real-token";
+}
+
+export function hasRefreshToken() {
+  return localStorage.getItem(REFRESH_KEY) !== null;
+}
+
+// App.jsx registers a function here so the API layer can tell the UI
+// "you've been logged out" when a refresh fails.
+let onLogout = () => {};
+export function setOnLogout(callback) {
+  onLogout = callback;
+}
+
+// One axios instance for the whole app. Every call goes through the two
+// interceptors below.
+export const api = axios.create({ baseURL: API_URL });
+
+// ---- Request interceptor: attach the access token ------------------------
+// Runs before every request. Saves writing the header by hand on every call.
+api.interceptors.request.use((config) => {
+  if (accessToken) {
+    config.headers.Authorization = `Bearer ${accessToken}`;
+  }
+  return config;
+});
+
+// ---- Refresh: one at a time ---------------------------------------------
+// If three requests fail with 401 at the same moment, we must NOT call
+// /refresh three times: the backend rotates refresh tokens, so the 2nd
+// and 3rd calls would be using an already-used token and fail. Instead,
+// the first 401 starts a refresh and the others wait on the same promise.
+let refreshPromise = null;
+
+function refreshTokens() {
+  if (!refreshPromise) {
+    const refresh_token = localStorage.getItem(REFRESH_KEY);
+    refreshPromise = api
+      .post("/refresh", { refresh_token })
+      .then((response) => {
+        saveTokens(response.data);
+        return response.data.access_token;
+      })
+      .finally(() => {
+        refreshPromise = null; // the next expiry starts a fresh refresh
+      });
+  }
+  return refreshPromise;
+}
+
+// Restore a session after a page reload: we have a refresh token in
+// localStorage but no access token in memory yet.
+export async function restoreSession() {
+  if (!hasRefreshToken()) return false;
+  try {
+    await refreshTokens();
+    return true;
+  } catch {
+    clearTokens();
+    return false;
+  }
+}
+
+// ---- Response interceptor: refresh on 401, retry once --------------------
+api.interceptors.response.use(
+  (response) => response, // 2xx: pass straight through
+  async (error) => {
+    const original = error.config;
+    const url = original?.url ?? "";
+
+    const shouldRefresh =
+      error.response?.status === 401 &&
+      !original._retried && // only retry each request once, or we could loop forever
+      url !== "/token" && // a 401 from login means "wrong password", not "expired"
+      url !== "/refresh" && // a 401 from refresh means the session is over
+      hasRefreshToken();
+
+    if (!shouldRefresh) {
+      return Promise.reject(error); // 403, 404, 429, ... go to the caller as-is
+    }
+
+    original._retried = true;
+    try {
+      const newAccessToken = await refreshTokens();
+      original.headers.Authorization = `Bearer ${newAccessToken}`;
+      return api(original); // replay the request that failed
+    } catch (refreshError) {
+      // Refresh token expired, revoked or reused: the session is over.
+      clearTokens();
+      onLogout();
+      return Promise.reject(refreshError);
+    }
+  },
+);
+```
+
+**`src/App.jsx`** — login form, notes list, mattrum security rules-ah
+test panra buttons:
+
+```jsx title="src/App.jsx"
+import { useEffect, useState } from "react";
+import { api, breakAccessToken, clearTokens, restoreSession, saveTokens, setOnLogout } from "./api.js";
+
+// Turns an axios error into something a person can read. The backend's
+// own `detail` message is usually the best explanation.
+function errorMessage(action, err) {
+  const status = err.response?.status;
+  const detail = err.response?.data?.detail;
+  if (status === 429) return "Too many login attempts. Wait a minute and try again.";
+  if (status === 403) return `Not allowed: ${detail ?? "forbidden"}`;
+  if (status && typeof detail === "string") return `Failed to ${action}: ${detail}`;
+  return status ? `Failed to ${action} (status ${status})` : `Failed to ${action}: ${err.message}`;
+}
+
+const rowStyle = { display: "flex", alignItems: "center", gap: "0.5rem", padding: "0.25rem 0" };
+
+export default function App() {
+  const [user, setUser] = useState(null); // { id, username, role } once logged in
+  const [username, setUsername] = useState("alice");
+  const [password, setPassword] = useState("alice-password");
+
+  const [notes, setNotes] = useState([]);
+  const [title, setTitle] = useState(""); // the "add note" box
+  const [editingId, setEditingId] = useState(null);
+  const [editTitle, setEditTitle] = useState("");
+
+  const [adminUsers, setAdminUsers] = useState(null); // result of GET /admin/users
+  const [error, setError] = useState(null);
+  const [info, setInfo] = useState(null);
+
+  // On page load: tell api.js what "logged out" means for the UI, then try
+  // to turn a saved refresh token back into a session.
+  useEffect(() => {
+    setOnLogout(() => {
+      resetState();
+      setError("Your session expired. Please log in again.");
+    });
+    restoreSession().then((ok) => {
+      if (ok) loadUserAndNotes();
+    });
+  }, []);
+
+  function resetState() {
+    setUser(null);
+    setNotes([]);
+    setAdminUsers(null);
+    setEditingId(null);
+  }
+
+  async function loadUserAndNotes() {
+    try {
+      const me = await api.get("/users/me");
+      setUser(me.data);
+      await loadNotes();
+    } catch (err) {
+      setError(errorMessage("load your account", err));
+    }
+  }
+
+  // LOGIN — POST /token. OAuth2 says the body is a FORM, not JSON.
+  // URLSearchParams makes axios send it as
+  // application/x-www-form-urlencoded: username=alice&password=...
+  async function login(event) {
+    event.preventDefault();
+    try {
+      const body = new URLSearchParams({ username, password });
+      const response = await api.post("/token", body);
+      saveTokens(response.data);
+      setError(null);
+      setInfo(null);
+      await loadUserAndNotes();
+    } catch (err) {
+      setError(errorMessage("log in", err));
+    }
+  }
+
+  // LOGOUT — forget the tokens. (The access token still works on the
+  // server until it expires; that's why it's short-lived.)
+  function logout() {
+    clearTokens();
+    resetState();
+    setError(null);
+    setInfo(null);
+  }
+
+  // READ — GET /notes. The backend decides what "your notes" means:
+  // your own, or everyone's for an admin.
+  async function loadNotes() {
+    try {
+      const response = await api.get("/notes");
+      setNotes(response.data);
+      setError(null);
+    } catch (err) {
+      setError(errorMessage("load notes", err));
+    }
+  }
+
+  // CREATE — POST /notes. No owner_id sent: the server uses whoever the
+  // token belongs to.
+  async function addNote(event) {
+    event.preventDefault();
+    if (title.trim() === "") return;
+    try {
+      await api.post("/notes", { title, body: "" });
+    } catch (err) {
+      setError(errorMessage("add note", err));
+      return;
+    }
+    setTitle("");
+    await loadNotes();
+  }
+
+  // UPDATE — PUT /notes/{id}
+  async function saveEdit(note) {
+    try {
+      await api.put(`/notes/${note.id}`, { title: editTitle, body: note.body });
+    } catch (err) {
+      setError(errorMessage("update note", err));
+      return;
+    }
+    setEditingId(null);
+    await loadNotes();
+  }
+
+  // DELETE — DELETE /notes/{id}
+  async function deleteNote(id) {
+    try {
+      await api.delete(`/notes/${id}`);
+    } catch (err) {
+      setError(errorMessage("delete note", err));
+      return;
+    }
+    await loadNotes();
+  }
+
+  // Ask for a note by id, including ones that aren't yours, to see the 403.
+  async function readNoteById(id) {
+    try {
+      const response = await api.get(`/notes/${id}`);
+      setInfo(`Note #${response.data.id}: ${response.data.title}`);
+      setError(null);
+    } catch (err) {
+      setError(errorMessage(`read note #${id}`, err));
+      setInfo(null);
+    }
+  }
+
+  // ADMIN — GET /admin/users. Admins get the list; everyone else gets 403.
+  async function loadAdminUsers() {
+    try {
+      const response = await api.get("/admin/users");
+      setAdminUsers(response.data);
+      setError(null);
+    } catch (err) {
+      setError(errorMessage("load users", err));
+      setAdminUsers(null);
+    }
+  }
+
+  // DEMO — make the next request fail with 401, so the response
+  // interceptor in api.js refreshes the tokens and retries it.
+  async function simulateExpiredToken() {
+    breakAccessToken();
+    await loadNotes();
+    setInfo("Access token was invalid, so api.js refreshed it and retried. You didn't notice a thing.");
+  }
+
+  // ---- Logged out: show the login form ----
+  if (!user) {
+    return (
+      <main style={{ maxWidth: 560, margin: "3rem auto", fontFamily: "sans-serif" }}>
+        <h1>Secure Notes</h1>
+        {error && <p style={{ color: "crimson" }}>{error}</p>}
+
+        <form onSubmit={login} style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+          <input
+            value={username}
+            onChange={(event) => setUsername(event.target.value)}
+            placeholder="Username"
+            style={{ padding: "0.5rem" }}
+          />
+          <input
+            type="password"
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+            placeholder="Password"
+            style={{ padding: "0.5rem" }}
+          />
+          <button type="submit">Log in</button>
+        </form>
+
+        <p style={{ color: "#888" }}>
+          Try alice / alice-password, bob / bob-password, or admin / admin-password. Get the password wrong 6 times
+          in a minute to see the rate limit.
+        </p>
+      </main>
+    );
+  }
+
+  // ---- Logged in ----
+  const isAdmin = user.role === "admin";
+
+  return (
+    <main style={{ maxWidth: 560, margin: "3rem auto", fontFamily: "sans-serif" }}>
+      <h1>Secure Notes</h1>
+
+      <div style={rowStyle}>
+        <span style={{ flex: 1 }}>
+          Logged in as <strong>{user.username}</strong> ({user.role})
+          {isAdmin && (
+            <span
+              style={{ marginLeft: "0.5rem", padding: "0 0.4rem", background: "#1a1a1a", color: "#fff", borderRadius: 4 }}
+            >
+              ADMIN
+            </span>
+          )}
+        </span>
+        <button onClick={logout}>Log out</button>
+      </div>
+
+      {error && <p style={{ color: "crimson" }}>{error}</p>}
+      {info && <p style={{ color: "seagreen" }}>{info}</p>}
+
+      {/* CREATE form */}
+      <form onSubmit={addNote} style={{ display: "flex", gap: "0.5rem", marginTop: "1rem" }}>
+        <input
+          value={title}
+          onChange={(event) => setTitle(event.target.value)}
+          placeholder="New note title"
+          style={{ flex: 1, padding: "0.5rem" }}
+        />
+        <button type="submit">Add</button>
+      </form>
+
+      {/* READ: one <li> per note */}
+      <ul style={{ listStyle: "none", padding: 0, marginTop: "1.5rem" }}>
+        {notes.map((note) =>
+          editingId === note.id ? (
+            <li key={note.id} style={rowStyle}>
+              <span style={{ color: "#888", width: "2rem" }}>#{note.id}</span>
+              <input
+                value={editTitle}
+                onChange={(event) => setEditTitle(event.target.value)}
+                style={{ flex: 1, padding: "0.25rem" }}
+              />
+              <button onClick={() => saveEdit(note)}>Save</button>
+              <button onClick={() => setEditingId(null)}>Cancel</button>
+            </li>
+          ) : (
+            <li key={note.id} style={rowStyle}>
+              <span style={{ color: "#888", width: "2rem" }}>#{note.id}</span>
+              <span style={{ flex: 1 }}>
+                {note.title}
+                {/* Admins see everyone's notes, so show whose this is. */}
+                {note.owner_id !== user.id && (
+                  <span style={{ color: "#888" }}> (user #{note.owner_id})</span>
+                )}
+              </span>
+              <button
+                onClick={() => {
+                  setEditingId(note.id);
+                  setEditTitle(note.title);
+                }}
+              >
+                Edit
+              </button>
+              <button onClick={() => deleteNote(note.id)}>Delete</button>
+            </li>
+          ),
+        )}
+      </ul>
+
+      {notes.length === 0 && <p>No notes yet. Add one above.</p>}
+
+      {/* Security experiments */}
+      <h2 style={{ fontSize: "1.1rem", marginTop: "2rem" }}>Try the security rules</h2>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem" }}>
+        {/* Note 3 belongs to bob: alice gets 403, bob and admin get the note. */}
+        <button onClick={() => readNoteById(3)}>Read note #3</button>
+        {isAdmin ? (
+          <button onClick={loadAdminUsers}>Load all users (admin)</button>
+        ) : (
+          <button onClick={loadAdminUsers}>Try admin route</button>
+        )}
+        <button onClick={simulateExpiredToken}>Simulate expired access token</button>
+      </div>
+
+      {adminUsers && (
+        <ul style={{ marginTop: "1rem" }}>
+          {adminUsers.map((u) => (
+            <li key={u.id}>
+              #{u.id} {u.username} ({u.role}){!u.is_active && " (inactive)"}
+            </li>
+          ))}
+        </ul>
+      )}
+    </main>
+  );
+}
+```
+
+**`src/main.jsx`** — `App`-ah page-la mount pannudhu, ella Vite + React
+app maadhiriye:
+
+```jsx title="src/main.jsx"
+import React from "react";
+import ReactDOM from "react-dom/client";
+import App from "./App.jsx";
+import "./index.css";
+
+ReactDOM.createRoot(document.getElementById("root")).render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>,
+);
+```
+
+## Step by step: `src/api.js`
+
+**Step 1 — Oru axios instance.**
+
+```js
+export const api = axios.create({ baseURL: API_URL });
+```
+
+`axios.create` adhoda sontha settings-oda axios-oda thani copy-ah
+create pannum. `baseURL` set pannina calls chinnadhaa aagum (full URL-ku
+pathila `api.get("/notes")`), innum mukkiyama, indha copy-ku adhoda
+sontha **interceptors** irukkalaam: `api` vazhiya pogra ovoru
+request-layum response-layum run aagra functions. Ovoru component-um
+`api`-ah dhan import pannum, `axios`-ah neraa illa.
+
+**Step 2 — Tokens enga irukku.** Rendu tokens, rendu idangal, venumne:
+
+- **Access token memory-la** (`let accessToken`, oru plain module
+  variable). Adhu ovoru request-oda-vum pogudhu, so adhu dhan romba
+  protect panna vendiyadhu. Reload pannina variable poidum, adhu
+  paravaa illa: adhu 15 nimisham dhan irukkum, refresh token vachi
+  replace pannalam.
+- **Refresh token `localStorage`-la** (`refresh_token` key-la), so page
+  reload pannina logout aagaadhu.
+
+`saveTokens()`-um `clearTokens()`-um dhan rendaiyum write panra oray
+idangal, so storage half-update aaga mudiyaadhu.
+
+**Token storage trade-offs.** **Page-la irukra edha JavaScript-um
+`localStorage`-ah padikkalam.** App-la eppovaavadhu XSS bug irundhaa
+(untrusted HTML render pannradhu, compromise aana npm package), refresh
+token thirudu pogalaam.
+
+| Enga | Reload-la survive aagumaa? | Page JavaScript (XSS) padikkalaamaa? | Automatic-a pogumaa? | Extra velai |
+|---|---|---|---|---|
+| Memory (module variable) | Illa | Page open-a irukra varaikkum mattum | Illa | Illa, aana reload-ku appuram ulla vara vera vazhi venum |
+| `localStorage` | Aamaa | Aamaa | Illa | Illa |
+| httpOnly cookie | Aamaa | Illa | Aamaa, vera sites-oda forms kooda | Backend cookies set/read pannanum **mattrum** CSRF-ku defend pannanum |
+
+Indha app access token-ku memory-um refresh token-ku `localStorage`-um
+use pannudhu. Backend-oda refresh-token rotation-oda serthu
+([checklist](/tanglish/docs/security/secure-app)-la item 7), learning-ku
+idhu reasonable middle ground: thirudu pona refresh token adhigapatcham
+oru thadava dhan work aagum. React-um XSS-ku edhira help pannudhu: JSX
+ulla `note.title` eppovum text-a dhan render aagum, HTML-a illa.
+
+**Step 3 — Request interceptor: token-ah attach pannurathu.**
+`api.interceptors.request.use((config) => ...)` ovoru request-um browser-ah
+vittu pogradhukku konjam munnadi run aagum. `config`-na anuppa pogra
+request; access token irundha `Authorization: Bearer ...` add panni
+thirumba kudukkurom. `App.jsx`-la endha component-um `Authorization`-ah
+mention-e pannaadhu.
+
+**Step 4 — Response interceptor: eppo refresh pannanum.**
+`api.interceptors.response.use(onSuccess, onError)` rendu functions
+edukkum. First onnu 2xx responses-ah handle pannum (appadiye
+anuppidum). Rendaavadhu ovoru error-ayum handle pannum. Oray oru vagai
+error-ku dhan refresh worth: normal request-la `401`. `shouldRefresh`-la
+irukra ovoru condition-um oru trap-ah thadukkudhu:
+
+- **`!original._retried`** — retry pannina request-ah mark
+  pannurom. Retry-um `401` vaangina, eppovum refresh pannikitte
+  irukkaama give up pannurom.
+- **`url !== "/token"`** — login-la `401`-na thappaana password.
+  Refresh pannradhula artham illa.
+- **`url !== "/refresh"`** — refresh-e `401` return pannina, refresh-ah
+  refresh panna try pannradhu loop aagum.
+- **`hasRefreshToken()`** — neenga login-e pannalana refresh panna
+  edhuvum illa.
+- **`403` eppovum refresh aagaadhu** — pudhu token Alice-ah Bob-oda
+  note-ku owner aakkaadhu. Adhu `404`, `429` mattrum meedhi-oda serthu
+  neraa `App.jsx`-ku message kaatta pogum.
+
+**Step 5 — Refresh, apparam replay.** `error.config`-na fail aana
+exact request. `original._retried = true` set panni, pudhu access
+token-ku wait panni, adha header-la pottu, `api(original)` call panni
+adhe request-ah thirumba anuppurom. Retry enna return pannudho adhu
+`App.jsx`-la irukra **original** `await api.get(...)`-oda result aagum.
+Component-oda paarvai-la, request konjam late aachu, avlo dhan.
+
+Refresh fail aana (refresh token expire, revoke, illa reuse aagirundha),
+session real-a mudinjiduchu: `clearTokens()`, apparam `onLogout()`.
+`api.js`-ku React state pathi edhuvum theriyaadhu, so `App.jsx`
+`setOnLogout(...)` vachi oru callback kudukkudhu.
+
+**Step 6 — Orey nerathula oru refresh: shared refresh promise.** Token
+expire aana appuram page moonu vishayangala orey nerathula load
+pannudhu nu yosinga: moonu `401`s orey nerathula varum. Ovonnum thaane
+`/refresh` call pannina, first onnu success aagum, backend andha refresh
+token-ah **revoke** pannum (rotation). Meedhi rendu ippo use aana
+token-ah anuppi, `401` vaangi, ungala logout pannidum. Mosam.
+
+So `refreshTokens()` nadandhukitturukra request-ah `refreshPromise`-la
+vachukkum:
+
+- First caller `refreshPromise` empty-a irukradha paathu,
+  `POST /refresh` start panni, promise-ah store pannum.
+- Adhu nadakkumbodhu vara yaarukkum **adhe promise** kidaikkum, adhe
+  pudhu token-ku wait pannuvaanga.
+- `.then(...)` pudhu pair-ah ellarukkum serthu oru thadava save pannum.
+- `.finally(...)` settle aanadhum (success-o failure-o)
+  `refreshPromise`-ah clear pannum, so *adutha* expiry, 15 nimisham
+  kazhichu, pudhusa onnu start pannum.
+
+**Step 7 — Reload-la session-ah restore pannurathu.** Reload-ku appuram
+`accessToken` `null`, aana `localStorage`-la innum refresh token
+irukku. `restoreSession()` adha udane maathi, first real request-ku
+munnadiye fresh access token vaangum, login form kaattanumaa nu UI-ku
+theriya `true`/`false` return pannum. Development-la React-oda
+`StrictMode` (`main.jsx` paarunga) effects-ah rendu thadava run
+pannum, so idhu rendu thadava call aagum; step 6-la irukra shared
+promise-naala `/refresh` innum oru thadava dhan call aagum.
+
+## Step by step: `src/App.jsx`
+
+**Step 8 — Page load-la wire up pannurathu.** `useEffect(..., [])` oru
+thadava run aagum: indha UI-ku "logged out"-na enna nu `api.js`-ku
+sollum (state reset, "Your session expired" kaattu), apparam save aana
+refresh token-la irundhu session-ah resume panna try pannum, work
+aana user-ayum avanga notes-ayum load pannum.
+
+**Step 9 — Form body-oda login.** OAuth2-oda password flow login body
+**form**-a irukkanum (`username=alice&password=...`), JSON illa nu
+solludhu; adhanaala dhan backend-la `/token`
+`OAuth2PasswordRequestForm` use pannudhu.
+`new URLSearchParams({ username, password })` axios-ah exact-a adha
+`Content-Type: application/x-www-form-urlencoded`-oda anuppa vaikkum.
+JSON object anuppina `422` varum. `saveTokens(response.data)`-ku
+appuram, `loadUserAndNotes()` `GET /users/me` call panni naama yaar,
+namma role enna nu therinjukkum. Frontend role kandupidikka JWT-ah
+decode pannaadhu: payload-la role-e illa.
+
+**Step 10 — CRUD calls kittathatta maaravae illa.** `api.get("/notes")`,
+`api.post("/notes", ...)`, `api.put(...)`, `api.delete(...)`: munnadi
+paatha React apps-oda compare pannina, `axios` `api` aachu, URL-la
+`API_URL` prefix poachu, avlo dhan. Tokens illa, headers illa, refresh
+logic illa. `POST /notes` `owner_id` anuppaadhu: backend owner-ah
+token-la irundhu edukkum, so client try pannaalum vera yaaro "pera-la"
+note create panna mudiyaadhu.
+
+**Step 11 — `401`, `403`, `429`-ah nalla kaatturathu.** Oru error
+`errorMessage()`-ku varra nerathula, interceptor already expire aana
+tokens-ah paathukittuchu, so meedhi irukradhu real answers:
+
+- Rate-limit aana `/token`-la irundhu **`429`**. slowapi-oda body-la
+  `detail` illa, so naame message ezhudhurom.
+- **`403`** backend-oda reason-ah kaattum ("You don't own this note"
+  illa "Not enough permissions"). Adhu login problem illa, so user-ah
+  login form-ku anuppala.
+- **`/token`-la irundhu `401`** "Incorrect username or password"
+  kaattum. Backend thappaana username-kum thappaana password-kum
+  venumne same message use pannudhu.
+
+**Step 12 — Admin vs. user UI.** ADMIN badge-um button label-um
+`user.role`-la irundhu varudhu. **Button-ah maraikkradhu security
+illa.** Yaar venaalum browser console open panni `/admin/users`-ah
+thaane call pannalam. Adhanaala dhan inga non-admins-ku "Try admin
+route" button irukku: click pannunga, **backend** `403` answer pannum.
+UI convenience-ku; server-la `require_role("admin")` dhan real poottu.
+
+**Step 13 — Refresh nadakkradha paakkurathu.** Real expiry-ku 15
+nimisham wait pannradhu bore, so `simulateExpiredToken()`
+`breakAccessToken()` call panni in-memory access token-ah junk-a
+maathi, apparam notes-ah load pannum. Browser-oda Network tab-ah open
+panni button-ah click pannunga: `notes` → `401`, `refresh` → `200`,
+`notes` → `200`. `loadNotes()` thaane `401`-ah paakkave illa.
+
+**Step 14 — Logout.** `logout()` rendu tokens-ayum maranthu UI-ah
+reset pannum. Backend-la mudikka session edhuvum illa: access token
+expire aagura varaikkum (adhigapatcham 15 nimisham) valid-a irukkum,
+adhanaala dhan adhu short-a vechirukom. Fuller version backend-kitta
+refresh token-ah revoke panna-vum sollum.
+
+## Enna try pannalam
+
+| Idha pannunga | Enna paappeenga |
+|---|---|
+| `alice` / `alice-password`-a login | "Logged in as **alice** (user)" mattrum aval-oda rendu notes |
+| Note add, edit, delete | Normal CRUD, ovoru call-um interceptor-aala authenticate aagudhu |
+| alice-a **Read note #3** click | `403`: "Not allowed: You don't own this note" (adhu Bob-odhu) |
+| alice-a **Try admin route** click | `403`: "Not allowed: Not enough permissions" |
+| `admin` / `admin-password`-a login | ADMIN badge, ellarudha notes-um, **Load all users** work aagum |
+| **Simulate expired access token** click | Network tab: `notes` (401), `refresh` (200), `notes` (200); list innum load aagum |
+| Login-la irukkumbodhu page reload | Innum login-la: `localStorage`-la irukra refresh token pudhu access token vaangum |
+| Oru nimishathula 6 thadava thappaana password | "Too many login attempts. Wait a minute and try again." (`429`) |
+| Logout | Rendu tokens-um maranthaachu; thirumba login form |
+
+Adutha step: [Database Migrations](/tanglish/docs/migrations) — Alembic
+vachi database schema-ah safe-a maathurathu.

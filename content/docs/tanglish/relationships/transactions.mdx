@@ -1,0 +1,621 @@
+---
+title: "4. Transactions"
+description: Order place pannurathu all-or-nothing — kadaisila oru commit, edhavadhu error-na rollback — pakkathula half order-ah vittudra unsafe twin.
+---
+
+<GithubLink path="example/11/d" />
+
+Oru order place pannina pala rows touch aagum: oru order, ovoru
+product-kum oru line, mattrum ovoru product-oda stock. Adhu **ellam**
+save aaganum, illana **edhuvume** aagakoodadhu. `POST /orders` full
+job-aiyum oru transaction-la pannum, kadaisila orey thadava commit
+pannum, edhavadhu error-na rollback pannum. `POST /orders/unsafe` same
+input eduthu same checks run pannum, aana ovoru step-kum apparam commit
+pannum — adhu enna udaikkudhu-nu indha page exact-a kaattum. Sontha
+tables: `shop_products`, `shop_orders`, `shop_order_lines`. Seed:
+Keyboard (50.0, stock 10), Mouse (20.0, stock 5), Monitor (200.0,
+stock **1**).
+
+| Route | Status | Description |
+|---|---|---|
+| `GET /products` | `200` | Ella products, current `stock`-oda |
+| `GET /products/{product_id}` | `200`, `404` | Oru product |
+| `POST /orders` | `201`, `404`, `409`, `422` | Order place pannum, all-or-nothing |
+| `POST /orders/unsafe` | `201`, `404`, `409`, `422` | Adhe, aana line by line commit pannum (bug) |
+| `GET /orders` | `200` | Ella orders, avanga lines-oda |
+| `GET /orders/{order_id}` | `200`, `404` | Oru order, adhoda lines-oda |
+
+`404` = oru `product_id` illa. `409` = stock podhala. `422` = empty
+`lines` illana 1-ku keezha `quantity`.
+
+## Folder
+
+```text
+example/11/d/
+├── .env.example
+├── __init__.py
+├── crud.py
+├── database.py
+├── main.py
+├── models.py
+├── README.md
+├── schemas.py
+├── STEPS.md
+└── routers/
+    ├── __init__.py
+    ├── orders.py
+    └── products.py
+```
+
+## Code
+
+**`database.py`** — maarala, aana `autocommit=False`-ah thirumba
+paarunga:
+
+```python title="database.py"
+import os
+
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+load_dotenv()
+
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
+MYSQL_USER = os.getenv("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
+
+# Set DATABASE_URL directly to override everything above (e.g. to point
+# at SQLite for a quick local test with no MySQL server at all).
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
+)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+```
+
+**`models.py`** — products, orders, order lines:
+
+```python title="models.py"
+from sqlalchemy import Column, DateTime, Float, ForeignKey, Integer, String, func
+from sqlalchemy.orm import relationship
+
+from database import Base
+
+
+class ProductModel(Base):
+    __tablename__ = "shop_products"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(50), nullable=False, unique=True)
+    price = Column(Float, nullable=False)
+    stock = Column(Integer, nullable=False, default=0)
+
+
+class OrderModel(Base):
+    __tablename__ = "shop_orders"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+    total = Column(Float, nullable=False, default=0)
+
+    # order_by keeps lines in the order they were added.
+    lines = relationship("OrderLineModel", back_populates="order", order_by="OrderLineModel.id")
+
+
+# One row per product in an order: "2 x Keyboard at 50.0 each".
+class OrderLineModel(Base):
+    __tablename__ = "shop_order_lines"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    order_id = Column(Integer, ForeignKey("shop_orders.id"), nullable=False)
+    product_id = Column(Integer, ForeignKey("shop_products.id"), nullable=False)
+    quantity = Column(Integer, nullable=False)
+    # Copied from the product at order time. If the price changes next
+    # week, this order still shows what the customer actually paid.
+    unit_price = Column(Float, nullable=False)
+
+    order = relationship("OrderModel", back_populates="lines")
+    product = relationship("ProductModel")
+```
+
+**`schemas.py`:**
+
+```python title="schemas.py"
+from datetime import datetime
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class ProductOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    price: float
+    stock: int
+
+
+class OrderLineIn(BaseModel):
+    product_id: int
+    quantity: int = Field(gt=0)
+
+
+class OrderCreate(BaseModel):
+    # An order with no lines makes no sense: at least one.
+    lines: list[OrderLineIn] = Field(min_length=1)
+
+
+class OrderLineOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    product_id: int
+    quantity: int
+    unit_price: float
+
+
+class OrderOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    created_at: datetime
+    total: float
+    lines: list[OrderLineOut]
+```
+
+**`crud.py`** — safe `place_order` mattrum unsafe
+`place_order_unsafe`:
+
+```python title="crud.py"
+from sqlalchemy.orm import Session, selectinload
+
+from models import OrderLineModel, OrderModel, ProductModel
+from schemas import OrderCreate, OrderLineIn
+
+
+# A plain Python error that carries the HTTP status the router should
+# answer with. crud.py stays free of FastAPI; the router translates it.
+class OrderError(Exception):
+    def __init__(self, status_code: int, message: str):
+        self.status_code = status_code
+        self.message = message
+
+
+# --- products -----------------------------------------------------------
+
+def get_products(db: Session) -> list[ProductModel]:
+    return db.query(ProductModel).order_by(ProductModel.id).all()
+
+
+def get_product(db: Session, product_id: int) -> ProductModel | None:
+    return db.get(ProductModel, product_id)
+
+
+# --- orders -------------------------------------------------------------
+
+def get_orders(db: Session) -> list[OrderModel]:
+    return (
+        db.query(OrderModel)
+        .options(selectinload(OrderModel.lines))
+        .order_by(OrderModel.id)
+        .all()
+    )
+
+
+def get_order(db: Session, order_id: int) -> OrderModel | None:
+    return db.get(OrderModel, order_id)
+
+
+def _take_from_stock(db: Session, line: OrderLineIn) -> ProductModel:
+    # Shared by both versions: check the product, then decrement stock.
+    product = db.get(ProductModel, line.product_id)
+    if product is None:
+        raise OrderError(404, f"Product {line.product_id} not found")
+    if product.stock < line.quantity:
+        raise OrderError(
+            409,
+            f"Not enough stock for {product.name}: "
+            f"wanted {line.quantity}, have {product.stock}",
+        )
+    product.stock -= line.quantity
+    return product
+
+
+def place_order(db: Session, data: OrderCreate) -> OrderModel:
+    """All-or-nothing: ONE transaction, ONE commit at the very end."""
+    try:
+        order = OrderModel(total=0)
+        db.add(order)
+        # flush() sends the INSERT now (so order.id exists) but does NOT
+        # commit. It's still inside the transaction and can be undone.
+        db.flush()
+
+        total = 0.0
+        for line in data.lines:
+            product = _take_from_stock(db, line)  # may raise
+            order.lines.append(
+                OrderLineModel(
+                    product_id=product.id,
+                    quantity=line.quantity,
+                    unit_price=product.price,
+                )
+            )
+            total += product.price * line.quantity
+
+        order.total = round(total, 2)
+        db.commit()  # the only commit: everything becomes permanent together
+    except Exception:
+        # Anything went wrong: throw away EVERY change since the last
+        # commit. The order row, its lines, and every stock decrement.
+        db.rollback()
+        raise
+    db.refresh(order)
+    return order
+
+
+def place_order_unsafe(db: Session, data: OrderCreate) -> OrderModel:
+    """THE BUG, on purpose: commits after every step."""
+    order = OrderModel(total=0)
+    db.add(order)
+    db.commit()  # the empty order is now permanent
+
+    for line in data.lines:
+        product = _take_from_stock(db, line)  # may raise...
+        order.lines.append(
+            OrderLineModel(
+                product_id=product.id,
+                quantity=line.quantity,
+                unit_price=product.price,
+            )
+        )
+        order.total = round(order.total + product.price * line.quantity, 2)
+        db.commit()  # ...but every line before it is already committed
+
+    db.refresh(order)
+    return order
+
+
+# --- seed ---------------------------------------------------------------
+
+def seed(db: Session) -> None:
+    if db.query(ProductModel).count() == 0:
+        db.add_all(
+            [
+                ProductModel(name="Keyboard", price=50.0, stock=10),
+                ProductModel(name="Mouse", price=20.0, stock=5),
+                ProductModel(name="Monitor", price=200.0, stock=1),
+            ]
+        )
+        db.commit()
+```
+
+**`routers/products.py`:**
+
+```python title="routers/products.py"
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+
+import crud
+from database import get_db
+from schemas import ProductOut
+
+router = APIRouter(prefix="/products", tags=["products"])
+
+
+@router.get("", response_model=list[ProductOut])
+def list_products(db: Session = Depends(get_db)):
+    return crud.get_products(db)
+
+
+@router.get("/{product_id}", response_model=ProductOut)
+def get_product(product_id: int, db: Session = Depends(get_db)):
+    row = crud.get_product(db, product_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Product not found")
+    return row
+```
+
+**`routers/orders.py`** — safe route mattrum adhoda unsafe twin:
+
+```python title="routers/orders.py"
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+
+import crud
+from database import get_db
+from schemas import OrderCreate, OrderOut
+
+router = APIRouter(prefix="/orders", tags=["orders"])
+
+
+@router.get("", response_model=list[OrderOut])
+def list_orders(db: Session = Depends(get_db)):
+    return crud.get_orders(db)
+
+
+@router.get("/{order_id}", response_model=OrderOut)
+def get_order(order_id: int, db: Session = Depends(get_db)):
+    row = crud.get_order(db, order_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Order not found")
+    return row
+
+
+@router.post("", response_model=OrderOut, status_code=status.HTTP_201_CREATED)
+def create_order(data: OrderCreate, db: Session = Depends(get_db)):
+    try:
+        return crud.place_order(db, data)
+    except crud.OrderError as exc:
+        # crud already rolled back; just turn it into an HTTP answer.
+        raise HTTPException(status_code=exc.status_code, detail=exc.message)
+
+
+# Same input, same checks, but commits after every line. Here only to
+# show what goes wrong. Never write it like this.
+@router.post("/unsafe", response_model=OrderOut, status_code=status.HTTP_201_CREATED)
+def create_order_unsafe(data: OrderCreate, db: Session = Depends(get_db)):
+    try:
+        return crud.place_order_unsafe(db, data)
+    except crud.OrderError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message)
+```
+
+**`main.py`:**
+
+```python title="main.py"
+from fastapi import FastAPI
+
+import crud
+from database import Base, SessionLocal, engine
+from routers import orders, products
+
+Base.metadata.create_all(bind=engine)
+
+with SessionLocal() as db:
+    crud.seed(db)
+
+app = FastAPI()
+
+app.include_router(products.router)
+app.include_router(orders.router)
+```
+
+## Safe vs unsafe, pakkathula pakkathula
+
+Same input, same `_take_from_stock` checks, same error codes. Orey
+vidhyasam **`commit()` enga irukku**-ngradhu dhan.
+
+```python title="crud.py — place_order (safe)"
+try:
+    order = OrderModel(total=0)
+    db.add(order)
+    db.flush()              # INSERT sent, NOT committed
+
+    total = 0.0
+    for line in data.lines:
+        product = _take_from_stock(db, line)  # may raise
+        order.lines.append(OrderLineModel(...))
+        total += product.price * line.quantity
+
+    order.total = round(total, 2)
+    db.commit()             # the ONLY commit
+except Exception:
+    db.rollback()           # undo EVERYTHING above
+    raise
+```
+
+```python title="crud.py — place_order_unsafe (the bug)"
+order = OrderModel(total=0)
+db.add(order)
+db.commit()                 # empty order is now permanent
+
+for line in data.lines:
+    product = _take_from_stock(db, line)  # may raise...
+    order.lines.append(OrderLineModel(...))
+    order.total = round(order.total + product.price * line.quantity, 2)
+    db.commit()             # ...but earlier lines are already permanent
+```
+
+**3 Keyboards + 5 Monitors** order-ah (stock-la 1 Monitor dhan, so
+line 2 fail aagum) rendu-laiyum follow pannunga:
+
+| Moment | Safe (`/orders`) | Unsafe (`/orders/unsafe`) |
+|---|---|---|
+| Order row insert | `flush()` — anuppiyaachu, innum undo pannalaam | `commit()` — **permanent** |
+| Line 1: 3 Keyboards, stock 8 → 5 | open transaction-kulla | `commit()` — **permanent** |
+| Line 2: 5 Monitors, 1 dhan irukku → `OrderError(409)` | `rollback()` order, line 1, stock change ellathaiyum undo pannum | undo panna edhuvum illa: order + line 1 apdiye irukkum |
+| Client-ku varradhu | `409` | `409` |
+| Apparam database | request-ku munnadi irundha maadhiriye | half-built order, Keyboard stock 5 |
+
+Rendum `409` answer pannudhu, so **rendu case-layum** order fail
+aayiduchu-nu client nambum. Adhula onnu mattum dhan unmai solludhu.
+
+## Line by line
+
+**Transaction-na enna:**
+
+1. Database last commit-la irundhu varra ella statements-aiyum oru unit-a
+   group pannum. Apparam adhu **commit** pannum — ellam serndhu
+   permanent aagum, mathha connections-ku theriyum — illana **rollback**
+   pannum — ellam undo aagum, run aagave illadha maadhiri. Idhu dhan
+   **atomicity**, ACID-la "A": oru transaction paadhi nadakka
+   mudiyaadhu. MySQL-oda InnoDB engine (default) mattrum SQLite rendum
+   idha support pannudhu.
+2. `database.py`-la `autocommit=False` dhan idhu work aaga reason:
+   adhanala `db` vazhiya neenga pannradhu edhuvum `db.commit()` varaikkum
+   permanent illa.
+
+**`models.py`:**
+
+3. **`OrderModel.lines` / `OrderLineModel.order`** — oru order-ku pala
+   lines, [One-to-many](/tanglish/docs/relationships/one-to-many)-oda
+   adhe shape, foreign key `order_id` "many" side-la.
+   `order_by="OrderLineModel.id"` lines-ah add aana order-la vachukkum.
+4. **`unit_price` copy aagudhu** — order place aagum bodhu product-la
+   irundhu, so adutha vaaram price maathinaalum, customer pazhaya
+   order-ku evlo pay pannaanga-nu adhu maaraadhu.
+5. **`created_at = Column(DateTime, nullable=False, server_default=func.now())`**
+   — insert-la database time-ah fill pannum.
+6. **`product = relationship("ProductModel")`** — one-way relationship,
+   `back_populates` illa: line-ku adhoda product theriyum, aana inga
+   yaarukkum `product.lines` thevai illa.
+
+**`schemas.py`:**
+
+7. **`quantity: int = Field(gt=0)`** mattrum
+   **`lines: list[OrderLineIn] = Field(min_length=1)`** — lines illadha
+   order, illana 0 items-ku oru line, artham illa. Indha shape errors
+   database work start aaguradhukku munnadiye `422`.
+
+**`crud.py` — ovoru line-um pogura checks:**
+
+8. **`OrderError(Exception)`** — status code-um message-um vachirukra
+   plain Python exception. `crud.py` FastAPI illama irukkum; router adha
+   `HTTPException`-a maathum.
+9. **`_take_from_stock`** — product illana `404`,
+   `product.stock < line.quantity`-na `409`, illana
+   `product.stock -= line.quantity`. Oru order-la same product rendu
+   thadava irundhaalum work aagum: `db.get` rendu thadavaiyum **same
+   object** kudukkum, so rendavadhu check first line already eduthadha
+   paakkum.
+
+**`crud.py` — safe version, `place_order`:**
+
+10. **`db.flush()`** order-oda `INSERT`-ah ippove database-ku anuppum
+    (so `order.id` irukkum) aana **commit pannaadhu**. Adhu transaction
+    kulla irukku, innum undo pannalaam. Flush = "SQL-ah anuppu",
+    commit = "permanent aakku".
+11. **Line 2 fail aana**, order `INSERT`, line 1, line 1-oda stock
+    decrement — ellame innum uncommitted. `db.rollback()` ellathaiyum
+    thookki podum; database request-ku munnadi irundha maadhiriye
+    irukkum.
+12. **`except Exception`** (`OrderError` mattum illa) — so **edhu**
+    fail aanaalum — bug-o, lost connection-o — rollback aagum. Apparam
+    bare `raise` error-ah maathama munnaadi anuppum.
+13. **Loop mudinja mattum dhan `db.commit()` run aagum**, appo order,
+    adhoda ella lines, ella stock changes-um serndhu appear aagum.
+    Apparam `db.refresh(order)` response-kaga adha reload pannum
+    (database fill panna `created_at` kooda).
+
+**`crud.py` — unsafe version, `place_order_unsafe`:**
+
+14. **Order-ku apparam-um ovoru line-ku apparam-um oru `commit()`.**
+    Line 2 fail aagura neram, order-um line 1-um (adhoda stock
+    decrement-oda) already commit aagiduchu. Inga `rollback()`
+    pannaalum current, fail aagura line-ah mattum dhan undo pannum —
+    munnadi panna commits permanent. Ovoru request-um success aagum
+    bodhu per-step commit harmless-a theriyum. Failure path-la mattum
+    dhan udaiyum, adhu dhan neenga kammiya test panra path.
+
+**`routers/orders.py`:**
+
+15. **`except crud.OrderError as exc: raise HTTPException(status_code=exc.status_code, detail=exc.message)`**
+    — crud already rollback pannidichu; router error-ah HTTP answer-a
+    maathudhu avlo dhan. Vera exception inga catch aagaadhu, so adhu
+    innum `500` dhan (crud rollback panna apparam).
+
+**`get_db` handle pannattume-nu yen vidala?**
+
+16. `get_db` `finally`-la session-ah close pannum, uncommitted changes
+    irukra session-ah close pannina avai discard aagum, so uncommitted
+    failure eppadiyum eventually rollback aagum. `db.rollback()`-ah
+    neengale call pannina adhu explicit-um immediate-um aagum, route
+    continue panna venumna (failed attempt-ah log panna maadhiri)
+    session usable-a irukkum.
+
+**Alternative: `with db.begin():`**
+
+17. SQLAlchemy try/commit/except/rollback-ah ungalukkaga pannum:
+
+    ```python
+    with db.begin():
+        ...  # all the work
+    # leaving the block normally -> commit
+    # an exception inside the block -> rollback, then re-raise
+    ```
+
+    Chinnadhu, rollback marakka mudiyaadhu. Catch: session-ah touch
+    panra **first** vishayam-a idhu irukkanum, yen-na SQLAlchemy 2.0
+    first query-la automatic-a transaction start pannum, already
+    transaction irukra session-la `db.begin()` error raise pannum.
+    Already edhavadhu look up panna route-la, inga use panna explicit
+    `try`/`commit`/`rollback` reason panna easy.
+
+**Transaction thaniya solve pannaadhadhu:**
+
+18. Same nerathula rendu requests rendum "Monitor stock = 1"-nu read
+    panni, rendum check pass panni, rendum decrement pannalaam. Adha fix
+    panna check pannum bodhu row-ah lock pannanum
+    (MySQL-la `db.query(ProductModel).with_for_update()`) illana atomic
+    `UPDATE ... SET stock = stock - 1 WHERE stock >= 1`. Adhu
+    concurrency, thani topic; indha lesson all-or-nothing pathi dhan.
+
+## Try it: vidhyasam-ah prove pannunga
+
+Fresh `shop_*` table-la irundhu (Keyboard stock 10) start panni, idha
+order-la run pannunga.
+
+**1. Success aagura normal order** — 2 Keyboards + 1 Mouse:
+
+```bash
+curl -X POST http://127.0.0.1:8000/orders -H "Content-Type: application/json" -d "{\"lines\": [{\"product_id\": 1, \"quantity\": 2}, {\"product_id\": 2, \"quantity\": 1}]}"
+```
+
+```json
+{"id": 1, "created_at": "2026-10-05T10:27:53", "total": 120.0, "lines": [{"id": 1, "product_id": 1, "quantity": 2, "unit_price": 50.0}, {"id": 2, "product_id": 2, "quantity": 1, "unit_price": 20.0}]}
+```
+
+Ippo Keyboard stock 8.
+
+**2. Fail aagura order, safe endpoint-ku** — 3 Keyboards + 5 Monitors:
+
+```bash
+curl -i -X POST http://127.0.0.1:8000/orders -H "Content-Type: application/json" -d "{\"lines\": [{\"product_id\": 1, \"quantity\": 3}, {\"product_id\": 3, \"quantity\": 5}]}"
+curl http://127.0.0.1:8000/products
+curl http://127.0.0.1:8000/orders
+```
+
+`409 {"detail": "Not enough stock for Monitor: wanted 5, have 1"}`.
+Keyboard stock **innum 8** dhan, innum oru order dhan irukku. Edhuvum
+write aagala.
+
+**3. Exact same body, unsafe endpoint-ku:**
+
+```bash
+curl -i -X POST http://127.0.0.1:8000/orders/unsafe -H "Content-Type: application/json" -d "{\"lines\": [{\"product_id\": 1, \"quantity\": 3}, {\"product_id\": 3, \"quantity\": 5}]}"
+curl http://127.0.0.1:8000/products
+curl http://127.0.0.1:8000/orders
+```
+
+Same `409`, so order fail aayiduchu-nu client nenaikkum. Aana Keyboard
+stock 8-la irundhu **5**-ku iranguchu, `GET /orders` oru pudhu,
+half-built order-ah list pannudhu:
+
+```json
+{"id": 2, "created_at": "2026-10-05T10:27:53", "total": 150.0, "lines": [{"id": 3, "product_id": 1, "quantity": 3, "unit_price": 50.0}]}
+```
+
+Yaarum place pannadha order-kaga moonu keyboards stock-la irundhu
+kaanaama pochu.
+
+MySQL-la pudhu order `2`-ku pathila `"id": 3`-nu kaattalaam: step 2-oda
+`flush()` order row-ah insert panna odane InnoDB oru auto-increment
+value kuduthudum, rollback row-ah undo pannum aana andha number-ah
+thirumba kudukkaadhu. Andha gap harmless — ids identifiers, count illa.
+
+Adutha step: [Soft delete](/tanglish/docs/relationships/soft-delete) —
+undo panna mudiyura `DELETE`.

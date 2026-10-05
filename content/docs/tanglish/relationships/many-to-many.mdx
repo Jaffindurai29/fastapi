@@ -1,0 +1,562 @@
+---
+title: "3. Many-to-many"
+description: Association table moola items-la tags, secondary= relationships mattrum idempotent attach/detach routes.
+---
+
+<GithubLink path="example/11/c" />
+
+Tags. Oru item-ku pala tags irukkalaam, **adhe maadhiri** oru tag pala
+items-la irukkalaam, so rendu table-um link-ah hold panna mudiyaadhu.
+Moonavadhu table `rel_item_tags` ovoru (item, tag) pair-kum oru row
+store pannum, SQLAlchemy adha `relationship(..., secondary=...)` moola
+ungalukkaga read/write pannum. Tables: `rel_categories` mattrum
+`rel_items` (11/a, 11/b kooda share; columns inga maarala), plus pudhu
+`rel_tags` mattrum `rel_item_tags`. Rendu tags-oda seed: Laptop-la
+`sale` mattrum `new`, FastAPI Guide-la `new`.
+
+| Route | Status | Description |
+|---|---|---|
+| `GET /tags` | `200` | Ella tags |
+| `POST /tags` | `201`, `409` | Pudhu tag; name already irundha `409` |
+| `GET /tags/{tag_id}/items` | `200`, `404` | Andha tag irukra ella items |
+| `GET /items` | `200` | Ella items, avanga `tags`-oda |
+| `GET /items/{item_id}` | `200`, `404` | Oru item, adhoda `tags`-oda |
+| `POST /items` | `201`, `404`, `422` | Pudhu item; optional `tag_ids`; category illa edhavadhu tag illana `404` |
+| `PUT /items/{item_id}/tags/{tag_id}` | `200`, `404` | Tag attach pannum. Already attach aagirukka? Appavum `200`, edhuvum maaraadhu |
+| `DELETE /items/{item_id}/tags/{tag_id}` | `204`, `404` | Tag detach pannum; attach aagalana `404` |
+
+## Folder
+
+```text
+example/11/c/
+├── .env.example
+├── __init__.py
+├── crud.py
+├── database.py
+├── main.py
+├── models.py
+├── README.md
+├── schemas.py
+├── STEPS.md
+└── routers/
+    ├── __init__.py
+    ├── items.py
+    └── tags.py
+```
+
+Routers ippo `items.py` mattrum `tags.py` — 11/c-ku sontha
+`/categories` routes illa (11/a-la already irukku, same table-ku).
+
+## Code
+
+**`database.py`** — maarala:
+
+```python title="database.py"
+import os
+
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+load_dotenv()
+
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
+MYSQL_USER = os.getenv("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
+
+# Set DATABASE_URL directly to override everything above (e.g. to point
+# at SQLite for a quick local test with no MySQL server at all).
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
+)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+```
+
+**`models.py`** — association table plus rendu side-layum `secondary=`:
+
+```python title="models.py"
+from sqlalchemy import Column, Float, ForeignKey, Integer, String, Table
+from sqlalchemy.orm import relationship
+
+from database import Base
+
+# The association (or "join") table. One row = "this item has this tag".
+# It has no model class of its own because it holds nothing but the two
+# foreign keys. Both columns together form the primary key, so the same
+# pair can't be stored twice.
+item_tags = Table(
+    "rel_item_tags",
+    Base.metadata,
+    Column("item_id", ForeignKey("rel_items.id"), primary_key=True),
+    Column("tag_id", ForeignKey("rel_tags.id"), primary_key=True),
+)
+
+
+# Unchanged from 11/a.
+class CategoryModel(Base):
+    __tablename__ = "rel_categories"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(50), nullable=False, unique=True)
+
+    items = relationship("ItemModel", back_populates="category")
+
+
+# Same COLUMNS as 11/a, so the rel_items table is identical and shared.
+# The only addition is `tags`, which is a relationship, not a column.
+class ItemModel(Base):
+    __tablename__ = "rel_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(50), nullable=False)
+    price = Column(Float, nullable=False)
+    category_id = Column(Integer, ForeignKey("rel_categories.id"), nullable=False)
+
+    category = relationship("CategoryModel", back_populates="items")
+    # secondary= points at the join table. SQLAlchemy reads and writes
+    # rel_item_tags for you: item.tags.append(tag) inserts a row there.
+    # order_by keeps the list in a stable order in every response.
+    tags = relationship(
+        "TagModel", secondary=item_tags, back_populates="items", order_by="TagModel.id"
+    )
+
+
+class TagModel(Base):
+    __tablename__ = "rel_tags"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(30), nullable=False, unique=True)
+
+    items = relationship(
+        "ItemModel", secondary=item_tags, back_populates="tags", order_by="ItemModel.id"
+    )
+```
+
+**`schemas.py`:**
+
+```python title="schemas.py"
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class TagCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=30)
+
+
+class TagOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+
+
+class ItemCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=50)
+    price: float = Field(gt=0)
+    category_id: int
+    # Optional: tag the item while creating it. Defaults to no tags.
+    tag_ids: list[int] = []
+
+
+# No tags field here: used inside a tag's item list, where the tag is
+# already known (same reason as ItemSummary in 11/b).
+class ItemSummary(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    price: float
+
+
+class ItemOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    price: float
+    category_id: int
+    tags: list[TagOut]
+```
+
+**`crud.py`:**
+
+```python title="crud.py"
+from sqlalchemy.orm import Session, selectinload
+
+from models import CategoryModel, ItemModel, TagModel
+from schemas import ItemCreate, TagCreate
+
+
+# --- tags ---------------------------------------------------------------
+
+def get_tags(db: Session) -> list[TagModel]:
+    return db.query(TagModel).order_by(TagModel.id).all()
+
+
+def get_tag(db: Session, tag_id: int) -> TagModel | None:
+    return db.get(TagModel, tag_id)
+
+
+def get_tag_by_name(db: Session, name: str) -> TagModel | None:
+    return db.query(TagModel).filter(TagModel.name == name).first()
+
+
+def get_tags_by_ids(db: Session, tag_ids: list[int]) -> list[TagModel]:
+    return db.query(TagModel).filter(TagModel.id.in_(tag_ids)).all()
+
+
+def create_tag(db: Session, tag: TagCreate) -> TagModel:
+    row = TagModel(**tag.model_dump())
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+# --- items --------------------------------------------------------------
+
+def get_category(db: Session, category_id: int) -> CategoryModel | None:
+    return db.get(CategoryModel, category_id)
+
+
+def get_items(db: Session) -> list[ItemModel]:
+    # selectinload (11/b) so listing N items doesn't cost N extra
+    # queries for their tags.
+    return (
+        db.query(ItemModel)
+        .options(selectinload(ItemModel.tags))
+        .order_by(ItemModel.id)
+        .all()
+    )
+
+
+def get_item(db: Session, item_id: int) -> ItemModel | None:
+    return db.get(ItemModel, item_id)
+
+
+def create_item(db: Session, item: ItemCreate, tags: list[TagModel]) -> ItemModel:
+    # tag_ids isn't a column, so leave it out of the constructor and
+    # set the relationship instead. On commit SQLAlchemy inserts the item
+    # row, then one rel_item_tags row per tag.
+    row = ItemModel(**item.model_dump(exclude={"tag_ids"}), tags=tags)
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def attach_tag(db: Session, item: ItemModel, tag: TagModel) -> ItemModel:
+    if tag not in item.tags:  # already attached -> nothing to do
+        item.tags.append(tag)
+        db.commit()
+        db.refresh(item)
+    return item
+
+
+def detach_tag(db: Session, item: ItemModel, tag: TagModel) -> None:
+    # Removes the rel_item_tags row only. The item and the tag both stay.
+    item.tags.remove(tag)
+    db.commit()
+
+
+# --- seed ---------------------------------------------------------------
+
+def seed(db: Session) -> None:
+    # Same categories/items as 11/a and 11/b (the tables are shared).
+    if db.query(CategoryModel).count() == 0:
+        electronics = CategoryModel(name="Electronics")
+        books = CategoryModel(name="Books")
+        db.add_all(
+            [
+                ItemModel(name="Laptop", price=999.99, category=electronics),
+                ItemModel(name="Mouse", price=19.99, category=electronics),
+                ItemModel(name="FastAPI Guide", price=39.0, category=books),
+                ItemModel(name="SQL Basics", price=25.5, category=books),
+            ]
+        )
+        db.commit()
+    # Tags are new in 11/c, so they're seeded separately: the items may
+    # already exist from running 11/a first.
+    if db.query(TagModel).count() == 0:
+        sale = TagModel(name="sale")
+        new = TagModel(name="new")
+        laptop = db.query(ItemModel).filter(ItemModel.name == "Laptop").first()
+        guide = db.query(ItemModel).filter(ItemModel.name == "FastAPI Guide").first()
+        db.add_all([sale, new])
+        if laptop is not None:
+            laptop.tags.extend([sale, new])
+        if guide is not None:
+            guide.tags.append(new)
+        db.commit()
+```
+
+**`routers/items.py`** — items, plus attach/detach:
+
+```python title="routers/items.py"
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+
+import crud
+from database import get_db
+from schemas import ItemCreate, ItemOut
+
+router = APIRouter(prefix="/items", tags=["items"])
+
+
+def get_item_or_404(db: Session, item_id: int):
+    row = crud.get_item(db, item_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Item not found")
+    return row
+
+
+def get_tag_or_404(db: Session, tag_id: int):
+    tag = crud.get_tag(db, tag_id)
+    if tag is None:
+        raise HTTPException(status_code=404, detail="Tag not found")
+    return tag
+
+
+@router.get("", response_model=list[ItemOut])
+def list_items(db: Session = Depends(get_db)):
+    return crud.get_items(db)
+
+
+@router.get("/{item_id}", response_model=ItemOut)
+def get_item(item_id: int, db: Session = Depends(get_db)):
+    return get_item_or_404(db, item_id)
+
+
+@router.post("", response_model=ItemOut, status_code=status.HTTP_201_CREATED)
+def create_item(item: ItemCreate, db: Session = Depends(get_db)):
+    if crud.get_category(db, item.category_id) is None:
+        raise HTTPException(status_code=404, detail=f"Category {item.category_id} not found")
+    # One query for all the tags, then compare: any id we asked for but
+    # didn't get back doesn't exist.
+    wanted = set(item.tag_ids)  # set() also drops duplicates like [1, 1]
+    tags = crud.get_tags_by_ids(db, list(wanted))
+    missing = sorted(wanted - {tag.id for tag in tags})
+    if missing:
+        raise HTTPException(status_code=404, detail=f"Tag(s) not found: {missing}")
+    return crud.create_item(db, item, tags)
+
+
+# PUT because it's idempotent: attaching a tag that's already attached
+# changes nothing and still answers 200.
+@router.put("/{item_id}/tags/{tag_id}", response_model=ItemOut)
+def attach_tag(item_id: int, tag_id: int, db: Session = Depends(get_db)):
+    item = get_item_or_404(db, item_id)
+    tag = get_tag_or_404(db, tag_id)
+    return crud.attach_tag(db, item, tag)
+
+
+@router.delete("/{item_id}/tags/{tag_id}", status_code=status.HTTP_204_NO_CONTENT)
+def detach_tag(item_id: int, tag_id: int, db: Session = Depends(get_db)):
+    item = get_item_or_404(db, item_id)
+    tag = get_tag_or_404(db, tag_id)
+    if tag not in item.tags:
+        raise HTTPException(status_code=404, detail="Tag is not attached to this item")
+    crud.detach_tag(db, item, tag)
+```
+
+**`routers/tags.py`:**
+
+```python title="routers/tags.py"
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+
+import crud
+from database import get_db
+from schemas import ItemSummary, TagCreate, TagOut
+
+router = APIRouter(prefix="/tags", tags=["tags"])
+
+
+@router.get("", response_model=list[TagOut])
+def list_tags(db: Session = Depends(get_db)):
+    return crud.get_tags(db)
+
+
+@router.post("", response_model=TagOut, status_code=status.HTTP_201_CREATED)
+def create_tag(tag: TagCreate, db: Session = Depends(get_db)):
+    if crud.get_tag_by_name(db, tag.name) is not None:
+        raise HTTPException(status_code=409, detail="Tag name already exists")
+    return crud.create_tag(db, tag)
+
+
+@router.get("/{tag_id}/items", response_model=list[ItemSummary])
+def list_tag_items(tag_id: int, db: Session = Depends(get_db)):
+    tag = crud.get_tag(db, tag_id)
+    if tag is None:
+        raise HTTPException(status_code=404, detail="Tag not found")
+    # The other direction of the same join table: tag.items.
+    return tag.items
+```
+
+**`main.py`:**
+
+```python title="main.py"
+from fastapi import FastAPI
+
+import crud
+from database import Base, SessionLocal, engine
+from routers import items, tags
+
+# rel_categories and rel_items already exist if you ran 11/a or 11/b, so
+# create_all skips them and only creates rel_tags and rel_item_tags.
+Base.metadata.create_all(bind=engine)
+
+with SessionLocal() as db:
+    crud.seed(db)
+
+app = FastAPI()
+
+app.include_router(items.router)
+app.include_router(tags.router)
+```
+
+## Line by line
+
+`CategoryModel` 11/a-la irundhu maathama copy aagirukku, `ItemModel`
+exact same columns vachirukku.
+
+**Yen moonavadhu table?**
+
+1. 11/a-la link "many" side-la irundhuchu: ovoru item-kum oru
+   `category_id`. Tags-la **rendu** side-um "many". Oru item oru
+   column-la tag ids list-ah store panna mudiyaadhu, oru tag item ids
+   list-ah store panna mudiyaadhu. So link-ku sontha table, ovoru
+   pair-kum oru row:
+
+   ```text
+   rel_item_tags
+   item_id | tag_id
+   --------+-------
+         1 |      1     Laptop has "sale"
+         1 |      2     Laptop has "new"
+         3 |      2     FastAPI Guide has "new"
+   ```
+
+**`models.py` — association table:**
+
+2. **`item_tags = Table("rel_item_tags", Base.metadata, ...)`** — model
+   class illa, plain `Table` dhan, yen-na adhula rendu foreign keys
+   thavira edhuvum illa, neenga adha direct-a query panna maatteenga.
+   `Base.metadata` adha register pannudhu, so `create_all` mathadhu kooda
+   idhaiyum create pannum.
+3. **Rendu columns-layum `primary_key=True`** — rendum serndhu oru
+   **composite** primary key, so same (item, tag) pair rendu thadava
+   store aaga mudiyaadhu. `Integer` type ezhudhala: `ForeignKey` irukra
+   column adhu point panra column-la irundhu type-ah copy pannikkum.
+
+**`models.py` — rendu side-layum `secondary=`:**
+
+4. `ItemModel`-la **`tags = relationship("TagModel", secondary=item_tags, back_populates="items", order_by="TagModel.id")`**,
+   `TagModel`-la adhoda mirror image `items = relationship("ItemModel", secondary=item_tags, ...)`.
+   - `secondary=item_tags` "item-la irundhu adhoda tags-ku poga, indha
+     table vazhiya po"-nu solludhu. `item.tags` `TagModel` list,
+     `tag.items` `ItemModel` list.
+   - `back_populates` rendu end-aiyum sync-a vachukkum, 11/a maadhiriye.
+   - `order_by` lists-ah stable order-la vachukkum, so calls-ku naduvula
+     responses shuffle aagaadhu.
+5. **`rel_items`-ah 11/a, 11/b kooda share panradhu safe-a?** Aamaa.
+   `create_all` already irukra table-ah eppovum maathaadhu, so ella
+   app-oda model-um same table produce pannina mattum dhan sharing safe.
+   `tags` oru `relationship()`, `Column` illa: `rel_items`-ku edhuvum
+   add pannaadhu. First 11/a, apparam 11/c-ah same database-ku run
+   pannunga — 11/c-oda `create_all` `rel_categories`, `rel_items`-ah
+   skip panni `rel_tags`, `rel_item_tags`-ah mattum create pannum.
+
+**`crud.py`:**
+
+6. **Seed "items already irukku" case-ah handle pannudhu** — categories,
+   items 11/a already seed pannirukkalaam, so tags-ku sontha
+   `if db.query(TagModel).count() == 0:` check, Laptop mattrum FastAPI
+   Guide name vachi look up aagudhu. `laptop.tags.extend([sale, new])`
+   dhan full "join table-la insert" step: commit-la SQLAlchemy ovoru
+   tag-kum oru `rel_item_tags` row ezhudhum.
+7. **`get_tags_by_ids`** — `TagModel.id.in_(tag_ids)`
+   `WHERE id IN (...)`-a maarum: ethana ids-a irundhaalum oru query.
+8. **`create_item`** —
+   `ItemModel(**item.model_dump(exclude={"tag_ids"}), tags=tags)`.
+   `tag_ids` column illa, so `ItemModel(tag_ids=...)` fail aagum. Adha
+   dump-la irundhu exclude panni, load aana `TagModel` objects-ah
+   relationship vazhiya kudukkurom. Oru `commit` item-ah insert pannum,
+   apparam join-table rows.
+9. **`attach_tag`** — `if tag not in item.tags: item.tags.append(tag)`.
+   `if` illana, rendu thadava append pannina same pair-ah thirumba
+   insert panna try pannum, composite primary key adha
+   `IntegrityError`-oda reject pannum.
+10. **`detach_tag`** — `item.tags.remove(tag)` `rel_item_tags` row-ah
+    **mattum** delete pannum. Item-um tag-um rendum irukkum.
+11. **`get_items` `selectinload(ItemModel.tags)` use pannudhu** —
+    [Nested responses](/tanglish/docs/relationships/nested-responses)
+    fix, so N items list panna avanga tags-ku N extra queries aagaadhu.
+
+**`routers/items.py`:**
+
+12. **`get_item_or_404` / `get_tag_or_404`** — chinna helpers, so "look
+    up pannu illana 404" venum-na naalu routes-um same moonu lines-ah
+    repeat panna vendaam.
+13. **`create_item`-la ella tag id-aiyum oru query-la validate
+    pannudhu:**
+    - `wanted = set(item.tag_ids)` — `set()` `[1, 1]` maadhiri
+      duplicates-aiyum drop pannum.
+    - `missing = sorted(wanted - {tag.id for tag in tags})` — kettu
+      thirumba varaadhadhu ellam illadhadhu, error **ellathaiyum** orey
+      time-la list pannum (`Tag(s) not found: [98, 99]`).
+    - Ella checks-um edhuvum write aaguradhukku **munnadiye** run
+      aagudhu, so thappana id edhuvum create pannaadhu.
+14. **Attach panna `PUT /items/{item_id}/tags/{tag_id}`** — URL exact
+    link-ah name pannudhu. "Item 2-ku tag 3 irukkanum" ethana thadava
+    anuppinaalum same result — idhu dhan `PUT` promise panradhu
+    (**idempotent**). Already attach aana tag-ah attach pannina appavum
+    item-oda `200` answer pannum.
+15. **Detach panna `DELETE`** — link illana `404`: andha URL-la irukra
+    resource (link) illa. Sila APIs inga kooda `204` answer pannum,
+    `DELETE`-ah idempotent-a treat panni; rendum defensible, consistent-a
+    irunga avlo dhan.
+
+**`routers/tags.py`:**
+
+16. **`return tag.items`** — same join table-oda opposite direction,
+    free-a. `ItemSummary`-la `tags` field illa, 11/b-oda `ItemSummary`-la
+    `category` illadha adhe reason: circular nesting vendaam.
+
+## Try it
+
+```bash
+curl -X POST http://127.0.0.1:8000/tags -H "Content-Type: application/json" -d "{\"name\": \"gift\"}"
+curl -X POST http://127.0.0.1:8000/items -H "Content-Type: application/json" -d "{\"name\": \"Keyboard\", \"price\": 49, \"category_id\": 1, \"tag_ids\": [1, 3]}"
+curl -i -X POST http://127.0.0.1:8000/items -H "Content-Type: application/json" -d "{\"name\": \"Ghost\", \"price\": 5, \"category_id\": 1, \"tag_ids\": [1, 98, 99]}"  # 404
+curl -X PUT http://127.0.0.1:8000/items/2/tags/3
+curl -X PUT http://127.0.0.1:8000/items/2/tags/3  # same answer again: idempotent
+curl -i -X DELETE http://127.0.0.1:8000/items/2/tags/3  # 204
+curl http://127.0.0.1:8000/tags/2/items
+```
+
+Keyboard rendu tags-oda thirumbi varum:
+
+```json
+{"id": 5, "name": "Keyboard", "price": 49.0, "category_id": 1, "tags": [{"id": 1, "name": "sale"}, {"id": 3, "name": "gift"}]}
+```
+
+`"tag_ids": [1, 98, 99]`
+`404 {"detail": "Tag(s) not found: [98, 99]"}` answer pannum, edhuvum
+create pannaadhu.
+
+Adutha step: [Transactions](/tanglish/docs/relationships/transactions)
+— full-a save aagura illana edhuvume save aagaadha order.

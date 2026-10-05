@@ -1,0 +1,299 @@
+---
+title: "4. async def vs def"
+description: 5 concurrent requests-ah time panni, async def-kulla oru blocking call yen full server-aiyum freeze pannudhu, inga database routes yen plain def-nu kaattudhu.
+---
+
+<GithubLink path="example/10/d" />
+
+Oru route eppo `async def`-a irukkanum, eppo plain `def`-a? Indha app-la
+database illa: ovvonnum vera vera vazhila oru second wait panra (illana
+wait-e pannadha) naalu chinna routes, mattrum ovoru route-aiyum **ore
+nerathula** 5 requests-oda hit panni time panra oru `demo.py` script.
+
+| Route | Eppadi wait pannudhu | 1 request | 5 ore nerathula |
+|---|---|---|---|
+| `GET /sync-sleep` | `def` + `time.sleep(1)` | 1 s | **~1 s** (5 worker threads pakkathu pakkathula thoongudhu) |
+| `GET /async-sleep` | `async def` + `await asyncio.sleep(1)` | 1 s | **~1 s** (event loop anju-aiyum juggle pannudhu) |
+| `GET /async-blocking` | `async def` + `time.sleep(1)` | 1 s | **~5 s** (onnu appuram onnu, andha nerathula full server-um freeze) |
+| `GET /ping` | `def`, udane return pannum | instant | instant |
+
+## Folder
+
+```text
+10/d/
+├── main.py    # /sync-sleep, /async-sleep, /async-blocking, /ping
+└── demo.py    # 5 concurrent requests per endpoint, prints wall time
+```
+
+## Code
+
+**`main.py`** — naalu routes, oru second wait panna moonu vazhigal:
+
+```python title="main.py"
+import asyncio
+import time
+
+from fastapi import FastAPI
+
+app = FastAPI()
+
+
+# Plain `def`: FastAPI runs it in a worker thread (a threadpool), so
+# while this thread sleeps, the event loop keeps serving other requests.
+# 5 requests at once -> 5 threads sleeping side by side -> about 1 s.
+@app.get("/sync-sleep")
+def sync_sleep():
+    time.sleep(1)  # a blocking call, like a SQLAlchemy query or requests.get()
+    return {"endpoint": "sync-sleep", "slept": 1}
+
+
+# `async def` + `await`: runs on the event loop itself. `await` hands
+# control back to the loop while waiting, so it serves others meanwhile.
+# 5 requests at once -> about 1 s.
+@app.get("/async-sleep")
+async def async_sleep():
+    await asyncio.sleep(1)
+    return {"endpoint": "async-sleep", "slept": 1}
+
+
+# THE MISTAKE: `async def` + a blocking call. There's no `await`, so the
+# event loop is stuck inside time.sleep for a full second and can do
+# nothing else — not even /ping. 5 requests at once -> about 5 s.
+@app.get("/async-blocking")
+async def async_blocking():
+    time.sleep(1)
+    return {"endpoint": "async-blocking", "slept": 1}
+
+
+# Instant. Used by demo.py to show whether the server is still responsive.
+@app.get("/ping")
+def ping():
+    return {"pong": True}
+```
+
+**`demo.py`** — timing script. Standard library mattum dhan, install
+panna edhuvum illa:
+
+```python title="demo.py"
+"""Fire 5 concurrent requests at each endpoint and print the wall time.
+
+Start the server first (in another terminal):
+
+    uvicorn main:app
+
+then:
+
+    python demo.py
+    python demo.py --base-url http://127.0.0.1:8765
+
+Only the standard library is used, so nothing to install.
+"""
+
+import argparse
+import time
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor
+
+N = 5
+
+
+def fetch(url: str) -> float:
+    """GET url, return how long it took in seconds."""
+    start = time.perf_counter()
+    with urllib.request.urlopen(url, timeout=30) as resp:
+        resp.read()
+    return time.perf_counter() - start
+
+
+def burst(url: str, n: int = N) -> float:
+    """Send n requests to url at the same time; return total wall time."""
+    start = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=n) as pool:
+        list(pool.map(fetch, [url] * n))
+    return time.perf_counter() - start
+
+
+def ping_during(base: str, path: str) -> float:
+    """Start a burst on `path`, then time one /ping sent while it runs."""
+    with ThreadPoolExecutor(max_workers=N + 1) as pool:
+        for _ in range(N):
+            pool.submit(fetch, base + path)
+        time.sleep(0.2)  # let the burst reach the server first
+        return pool.submit(fetch, base + "/ping").result()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--base-url", default="http://127.0.0.1:8000")
+    base = parser.parse_args().base_url.rstrip("/")
+
+    fetch(base + "/ping")  # warm-up: fails fast if the server isn't running
+
+    print(f"{N} concurrent requests per endpoint against {base}\n")
+    for path in ["/sync-sleep", "/async-sleep", "/async-blocking"]:
+        print(f"  {path:<16} {burst(base + path):5.2f} s total")
+
+    print("\nOne /ping sent while each burst is running:\n")
+    for path in ["/sync-sleep", "/async-sleep", "/async-blocking"]:
+        print(f"  during {path:<16} /ping took {ping_during(base, path):5.2f} s")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+## Line by line
+
+Database illa, `models.py`/`crud.py` illa: verum `main.py` mattrum `demo.py`.
+
+**FastAPI oru route-ah run panra rendu vazhigal:**
+
+1. **Uvicorn oru event loop run pannudhu**: requests-la edhavadhu onnu
+   wait pannumbodhellam avangalukku naduvula switch panra oru single
+   thread. Unga function-ah FastAPI enna pannudhu-nu neenga adha eppadi
+   ezhudhuneenga-ngradha poruthu:
+   - `async def` → **nera event loop-laye** call aagum. Neenga wait
+     pannumbodhellam `await` pannuveenga-nu FastAPI nambum, appo dhan
+     loop mattha requests-ku switch aaga mudiyum.
+   - `def` → oru **threadpool**-ku anuppapadum (default-a kittathatta 40
+     worker threads). Function evvalavu neram venum-naalum block
+     pannalaam; adhu thannoda thread-ah mattum dhan block pannum.
+
+**`main.py`:**
+
+2. **`/sync-sleep` — oru blocking call-oda `def`.** `time.sleep(1)` edha
+   blocking call-kum oru stand-in, oru SQLAlchemy query illana
+   `requests.get()` maadhiri. Anju requests ore nerathula varudhu,
+   FastAPI avangala anju worker threads-kitta kudukkudhu, anju-um ore
+   nerathula thoongudhu, anju-um kittathatta **1 second**-la answer
+   pannudhu. Event loop eppovum block aagadhu, so `/ping` instant-a
+   irukkum.
+3. **`/async-sleep` — oru async wait-oda `async def`.**
+   `await asyncio.sleep(1)`-na "oru second-la ennai ezhuppu, andha
+   nerathula mathavangala serve pannu"-nu artham. Loop anju-aiyum start
+   panni, park panni, naduvula `/ping`-ku answer panni, kittathatta
+   **1 second**-la anju-aiyum mudikkum. Threads edhuvum illa.
+4. **`/async-blocking` — thappu.** Idhu `async def`, so event loop-la run
+   aagudhu. Aana `time.sleep` awaitable illa: adhu loop-oda ore thread-ah
+   full-a oru second pidichu vachukkum, loop vera edhukkum switch aaga
+   mudiyaadhu. Anju requests strictly onnu appuram onnu run aagum,
+   mottham **kittathatta 5 seconds**, server-ku varra ovoru mattha
+   request-um, `/ping` uttpada, avangalukku pinnadi queue-la nikkum.
+5. **Idhai pathi edhuvum unga-ku warn pannadhu.** Code run aagum, oru
+   single request expect panna maadhiri 1 second edukkum, problem load-la
+   mattum dhan theriyum.
+6. **`/ping`** — udane return pannum. Oru burst run aagumbodhu server
+   innum responsive-a irukka-nu check panna `demo.py` idha use pannudhu.
+
+**`demo.py` — idha measure panradhu:**
+
+7. **`fetch(url)`** — `time.perf_counter()` vachi time panna oru
+   `urllib.request.urlopen` call. Server stuck aana, `timeout=30` adha
+   eppovum hang aagama thadukkum.
+8. **`burst(url)`** — `ThreadPoolExecutor(max_workers=n)` anju `fetch`
+   calls-ah anju threads-la irundhu ore nerathula anuppum;
+   `pool.map(...)` ellathukkum wait pannum. Kadaisi onnu thirumbi vara
+   evvalavu neram aachu-nu `burst` return pannum.
+9. **`ping_during(base, path)`** — `path`-la 5-oda oru burst start
+   pannum, burst first server-ah reach pannattum-nu `0.2` seconds wait
+   pannum, appuram burst nadakkumbodhe anuppuna oru `/ping`-ah time
+   pannum. Freeze-ah kaattradhu idhu dhan.
+10. **`main()`** — `--base-url` (default `http://127.0.0.1:8000`)
+    server-ah choose pannum. First `fetch(base + "/ping")` oru warm-up,
+    server run aagalana adhu seekiram fail aagum. Appuram ovoru slow
+    route-oda burst time-um, adhukku appuram ovoru burst-oda pothu
+    `/ping` time-um print pannum.
+
+## Real output
+
+`--base-url http://127.0.0.1:8765`-oda, andha port-la irukra oru
+server-ku against-a run panna `demo.py`-oda real output:
+
+```text
+5 concurrent requests per endpoint against http://127.0.0.1:8765
+
+  /sync-sleep       1.01 s total
+  /async-sleep      1.01 s total
+  /async-blocking   5.02 s total
+
+One /ping sent while each burst is running:
+
+  during /sync-sleep      /ping took  0.02 s
+  during /async-sleep     /ping took  0.00 s
+  during /async-blocking  /ping took  4.82 s
+```
+
+| Route | 5 requests ore nerathula | Burst pothu oru `/ping` |
+|---|---|---|
+| `/sync-sleep` | 1.01 s | 0.02 s |
+| `/async-sleep` | 1.01 s | 0.00 s |
+| `/async-blocking` | **5.02 s** | **4.82 s** |
+
+Kadaisi line dhan mukkiyam: `/async-blocking` run aagumbodhu, edhuvume
+pannadha `/ping` kooda kittathatta 5 seconds wait pannudhu. App-oda ovoru
+user-um adhu hang aagi irukradha paappanga.
+
+## Rule
+
+> Neenga call panra library sync-na (SQLAlchemy `Session`, `requests`,
+> `time.sleep`) → `def` use pannunga. Neenga await panra ellame async-a
+> irundha mattum `async def` use pannunga.
+
+- **"Async" libraries-na neenga `await` panra calls irukra libraries:**
+  `asyncio`, `httpx.AsyncClient`, SQLAlchemy-oda `AsyncSession`,
+  `aiomysql`. Slow call-ku munnadi `await` ezhudhala-na, adhu async illa.
+- **Doubt-a irundha, `def` dhan safe choice.** `async def`-a irundhirukka
+  koodiya oru `def` route-ku oru thread cost; block panra oru `async def`
+  route-ku full server-e cost.
+- **Adhunaala dhan indha repo-la ovoru database route-um plain `def`.**
+  [MySQL + CRUD](/tanglish/docs/mysql-crud)-la irundhu, ovoru route-um
+  `db: Session = Depends(get_db)` pannudhu, `db.query(...)`,
+  `db.commit()` maadhiri things-ah call pannudhu. Adhu **sync**
+  SQLAlchemy `Session`: `time.sleep` wait panra maadhiriye adhu MySQL-ku
+  wait pannum, thannoda thread-ah block panni. `def` routes-a, andha
+  waits worker threads-la nadakkum. Onna `async def`-a maathunga, adhu
+  `/async-blocking` aagidum: unga laptop-la correct, real traffic-la
+  freeze. Real-a async-ku pogaradhu-na keyword mattum illa, full stack-ah
+  maathanum (async engine, `AsyncSession`, oru async driver, ovoru
+  query-kum `await`).
+- **Dependencies-um adhe rule-ah follow pannudhu.**
+  [Dependencies](/tanglish/docs/project-structure/dependencies)-la irukra
+  `get_db` `yield`-oda oru plain `def`, so FastAPI adha-vum threadpool-la
+  run pannum. Oru `def` route `def` dependencies use panradhu fine, oru
+  `async def` route avangala use panradhum fine; FastAPI ovoru piece-aiyum
+  sariyaana idathula run pannum.
+
+## Try it
+
+Terminal 1 (`--reload` venaam; reloader timings-la noise add pannum):
+
+```bash
+cd example/10/d
+uvicorn main:app
+```
+
+Terminal 2:
+
+```bash
+cd example/10/d
+python demo.py
+```
+
+Illana ovoru route-aiyum kai-la hit pannunga:
+
+```bash
+curl http://127.0.0.1:8000/sync-sleep
+curl http://127.0.0.1:8000/async-sleep
+curl http://127.0.0.1:8000/async-blocking
+curl http://127.0.0.1:8000/ping
+```
+
+**Postman:** Method `GET`, URL `http://127.0.0.1:8000/sync-sleep` (illana
+mela irukra edha route-um), Headers-um Body-um illa. Postman ore
+nerathula oru request dhan anuppum, so adhaala difference-ah kaatta
+mudiyaadhu; adhukku `demo.py` use pannunga.
+
+Thirumba [Project Structure overview](/tanglish/docs/project-structure)-ku
+pogalaam.
+
+Adutha topic: [Relationships](/tanglish/docs/relationships) — tables-ah link pannradhu, transactions, soft delete.

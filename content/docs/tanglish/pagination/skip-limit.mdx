@@ -1,0 +1,317 @@
+---
+title: "1. skip/limit pagination"
+description: ?skip=, ?limit= vachi list-ah oru thadava oru page-a return pannurathu, eppovum first order panni.
+---
+
+<GithubLink path="example/9/a" />
+
+`GET /items` ippo rendu query parameters read pannudhu, `skip`
+(evlo rows thaandi poganum) mattrum `limit` (evlo return pannanum),
+default-a first 10 rows. Cut panradhu database dhan, so table evlo
+periya-a valarndhalum, oru request-oda cost maximum `limit` rows dhan.
+
+| Route | Description |
+|---|---|
+| `GET /items?skip=0&limit=10` | `id` order-la oru page rows. Rendu parameters-um optional |
+| `GET /items/{item_id}` | Oru row; illana `404` |
+
+## Code
+
+**`database.py`** — env vars, `engine`/`SessionLocal`/`Base`, mattrum
+`get_db()` dependency:
+
+```python title="database.py"
+import os
+
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+load_dotenv()
+
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
+MYSQL_USER = os.getenv("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
+
+# Set DATABASE_URL directly to override everything above (e.g. to point
+# at SQLite for a quick local test with no MySQL server at all).
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
+)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+```
+
+**`models.py`** — `catalog_items` table:
+
+```python title="models.py"
+from sqlalchemy import Column, DateTime, Float, Integer, String, func
+
+from database import Base
+
+
+# 9/a–9/d all use this exact model, so they can share one table.
+class ItemModel(Base):
+    __tablename__ = "catalog_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(100), nullable=False)
+    category = Column(String(50), nullable=False)
+    price = Column(Float, nullable=False)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+```
+
+**`schemas.py`** — `ItemOut`, response-la oru row-oda shape:
+
+```python title="schemas.py"
+from datetime import datetime
+
+from pydantic import BaseModel, ConfigDict
+
+
+class ItemOut(BaseModel):
+    # Read attributes off the SQLAlchemy row (see 8/d).
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    category: str
+    price: float
+    created_at: datetime
+```
+
+**`crud.py`** — paged query, kooda 25-row seed:
+
+```python title="crud.py"
+from sqlalchemy.orm import Session
+
+from models import ItemModel
+
+
+def get_items(db: Session, skip: int, limit: int) -> list[ItemModel]:
+    # ORDER BY first, THEN skip/limit. Without a fixed order the database
+    # may return rows in any order, and pages could overlap or skip rows.
+    return (
+        db.query(ItemModel)
+        .order_by(ItemModel.id)
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
+
+
+def get_item(db: Session, item_id: int) -> ItemModel | None:
+    return db.get(ItemModel, item_id)
+
+
+# 25 rows across 5 categories, so paging and filtering have something to do.
+SEED = [
+    ("Python Crash Course", "books", 29.99),
+    ("Clean Code", "books", 34.5),
+    ("The Pragmatic Programmer", "books", 42.0),
+    ("Dune", "books", 9.99),
+    ("Cooking for Engineers", "books", 18.75),
+    ("Laptop", "electronics", 999.99),
+    ("Mouse", "electronics", 19.99),
+    ("Mechanical Keyboard", "electronics", 89.0),
+    ("USB-C Cable", "electronics", 7.49),
+    ("27in Monitor", "electronics", 249.0),
+    ("Noise-Cancelling Headphones", "electronics", 199.95),
+    ("Building Blocks Set", "toys", 49.99),
+    ("Rubber Duck", "toys", 3.5),
+    ("Remote Control Car", "toys", 64.0),
+    ("Jigsaw Puzzle 1000pc", "toys", 15.0),
+    ("Plush Bear", "toys", 12.25),
+    ("Chef's Knife", "kitchen", 79.0),
+    ("Cast Iron Pan", "kitchen", 45.5),
+    ("Coffee Grinder", "kitchen", 59.99),
+    ("Measuring Cups", "kitchen", 8.99),
+    ("Garden Hose", "garden", 27.0),
+    ("Pruning Shears", "garden", 22.5),
+    ("Tomato Seeds", "garden", 2.99),
+    ("Watering Can", "garden", 14.0),
+    ("Lawn Mower", "garden", 329.0),
+]
+
+
+def seed_items(db: Session) -> None:
+    if db.query(ItemModel).count() == 0:
+        db.add_all(
+            [ItemModel(name=n, category=c, price=p) for n, c, p in SEED]
+        )
+        db.commit()
+```
+
+**`main.py`** — app; `skip`, `limit` verum function arguments dhan:
+
+```python title="main.py"
+from fastapi import Depends, FastAPI, HTTPException
+from sqlalchemy.orm import Session
+
+import crud
+from database import Base, SessionLocal, engine, get_db
+from schemas import ItemOut
+
+Base.metadata.create_all(bind=engine)
+
+with SessionLocal() as db:
+    crud.seed_items(db)
+
+app = FastAPI()
+
+NOT_FOUND = {404: {"description": "Item not found"}}
+
+
+# skip and limit aren't in the path, so FastAPI reads them from the query
+# string: /items?skip=10&limit=5. The defaults make both optional.
+@app.get("/items", response_model=list[ItemOut])
+def list_items(skip: int = 0, limit: int = 10, db: Session = Depends(get_db)):
+    return crud.get_items(db, skip=skip, limit=limit)
+
+
+@app.get("/items/{item_id}", response_model=ItemOut, responses=NOT_FOUND)
+def get_item(item_id: int, db: Session = Depends(get_db)):
+    row = crud.get_item(db, item_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Item not found")
+    return row
+```
+
+## Line by line
+
+`database.py` mattrum `models.py` share aagra pieces, adha
+[index page](/tanglish/docs/pagination)-la explain pannirukkom.
+Keezha `schemas.py`, `crud.py`, `main.py` paarpom.
+
+**`schemas.py`:**
+
+1. `class ItemOut(BaseModel)` — [Validation](/tanglish/docs/validation)-la
+   paartha same `response_model` idea: API-la irundhu exact-a endha
+   fields veliya pogum-nu list pannudhu (`id`, `name`, `category`,
+   `price`, `created_at`).
+2. `model_config = ConfigDict(from_attributes=True)` — Pydantic andha
+   fields-ah SQLAlchemy row object-la irundhu neraa read panna
+   vidudhu (`row.name`, `row.price`, ...), dict thevaiyilla. Adhunaala
+   dhan `main.py` ORM rows-ah neraa return pannalaam, kaiyaala
+   `{"id": row.id, ...}` reshaping venaam.
+3. `created_at: datetime` — JSON-la `"2026-10-05T10:15:00"` maadhiri
+   ISO 8601 string-a pogum.
+
+**`main.py`:**
+
+4. `def list_items(skip: int = 0, limit: int = 10, db: Session = Depends(get_db))`
+   — query parameters verum function arguments dhan. `/items`-la
+   `{...}` placeholder illa, so FastAPI-ku `skip`, `limit`-ah path-la
+   kandupidikka mudiyaadhu, adhunaala **query string**-la thedum —
+   `?`-ku appuram irukra part. Rule simple: path parameter illadha,
+   Pydantic body model illadha, `Depends` illadha argument na adhu
+   query parameter.
+5. `= 0` / `= 10` defaults rendaiyum **optional** aakkudhu. Rendaiyum
+   vittuttaa first 10 rows varum; `?limit=5` mattum anuppunaa `skip`
+   innum `0` dhan.
+6. Path parameters-ku maadhiri-ye `int` type enforce aagum. URL-la
+   ellame text-a dhan varum, so FastAPI convert pannum: `?limit=5`
+   unga function-ku integer `5`-a varum, string `"5"` illa, mattrum
+   `?limit=ten` unga code run aagradhukku munnadiye `422`.
+7. `@app.get("/items", response_model=list[ItemOut])` — `ItemOut`
+   list, so return aagra list-la ovoru ORM row-um veliya pogumbodhu
+   `ItemOut` vazhiya filter aagum.
+8. `get_item` mattrum `NOT_FOUND` — munnadi paartha same one-row
+   lookup: `crud.get_item`-oda `None` `404`-a maarum,
+   `responses=NOT_FOUND` andha `404`-ah `/docs`-la document mattum
+   pannum.
+9. `Base.metadata.create_all(bind=engine)` apparam
+   `with SessionLocal() as db: crud.seed_items(db)` — startup-la,
+   `catalog_items` table illana create pannum, empty-a irundha 25 seed
+   rows-ah fill pannum. Adutha ella run-layum rendum no-op.
+
+**`crud.py`:**
+
+10. `get_items(db, skip, limit)` query-ah naalu chained steps-la build
+    pannudhu, kadaisi step varaikkum database-ku edhuvum pogadhu:
+    - `db.query(ItemModel)` — "`catalog_items`-oda ella row-um".
+    - `.order_by(ItemModel.id)` — unique `id` vachi sort.
+    - `.offset(skip)` — first `skip` rows-ah thaandu.
+    - `.limit(limit)` — adhukku appuram maximum `limit` rows.
+    - `.all()` — real-a run pannum. `?skip=10&limit=5`-ku adhu
+      `SELECT ... ORDER BY id LIMIT 5 OFFSET 10`.
+11. **Cut panradhu database dhan.** MySQL-la irundhu 5 rows mattum dhan
+    veliya varum. Ellathaiyum fetch panni Python list-ah slice pannina
+    (`rows[10:15]`) same answer varum, aana ovoru request-um full
+    table-ah read pannum — naama fix panna try panra adhe problem.
+12. **Paging-ku munnadi eppovum `order_by`.** SQL tables-ku **built-in
+    order kidaiyaadhu**. `ORDER BY` illama, database ippo edhu cheap-o
+    andha order-la rows-ah return pannum, adhu rendu requests naduvula
+    maaralaam (insert, delete, illa vera query plan-naala). So "10
+    skip pannu, 10 edu" page 1-la already paartha row-ah thirumba
+    kudukkalaam, innoru row-ah silent-a skip pannalaam. Unique column
+    (`id`) vachi sort pannina ovoru page-um well-defined: page 1 enga
+    mudinjudho page 2 exact-a anga dhan start aagum.
+13. `SEED` mattrum `seed_items` — 25 `(name, category, price)` tuples,
+    `db.query(ItemModel).count() == 0`-a irundha mattum insert aagum.
+    `created_at` inga set pannala; `server_default` moola database
+    fill pannum.
+
+**Idhu yen mukkiyam:**
+
+14. **Unbounded lists scale aagaadhu.** Indha page-ku munnadi
+    `GET /items` ella row-ayum return pannuchu. 25 rows-na yaarum
+    gavanikka maattaanga. Million-na, oru request million rows-ah
+    memory-ku load panni, JSON-a maathi, megabytes-ah network-la
+    anuppum. Ore nerathula konjam thadava pannina server vizhundhidum.
+    Pagination request-oda cost-ah **fixed** aakkudhu — maximum
+    `limit` rows — table evlo periya-a valarndhalum.
+15. **End-ah thaandinaa error illa.** 25-row table-la `?skip=100`
+    `[]` kudukkum. Query nalla dhan run aachu; anga rows illa, avlo
+    dhan, empty list dhan honest answer.
+16. **Innum enna missing.** `?limit=1000000`-ah edhuvum thadukkala —
+    adhu work aagum, unbounded list thirumba vandhudum. Negative
+    numbers-um reject aagala: SQLite `?skip=-1`-ah silent-a ignore
+    pannum, MySQL SQL-ah reject pannum, ungalukku `500` varum.
+    [Query(...) validation](/tanglish/docs/pagination/query-validation)
+    `ge`/`le` rules vachi rendu ottaiyum moodum.
+
+## Try it
+
+```bash
+curl http://127.0.0.1:8000/items
+curl "http://127.0.0.1:8000/items?skip=10&limit=5"
+curl "http://127.0.0.1:8000/items?skip=100"
+curl -i "http://127.0.0.1:8000/items?limit=ten"  # 422
+curl http://127.0.0.1:8000/items/1
+curl -i http://127.0.0.1:8000/items/999  # 404
+```
+
+1. Rows 1–10 (defaults).
+2. Rows 11–15.
+3. `[]` — end-ah thaandinaa empty list, error illa.
+4. `422`, `limit` integer-a irukkanum:
+
+```json
+{"detail": [{"type": "int_parsing", "loc": ["query", "limit"], "msg": "Input should be a valid integer, unable to parse string as an integer", "input": "ten"}]}
+```
+
+`"loc": ["query", "limit"]` paarunga — thappaana value query
+string-la irundhu vandhuchu, path-la illa body-la illa-nu error-e
+sollidhu.
+
+**Postman:** Method `GET`, URL `http://127.0.0.1:8000/items`, apparam
+**Params** tab-la `skip`, `limit` add pannunga; URL-oda
+`?skip=...&limit=...` part-ah Postman-e build pannidum.
+
+Adutha step: [Search, filter, sort](/tanglish/docs/pagination/filter-sort)
+— optional filters, mattrum sort column-ah client choose panna oru
+safe vazhi.

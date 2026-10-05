@@ -1,0 +1,504 @@
+---
+title: "4. Refresh tokens"
+description: A 15-minute access token for the API plus a 7-day refresh token that swaps itself for a brand-new pair — short-lived access, long-lived login.
+---
+
+<GithubLink path="example/12/d" />
+
+Short-lived access, long-lived login. `POST /token` now returns **two**
+tokens: an access token (15 minutes) for calling the API, and a refresh
+token (7 days) whose only job is `POST /refresh`, which swaps it for a
+brand-new pair without asking for the password. Each kind is rejected
+where the other belongs.
+
+| Route | Description |
+|---|---|
+| `POST /token` | Form login → `access_token` + `refresh_token`; `401` if wrong |
+| `POST /refresh` | JSON body with `refresh_token` → a new pair; `401` if it's expired, invalid, or actually an access token |
+| `GET /users/me` | Needs an **access** token; a refresh token gets `401` |
+
+Table: `sec_users`, shared with 12/b, 12/c and 12/i. Same seeded users,
+including the deactivated `carol`.
+
+## The code
+
+`config.py`, `database.py`, `models.py`, `crud.py` and
+`dependencies.py` are the same as on
+[Protected routes](/en/docs/security/protected-routes). New: a second
+token type in `security.py`, `TokenPair`/`RefreshRequest` in
+`schemas.py`, and `POST /refresh`.
+
+**`config.py`:**
+
+```python title="config.py"
+import os
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# Signs every token. Anyone who knows it can mint valid tokens for any
+# user, so in production set a long random value in .env, generated with:
+#   python -c "import secrets; print(secrets.token_hex(32))"
+SECRET_KEY = os.getenv("SECRET_KEY", "dev-only-secret-change-me-in-production-0123456789")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "15"))
+REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7"))
+```
+
+**`database.py`:**
+
+```python title="database.py"
+import os
+
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+load_dotenv()
+
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
+MYSQL_USER = os.getenv("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
+
+# Set DATABASE_URL directly to override everything above (e.g. to point
+# at SQLite for a quick local test with no MySQL server at all).
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
+)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+```
+
+**`models.py`:**
+
+```python title="models.py"
+from sqlalchemy import Boolean, Column, Integer, String
+
+from database import Base
+
+
+# Shared by 12/b, 12/c, 12/d and 12/i. Keep it identical in all four:
+# create_all never alters an existing table.
+class UserModel(Base):
+    __tablename__ = "sec_users"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    username = Column(String(30), nullable=False, unique=True)
+    hashed_password = Column(String(255), nullable=False)
+    is_active = Column(Boolean, nullable=False, default=True)
+```
+
+**`schemas.py`** — a token *pair* now:
+
+```python title="schemas.py"
+from pydantic import BaseModel, ConfigDict
+
+
+# Login and /refresh both return a fresh pair.
+class TokenPair(BaseModel):
+    access_token: str
+    refresh_token: str
+    token_type: str
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
+
+class UserOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    username: str
+    is_active: bool
+```
+
+**`security.py`** — access tokens, refresh tokens, and a helper that
+makes both:
+
+```python title="security.py"
+import secrets
+from datetime import datetime, timedelta, timezone
+
+import jwt
+from pwdlib import PasswordHash
+
+from config import ACCESS_TOKEN_EXPIRE_MINUTES, ALGORITHM, REFRESH_TOKEN_EXPIRE_DAYS, SECRET_KEY
+
+# Argon2, exactly as in 12/a.
+password_hash = PasswordHash.recommended()
+
+
+def hash_password(password: str) -> str:
+    return password_hash.hash(password)
+
+
+def verify_password(password: str, hashed: str) -> bool:
+    return password_hash.verify(password, hashed)
+
+
+def create_access_token(username: str, expires_delta: timedelta | None = None) -> str:
+    if expires_delta is None:
+        expires_delta = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    payload = {
+        "sub": username,
+        "exp": datetime.now(timezone.utc) + expires_delta,
+        "type": "access",
+    }
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+
+
+# Same shape, three differences: lives for days, type "refresh", and a
+# random "jti" (JWT ID) so two refresh tokens issued in the same second
+# are still different strings.
+def create_refresh_token(username: str, expires_delta: timedelta | None = None) -> str:
+    if expires_delta is None:
+        expires_delta = timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+    payload = {
+        "sub": username,
+        "exp": datetime.now(timezone.utc) + expires_delta,
+        "type": "refresh",
+        "jti": secrets.token_hex(16),
+    }
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def create_token_pair(username: str) -> dict:
+    return {
+        "access_token": create_access_token(username),
+        "refresh_token": create_refresh_token(username),
+        "token_type": "bearer",
+    }
+
+
+def decode_token(token: str) -> dict:
+    # Checks the signature AND the exp claim. Raises jwt.InvalidTokenError
+    # (or its subclass jwt.ExpiredSignatureError) if either fails.
+    return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+```
+
+**`crud.py`:**
+
+```python title="crud.py"
+from sqlalchemy.orm import Session
+
+from models import UserModel
+from security import hash_password, verify_password
+
+
+def get_user_by_username(db: Session, username: str) -> UserModel | None:
+    return db.query(UserModel).filter(UserModel.username == username).first()
+
+
+def authenticate(db: Session, username: str, password: str) -> UserModel | None:
+    user = get_user_by_username(db, username)
+    if user is None or not verify_password(password, user.hashed_password):
+        return None
+    return user
+
+
+def seed_users(db: Session) -> None:
+    if db.query(UserModel).count() == 0:
+        db.add_all(
+            [
+                UserModel(username="alice", hashed_password=hash_password("alice-password")),
+                UserModel(username="bob", hashed_password=hash_password("bob-password")),
+                UserModel(username="admin", hashed_password=hash_password("admin-password")),
+                # Deactivated account: can log in, but the protected
+                # routes from 12/c on turn it away with 403.
+                UserModel(username="carol", hashed_password=hash_password("carol-password"), is_active=False),
+            ]
+        )
+        db.commit()
+```
+
+**`dependencies.py`** — unchanged; it already demands `type == "access"`:
+
+```python title="dependencies.py"
+import jwt
+from fastapi import Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
+from sqlalchemy.orm import Session
+
+import crud
+from database import get_db
+from models import UserModel
+from security import decode_token
+
+# Reads "Authorization: Bearer <token>" and hands the <token> part to
+# the route. No header at all -> 401 "Not authenticated" automatically.
+# tokenUrl tells /docs where the "Authorize" button should log in.
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+
+def credentials_error(detail: str = "Could not validate credentials") -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail=detail,
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> UserModel:
+    try:
+        payload = decode_token(token)
+    except jwt.ExpiredSignatureError:  # subclass, so it must come first
+        raise credentials_error("Token has expired")
+    except jwt.InvalidTokenError:  # bad signature, garbage, wrong algorithm...
+        raise credentials_error()
+
+    if payload.get("type") != "access":
+        raise credentials_error()
+
+    username = payload.get("sub")
+    user = crud.get_user_by_username(db, username) if username else None
+    if user is None:  # valid token, but the account was deleted since
+        raise credentials_error()
+    return user
+
+
+# Builds on get_current_user: authenticated AND allowed in.
+def get_current_active_user(user: UserModel = Depends(get_current_user)) -> UserModel:
+    if not user.is_active:
+        # 403, not 401: we know exactly who this is, and the answer is no.
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Inactive user")
+    return user
+```
+
+**`main.py`** — login returns a pair, `/refresh` swaps one:
+
+```python title="main.py"
+import jwt
+from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi.security import OAuth2PasswordRequestForm
+from sqlalchemy.orm import Session
+
+import crud
+from database import Base, SessionLocal, engine, get_db
+from dependencies import credentials_error, get_current_active_user
+from models import UserModel
+from schemas import RefreshRequest, TokenPair, UserOut
+from security import create_token_pair, decode_token
+
+Base.metadata.create_all(bind=engine)
+
+with SessionLocal() as db:
+    crud.seed_users(db)
+
+app = FastAPI()
+
+AUTH_ERRORS = {
+    401: {"description": "Missing, invalid or expired token"},
+    403: {"description": "Inactive user"},
+}
+
+
+@app.post("/token", response_model=TokenPair,
+          responses={401: {"description": "Incorrect username or password"}})
+def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    user = crud.authenticate(db, form_data.username, form_data.password)
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return create_token_pair(user.username)
+
+
+# Trade a refresh token for a new pair. No password needed: that's the
+# whole point. The refresh token goes in a JSON body, not the
+# Authorization header, so it can never be mistaken for an access token.
+@app.post("/refresh", response_model=TokenPair,
+          responses={401: {"description": "Invalid or expired refresh token"}})
+def refresh(body: RefreshRequest, db: Session = Depends(get_db)):
+    try:
+        payload = decode_token(body.refresh_token)
+    except jwt.ExpiredSignatureError:
+        raise credentials_error("Refresh token has expired")
+    except jwt.InvalidTokenError:
+        raise credentials_error("Invalid refresh token")
+
+    # An access token is signed with the same key, so the signature alone
+    # can't tell them apart. The type claim can.
+    if payload.get("type") != "refresh":
+        raise credentials_error("Invalid refresh token")
+
+    # Re-check the account: it may have been deleted or deactivated
+    # since the refresh token was issued.
+    user = crud.get_user_by_username(db, payload.get("sub") or "")
+    if user is None or not user.is_active:
+        raise credentials_error("Invalid refresh token")
+
+    # Rotation: hand out a NEW refresh token too, so an active client's
+    # refresh token keeps moving and never reaches its 7-day expiry.
+    return create_token_pair(user.username)
+
+
+@app.get("/users/me", response_model=UserOut, responses=AUTH_ERRORS)
+def read_me(current_user: UserModel = Depends(get_current_active_user)):
+    return current_user
+```
+
+## Line by line
+
+**Why two tokens:**
+
+1. One token can't be both short-lived (so a stolen one is useless soon)
+   and long-lived (so users don't type their password every 15 minutes).
+   So the job is split:
+
+   | | Access token | Refresh token |
+   |---|---|---|
+   | Lives | 15 minutes | 7 days |
+   | Sent | on **every** API call | only to `POST /refresh` |
+   | Opens | protected routes | nothing but `/refresh` |
+
+   The access token is the one flying around constantly, in headers and
+   logs, so it's the one most likely to leak — and it dies fast. The
+   refresh token travels rarely and to one place only.
+
+**`security.py`:**
+
+2. `create_refresh_token` — same key, same algorithm, three
+   differences: it lives for `REFRESH_TOKEN_EXPIRE_DAYS` days, its
+   `type` is `"refresh"`, and it carries a `jti` ("JWT ID", a standard
+   claim for a unique token id). Here `jti` just makes sure two refresh
+   tokens issued in the same second are different strings; it's also
+   what a denylist would store (step 9). A decoded refresh payload looks
+   like:
+
+   ```json
+   {"sub": "alice", "exp": 1791800675, "type": "refresh", "jti": "9f2c4e1a7b3d5f60a8c2e4b6d8f0a1c3"}
+   ```
+
+3. `create_token_pair` — builds the `access_token` / `refresh_token` /
+   `token_type` dict that both login and `/refresh` return, so the two
+   can't drift apart.
+
+**The `type` claim keeps them apart:**
+
+4. Both tokens are signed with the same `SECRET_KEY`, so both pass
+   `decode_token`. Without a type check, a 7-day refresh token would open
+   `/users/me` for a week, defeating the point. `get_current_user` in
+   `dependencies.py` already demands `"access"`, and `/refresh` demands
+   the opposite, `"refresh"`.
+
+**`main.py` — `POST /refresh`:**
+
+5. `body: RefreshRequest` — the refresh token comes in a JSON body, not
+   the `Authorization` header, so it never travels the same road as
+   access tokens.
+6. Decode, with the same "expired first" order as `get_current_user`:
+   an expired one gets `"Refresh token has expired"` (the client should
+   send the user to the login screen); anything else is
+   `"Invalid refresh token"`.
+7. **Re-check the user** — `crud.get_user_by_username` and `is_active`.
+   This is the one moment a long-lived login gets to notice that the
+   account was deleted or deactivated. `carol` gets `401` here rather
+   than `403`: from the client's point of view, the session is simply
+   over.
+8. **Rotation** — `return create_token_pair(user.username)` hands out a
+   **new refresh token** too, and the client throws away the old one.
+   An active user's refresh token keeps moving forward and never reaches
+   its 7-day limit; a user who disappears for a week has to log in again.
+   The client's logic is:
+   - call the API with the access token;
+   - on `401`, call `/refresh` once, save **both** new tokens, retry;
+   - if `/refresh` also fails, send the user to the login screen.
+
+   [React frontend](/en/docs/security/react) does exactly this with an
+   axios interceptor.
+
+**The catch: a JWT can't be taken back:**
+
+9. The server stores nothing about the tokens it issued; it only checks
+   signatures. So "log out" or "rotate" can't cancel a token that's
+   already out there. That's why using the same old refresh token twice
+   still works in this lesson. The usual fixes all add server-side state:
+   - **Denylist**: store the `jti` of every used or logged-out refresh
+     token (Redis, with a TTL equal to its remaining lifetime) and reject
+     it in `/refresh`. Reuse of a rotated token is then also a strong
+     sign of theft, and you can end that user's sessions.
+   - **Token version**: an integer column on the user, copied into each
+     token. "Log out everywhere" increments it, and tokens carrying the
+     old number stop working.
+   - **Store refresh tokens in a table** (one row per `jti`) and mark
+     the row revoked when it's used or on logout — what
+     [Everything together](/en/docs/security/secure-app) does with
+     `secure_refresh_tokens`.
+
+   This lesson skips them so `sec_users` stays identical to 12/b, 12/c
+   and 12/i. Short access-token lifetimes are what make this acceptable:
+   the worst case for a leaked access token is 15 minutes.
+
+**Where the client should keep them:**
+
+10. In a browser:
+    - **Memory** (a JS variable) for the access token is safest, but
+      it's lost on page reload — which is what the refresh token is for.
+    - **`localStorage`** is easy and survives reloads, but any script on
+      the page can read it, so one cross-site scripting (XSS) bug leaks
+      the tokens.
+    - An **`httpOnly` cookie** is the stronger option for the refresh
+      token: JavaScript can't read it at all, and the browser sends it
+      automatically. Add `Secure` (HTTPS only), `SameSite=Strict` or
+      `Lax`, and a `Path` of `/refresh` so it goes nowhere else. Cookies
+      bring their own risk (cross-site request forgery), which `SameSite`
+      mostly handles.
+
+    Mobile apps use the platform's secure storage (Keychain, Keystore).
+
+## Try it
+
+```bash
+curl -X POST http://127.0.0.1:8000/token -d "username=alice&password=alice-password"
+curl http://127.0.0.1:8000/users/me -H "Authorization: Bearer <paste access_token>"
+curl -X POST http://127.0.0.1:8000/refresh -H "Content-Type: application/json" -d "{\"refresh_token\": \"<paste refresh_token>\"}"
+```
+
+Login and `/refresh` both answer:
+
+```json
+{
+  "access_token": "eyJhbGciOiJIUzI1NiIs...",
+  "refresh_token": "eyJhbGciOiJIUzI1NiIs...",
+  "token_type": "bearer"
+}
+```
+
+Mixing them up fails:
+
+```bash
+curl -i http://127.0.0.1:8000/users/me -H "Authorization: Bearer <paste refresh_token>"  # 401
+curl -i -X POST http://127.0.0.1:8000/refresh -H "Content-Type: application/json" -d "{\"refresh_token\": \"<paste access_token>\"}"  # 401
+```
+
+| What you send | Status | `detail` |
+|---|---|---|
+| Refresh token to `/users/me` | `401` | `Could not validate credentials` |
+| Access token (or garbage) to `/refresh` | `401` | `Invalid refresh token` |
+| Expired refresh token to `/refresh` | `401` | `Refresh token has expired` |
+| `carol`'s refresh token to `/refresh` | `401` | `Invalid refresh token` |
+
+**Try this too:** call `/refresh` twice with the **same, old** refresh
+token. Both work. Rotation hands out a new refresh token each time, but
+nothing marks the old one as used — step 9 explains why, and what real
+apps do about it.
+
+Next: [Authorization by role](/en/docs/security/roles) — admin-only
+routes.

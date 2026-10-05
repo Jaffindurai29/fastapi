@@ -1,0 +1,171 @@
+# 13/a — Alembic instead of `create_all`
+
+The same small item API as before (`GET`/`POST /items`), but the app no
+longer creates its own table. [Alembic](https://alembic.sqlalchemy.org/)
+does, through two migrations that live in `migrations/versions/`:
+
+| Migration | What it does |
+|---|---|
+| `0001_create_migrated_items.py` | Creates `migrated_items` (`id`, `name`, `price`) and inserts two demo rows |
+| `0002_add_description.py` | Adds a nullable `description` column |
+
+See [STEPS.md](STEPS.md) for a line-by-line walkthrough.
+
+Same [setup](../../6/a/README.md#setup) as topic 6. Alembic reads the
+**same** env vars / `.env` / `DATABASE_URL` as the app, so whatever
+database the app uses, the migrations go to the same place.
+
+## Files
+
+| File | Responsibility |
+|---|---|
+| `database.py`, `models.py`, `schemas.py`, `crud.py`, `main.py` | The app, same layers as [6/a](../../6/a/README.md#files). `main.py` has **no** `create_all`. |
+| `alembic.ini` | Alembic's config: where the migrations folder is, logging. No database URL in it. |
+| `migrations/env.py` | Runs before every Alembic command: connects to the database and tells Alembic about our models. |
+| `migrations/script.py.mako` | The template new migration files are generated from. |
+| `migrations/versions/` | The migrations themselves, one file per change. |
+
+All of these came from `alembic init migrations` and were then edited.
+
+## Important: the database is shared
+
+Every topic in this repo uses the same `fastapi_learn` database, so it
+already holds `items`, `crud_react_items`, `validation_items`, and more.
+Alembic's `--autogenerate` compares the database against **our** models.
+It sees those other tables, can't find them in our models, and concludes
+they should be **dropped**. Without a filter, the generated migration
+would contain `op.drop_table("items")` and friends.
+
+`migrations/env.py` has an `include_name` filter that makes Alembic look
+only at tables our models define. Everything else is invisible to it.
+So if you already ran topic 6, 7, or 8 with `create_all`, that's fine:
+those tables are left alone.
+
+It also stores its "which migration am I on" row in its own table,
+`alembic_version_13a`, instead of the default `alembic_version`, so it
+can't clash with any other project's Alembic in the same database.
+
+## Run it
+
+Run every `alembic` command from this folder (with the venv active).
+First, look around:
+
+```bash
+cd example/13/a
+alembic history
+alembic current
+```
+
+`history` lists both migrations. `current` prints nothing: this
+database hasn't run any yet. Now create the table:
+
+```bash
+alembic upgrade head
+alembic current
+```
+
+`head` means "the newest migration". Both run in order (`-> 0001`, then
+`0001 -> 0002`), and `current` now says `0002 (head)`. Then start the
+app:
+
+```bash
+uvicorn main:app --reload
+```
+
+| Route | Description |
+|---|---|
+| `GET /items` | Every row |
+| `GET /items/{item_id}` | One row; `404` if missing, `422` if the id isn't a number |
+| `POST /items` | Insert a row; `201`, or `422` if the body breaks a rule |
+
+```bash
+curl http://127.0.0.1:8000/items
+
+curl http://127.0.0.1:8000/items/1
+
+curl -X POST http://127.0.0.1:8000/items -H "Content-Type: application/json" -d "{\"name\": \"Desk\", \"price\": 120, \"description\": \"Oak, 140cm\"}"
+```
+
+The two seeded rows have `"description": null`: they existed before
+`0002` added the column.
+
+Forgot `alembic upgrade head`? Then the table doesn't exist and every
+route answers `500` (the log says `no such table` / `doesn't exist`).
+The app doesn't create it for you anymore. That's the point.
+
+### Going back and forward
+
+Stop the app first, then:
+
+```bash
+alembic downgrade -1
+alembic current
+```
+
+`-1` means "undo one migration". `0002`'s `downgrade()` drops the
+`description` column (and anything stored in it), and `current` says
+`0001`. Go forward again:
+
+```bash
+alembic upgrade head
+```
+
+`alembic downgrade base` undoes **everything**, down to no table at all.
+
+## Exercise: your own migration with `--autogenerate`
+
+1. Add a column to `ItemModel` in `models.py`:
+
+   ```python
+   stock = Column(Integer, nullable=False, server_default="0")
+   ```
+
+   (`server_default` matters: the existing rows need **some** value for
+   a `NOT NULL` column.)
+
+2. Let Alembic write the migration by comparing the models to the
+   database:
+
+   ```bash
+   alembic revision --autogenerate -m "add stock"
+   ```
+
+   A new file appears in `migrations/versions/` with a random id like
+   `5d51e5d3eede_add_stock.py`. Add `--rev-id 0003` if you want readable
+   ids like the first two.
+
+3. **Open the file and read it.** It should contain one `add_column`
+   in `upgrade()` and one `drop_column` in `downgrade()`, nothing else.
+
+4. Apply it, then add `stock: int` to `ItemOut` in `schemas.py` so it
+   shows up in responses:
+
+   ```bash
+   alembic upgrade head
+   ```
+
+**Always review autogenerated migrations.** Autogenerate guesses from
+the difference between two states, and some changes it can't see the
+intent behind. Rename `name` to `title` in the model and it generates
+"drop column `name`, add column `title`", which **deletes every name**.
+The fix is to edit the file by hand into
+`batch_op.alter_column("name", new_column_name="title")`. It also
+misses some things entirely (for example changing a `server_default` or
+some type changes), so read the file every time before you run it.
+
+**Never edit a migration that has already run on a shared database.**
+Your teammate's database (or production) already recorded that it ran
+`0002`, so it will never run it again, and your edit never reaches them.
+To change something, write a **new** migration on top. Editing is only
+safe for a migration that has only ever run on your own machine (undo
+it with `downgrade` first, then edit, then `upgrade` again).
+
+**Postman:** Method `POST`, URL `http://127.0.0.1:8000/items`, Body →
+raw → JSON:
+
+```json
+{"name": "Desk", "price": 120, "description": "Oak, 140cm"}
+```
+
+Windows curl quoting, Postman basics, and "405 Method Not Allowed" are
+covered generically in the [root README](../../../README.md).

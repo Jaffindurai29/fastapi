@@ -1,0 +1,152 @@
+---
+title: Validation & Errors
+description: Ulla varradhula strict, edhavadhu thappa pona correct-a solradhu, server-la irundhu yentha fields veliya pogudhu-nu careful-a irukradhu.
+---
+
+<GithubLink path="example/8" />
+
+[MySQL + CRUD](/tanglish/docs/mysql-crud) client enna anuppinaalum
+nambichu, eppovum `404` mattum dhan answer pannuchu. Indha topic API-ah:
+
+- **ulla varradhula strict-a** aakkudhu — ovoru field-kum validation
+  rules, so thappana input route run aaguradhukku munnadiye reject
+  aagidum;
+- **thappa pona correct-a solla** vaikkudhu — ovoru failure-kum
+  sariyaana status code, mattrum ellathukkum oru consistent error shape;
+- **yentha fields server-ah vittu veliya pogudhu-nu careful-a**
+  aakkudhu — internal columns-ah ovoru response-la irundhum filter
+  panra oru `response_model`.
+
+Item-ku ippo oru field-ku pathila moonu fields irukku, so validate
+panna real-a edhavadhu irukku: `name` (unique), `price`, mattrum
+`quantity`.
+
+## Same layered layout
+
+Ovoru letter-um [MySQL + CRUD](/tanglish/docs/mysql-crud)-la already
+paartha same split dhan use pannudhu:
+
+| File | Responsibility |
+|---|---|
+| `database.py` | env vars, `engine`, `SessionLocal`, `Base`, `get_db()` — topic 6-oda exact same |
+| `models.py` | `ItemModel` — SQLAlchemy table |
+| `schemas.py` | Pydantic models — ippo validation rules-oda |
+| `crud.py` | database-oda pesura plain functions |
+| `main.py` | `FastAPI()` app mattrum adhoda routes |
+| `exceptions.py` | **8/c-la mattum** — `AppError` mattrum adhoda subclasses, ovvonnum oru status code-um error code-um vachirukra business errors |
+
+## Rendu tables, onnu illa
+
+- **8/a, 8/b, 8/c moonum oru table-ah share pannudhu, `validation_items`.**
+  Avanga `models.py` files exact same, so same database-ku onnu
+  appuram onnu run pannina, oruthar rows-ah innoruthar paapanga. 8/a-la
+  "Desk" create pannirundha, 8/b-la adhu innum irukkum — 8/b-la thirumba
+  "Desk" post pannina `409` varum, adhu dhan point-e.
+- **8/d-ku thani table, `response_model_items`**, yen-na adhu rendu
+  columns add pannudhu (`supplier_cost` mattrum `created_at`). Thani
+  table kuduthadhaala, 8/a–c table-oda shape unga kaal-ku keezha maaravae
+  maaradhu.
+
+Rendu tables-um startup-la `Base.metadata.create_all(...)` vachi
+automatic-a create aagum, empty-a irundha oru "Laptop"-um oru
+"Mouse"-um seed aagum.
+
+## Yentha status code eppo?
+
+Indha topic-la irundhu nyabagam vachukka vendiya oru table.
+[8/b](/tanglish/docs/validation/status-codes) idhula ovvonnaiyum
+purpose-a use pannudhu (`500` thavira):
+
+| Code | Meaning | Inga example |
+|---|---|---|
+| `400 Bad Request` | Request well-formed dhan, aana artham illa | `PATCH` with `{}` — valid JSON, aana edhuvum kekkala |
+| `404 Not Found` | URL-la irukra thing exist aagala | `GET /items/999` |
+| `409 Conflict` | Valid request, aana stored data-oda clash aagudhu | duplicate name; innum stock-la irukra item-ah delete panradhu |
+| `422 Unprocessable Content` | Body illa parameter oru validation rule-ah break pannuchu | `price: -1`, `/items/abc` — FastAPI idha unga-ku anuppidum |
+| `500 Internal Server Error` | Unga code crash aachu | purpose-a eppovum anuppadheenga — idhu bug-nu artham |
+
+Seekiram choose panna oru vazhi: request-ah mattum paathu thappu-nu
+Pydantic-ku theriyum-na, adhu `422` (FastAPI adha unga-ku pannidum).
+Thappu-nu theriya database venum-na, adhu `404` (illa) illana `409`
+(irukradhoda clash). Valid aana artham illana, adhu `400`.
+
+## Setup
+
+Pudhu packages edhuvum illa — `Field`, `field_validator`, `ConfigDict`
+ellam Pydantic-oda varudhu, adha FastAPI already install pannidichu.
+Fresh-a start pannreenga-na:
+
+```bash
+pip install fastapi uvicorn sqlalchemy pymysql python-dotenv
+```
+
+Database setup [MySQL + CRUD](/tanglish/docs/mysql-crud)-la irukra
+maadhiriye exact same — same `fastapi_learn` database, same `MYSQL_*`
+environment variables illana `.env` file, same SQLite fallback:
+
+```bash
+export DATABASE_URL="sqlite:///./test.db"
+```
+
+## Indha topic-ah eppadi run pannurathu
+
+Backend mattum dhan. Oru letter choose panni run pannunga:
+
+```bash
+cd example/8/a   # illana b, c, d
+uvicorn main:app --reload
+```
+
+[http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs) open panni
+ovoru route-aiyum browser-la irundhe try pannunga — Swagger UI
+validation rules-aiyum (8/d-la) exact response schemas-aiyum
+kaattum.
+
+## Keezha irukra ovoru page-um share panra pieces
+
+`database.py` naalu folder-layum exact same — topic 6-oda adhe dhan.
+Adha line-by-line paakka [MySQL + CRUD index](/tanglish/docs/mysql-crud)
+paarunga.
+
+**Table (`models.py`-la, 8/a–8/c):**
+
+```python
+class ItemModel(Base):
+    __tablename__ = "validation_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(50), nullable=False, unique=True)
+    price = Column(Float, nullable=False)
+    quantity = Column(Integer, nullable=False, default=0)
+```
+
+## Line by line: table (models.py-la)
+
+1. `__tablename__ = "validation_items"` — oru pudhu table, so indha
+   topic topic 6-oda single-column `items` table-oda collide aagadhu.
+2. `id = Column(Integer, primary_key=True, autoincrement=True)` —
+   munnadi maadhiriye same auto-incrementing primary key.
+3. `name = Column(String(50), nullable=False, unique=True)` — max 50
+   characters, required, mattrum **unique**: database-e oru rendavadhu
+   "Laptop"-ah refuse pannidum. Idhu dhan last line of defence; adhu
+   *mattum dhan* defence-a irundha enna aagum-nu 8/a kaattudhu (oru
+   `500`), 8/b adhukku munnadi oru proper check add pannudhu.
+4. `price = Column(Float, nullable=False)` — required decimal number.
+5. `quantity = Column(Integer, nullable=False, default=0)` — required
+   whole number; insert-la idha vittuttaa SQLAlchemy `0` pottudum.
+
+Column rules-um Pydantic rules-um purpose-a overlap aagudhu-nu
+gavaninga: table-la `String(50)` schema-la `max_length=50`-oda match
+aagudhu. Schema thappana input-ah polite-a `422`-oda reject pannum;
+edhavadhu thappi ulla pona, column dhan safety net.
+
+8/d-oda `models.py` idhe dhan plus rendu columns — adhu
+[response_model page](/tanglish/docs/validation/response-model)-la
+cover aagudhu.
+
+## Indha topic-la irukra pages
+
+1. [Field validation](/tanglish/docs/validation/field-validation) — `Field(...)` rules, oru `@field_validator`, mattrum `422` eppadi irukkum.
+2. [Status codes](/tanglish/docs/validation/status-codes) — `HTTPException` mattrum `400` vs `404` vs `409` choose panradhu.
+3. [Exception handlers](/tanglish/docs/validation/exception-handlers) — API return panra ovoru error-kum oru consistent shape.
+4. [response_model](/tanglish/docs/validation/response-model) — ORM rows-ah direct-a return pannunga, internal fields-ah hide pannunga, `201`/`204`.

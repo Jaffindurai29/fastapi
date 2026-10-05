@@ -1,0 +1,470 @@
+---
+title: "5. Authorization by role"
+description: Oru role column mattrum oru require_role("admin") dependency factory — login aagala-na 401, login aanaalum allowed illana 403.
+---
+
+<GithubLink path="example/12/e" />
+
+Login neenga **yaaru**-nu API-ku sollum. Indha page neenga **enna
+panna allowed**-nu decide pannum. Ovoru user-kum oru `role` irukku
+(`user` illa `admin`), oru chinna dependency factory,
+`require_role("admin")`, admin routes-ah kaavalaa paakkum. Login aagala-na
+`401`; login aanaalum allowed illana `403`.
+
+| Route | Yaaru | Description |
+|---|---|---|
+| `POST /token` | yaar venumnaalum | Login (form fields `username`, `password`); thappu-na `401` |
+| `GET /users/me` | login aana endha user-um | Unga sontha id, username, role |
+| `GET /admin/users` | admin | Ella users-um (password hash eppovum illa) |
+| `PATCH /admin/users/{user_id}/role` | admin | Body `{"role": "user"}` illa `{"role": "admin"}`; missing-na `404`, vera endha role-kum `422` |
+| `DELETE /admin/users/{user_id}` | admin | `204`; unga sontha account-na `400`, missing-na `404` |
+
+Ella admin route-um token illana illa bad token-na `401`, plain user-ku
+`403` `{"detail": "Not enough permissions"}` sollum.
+
+Table: `sec_rbac_users` ([Authorization by ownership](/tanglish/docs/security/ownership)-oda
+share aagudhu). Seeded users: `alice` / `alice-password`, `bob` /
+`bob-password` (role `user`), `admin` / `admin-password` (role `admin`).
+
+## Code
+
+Login [JWT login](/tanglish/docs/security/jwt-login)-la maadhiri exact-a
+work aagudhu, `get_current_user`
+[Protected routes](/tanglish/docs/security/protected-routes)-la
+irukradhoda oru slim copy (`is_active` column illa, oru generic `401`
+message). Indha page mela oru column, oru dependency factory add pannudhu.
+
+**`config.py`:**
+
+```python title="config.py"
+import os
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# Dev default only. Set a long random SECRET_KEY in .env for anything real.
+SECRET_KEY = os.getenv("SECRET_KEY", "dev-only-secret-change-me-in-production-0123456789")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "15"))
+```
+
+**`database.py`:**
+
+```python title="database.py"
+import os
+
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+load_dotenv()
+
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
+MYSQL_USER = os.getenv("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
+
+# Set DATABASE_URL directly to override everything above (e.g. to point
+# at SQLite for a quick local test with no MySQL server at all).
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
+)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+```
+
+**`models.py`** — users-ku ippo oru `role` irukku:
+
+```python title="models.py"
+from sqlalchemy import Column, Integer, String
+
+from database import Base
+
+
+# 12/f uses this exact same table, so keep the two models identical.
+class UserModel(Base):
+    __tablename__ = "sec_rbac_users"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    username = Column(String(50), nullable=False, unique=True)
+    hashed_password = Column(String(255), nullable=False)
+    # "user" or "admin". A plain string column is enough for two roles.
+    role = Column(String(20), nullable=False, default="user")
+```
+
+**`schemas.py`** — `UserOut` role-ah kaattum; `RoleUpdate` rendu values
+mattum dhan accept pannum:
+
+```python title="schemas.py"
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict
+
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+
+# Never includes hashed_password.
+class UserOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    username: str
+    role: str
+
+
+# Literal: anything other than "user" or "admin" is a 422 before the
+# route runs.
+class RoleUpdate(BaseModel):
+    role: Literal["user", "admin"]
+```
+
+**`security.py`** — token role-ah carry pannum (hint-a mattum):
+
+```python title="security.py"
+from datetime import datetime, timedelta, timezone
+
+import jwt
+from pwdlib import PasswordHash
+
+from config import ACCESS_TOKEN_EXPIRE_MINUTES, ALGORITHM, SECRET_KEY
+
+password_hash = PasswordHash.recommended()
+
+
+def hash_password(password: str) -> str:
+    return password_hash.hash(password)
+
+
+def verify_password(password: str, hashed: str) -> bool:
+    return password_hash.verify(password, hashed)
+
+
+def create_access_token(username: str, role: str) -> str:
+    expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    # "role" is informational only (handy for a frontend that wants to
+    # show or hide an Admin button). The server never trusts it: see
+    # get_current_user in dependencies.py.
+    payload = {"sub": username, "role": role, "exp": expire, "type": "access"}
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def decode_access_token(token: str) -> str | None:
+    """Return the username inside a valid access token, else None."""
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except jwt.InvalidTokenError:  # bad signature, expired, garbage...
+        return None
+    if payload.get("type") != "access":
+        return None
+    return payload.get("sub")
+```
+
+**`crud.py`:**
+
+```python title="crud.py"
+from sqlalchemy.orm import Session
+
+from models import UserModel
+from security import hash_password, verify_password
+
+
+def get_user(db: Session, user_id: int) -> UserModel | None:
+    return db.get(UserModel, user_id)
+
+
+def get_user_by_username(db: Session, username: str) -> UserModel | None:
+    return db.query(UserModel).filter(UserModel.username == username).first()
+
+
+def get_users(db: Session) -> list[UserModel]:
+    return db.query(UserModel).order_by(UserModel.id).all()
+
+
+def authenticate_user(db: Session, username: str, password: str) -> UserModel | None:
+    user = get_user_by_username(db, username)
+    if user is None or not verify_password(password, user.hashed_password):
+        return None
+    return user
+
+
+def set_role(db: Session, user: UserModel, role: str) -> UserModel:
+    user.role = role
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+def delete_user(db: Session, user: UserModel) -> None:
+    db.delete(user)
+    db.commit()
+
+
+def seed_users(db: Session) -> None:
+    if db.query(UserModel).count() == 0:
+        db.add_all(
+            [
+                UserModel(username="alice", hashed_password=hash_password("alice-password"), role="user"),
+                UserModel(username="bob", hashed_password=hash_password("bob-password"), role="user"),
+                UserModel(username="admin", hashed_password=hash_password("admin-password"), role="admin"),
+            ]
+        )
+        db.commit()
+```
+
+**`dependencies.py`** — neenga yaaru (`401`), neenga allowed-a (`403`):
+
+```python title="dependencies.py"
+from fastapi import Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
+from sqlalchemy.orm import Session
+
+import crud
+from database import get_db
+from models import UserModel
+from security import decode_access_token
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+
+# Authentication: WHO are you? Failing this is a 401.
+def get_current_user(
+    token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)
+) -> UserModel:
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    username = decode_access_token(token)
+    if username is None:
+        raise credentials_exception
+    # A fresh row from the database on every request, so user.role is the
+    # role RIGHT NOW, not the one written into the token at login time.
+    user = crud.get_user_by_username(db, username)
+    if user is None:
+        raise credentials_exception
+    return user
+
+
+# Authorization: WHAT may you do? Failing this is a 403.
+# require_role("admin") is not a dependency itself. It BUILDS one.
+def require_role(*roles: str):
+    def role_checker(user: UserModel = Depends(get_current_user)) -> UserModel:
+        if user.role not in roles:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Not enough permissions",
+            )
+        return user
+
+    return role_checker
+```
+
+**`main.py`** — ellarukkum open-aana oru route, moonu admin routes:
+
+```python title="main.py"
+from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi.security import OAuth2PasswordRequestForm
+from sqlalchemy.orm import Session
+
+import crud
+from database import Base, SessionLocal, engine, get_db
+from dependencies import get_current_user, require_role
+from models import UserModel
+from schemas import RoleUpdate, Token, UserOut
+from security import create_access_token
+
+Base.metadata.create_all(bind=engine)
+
+with SessionLocal() as db:
+    crud.seed_users(db)
+
+app = FastAPI()
+
+NOT_FOUND = {404: {"description": "User not found"}}
+
+
+@app.post("/token", response_model=Token)
+def login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    user = crud.authenticate_user(db, form.username, form.password)
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return {"access_token": create_access_token(user.username, user.role), "token_type": "bearer"}
+
+
+# Any logged-in user, whatever the role.
+@app.get("/users/me", response_model=UserOut)
+def read_me(user: UserModel = Depends(get_current_user)):
+    return user
+
+
+# Admin only. The dependency runs first: a plain "user" gets 403 and
+# this function body never executes.
+@app.get("/admin/users", response_model=list[UserOut])
+def list_users(
+    admin: UserModel = Depends(require_role("admin")), db: Session = Depends(get_db)
+):
+    return crud.get_users(db)
+
+
+@app.patch("/admin/users/{user_id}/role", response_model=UserOut, responses=NOT_FOUND)
+def change_role(
+    user_id: int,
+    body: RoleUpdate,
+    admin: UserModel = Depends(require_role("admin")),
+    db: Session = Depends(get_db),
+):
+    user = crud.get_user(db, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    return crud.set_role(db, user, body.role)
+
+
+@app.delete("/admin/users/{user_id}", status_code=status.HTTP_204_NO_CONTENT, responses=NOT_FOUND)
+def delete_user(
+    user_id: int,
+    admin: UserModel = Depends(require_role("admin")),
+    db: Session = Depends(get_db),
+):
+    # Guard against locking yourself out by accident.
+    if user_id == admin.id:
+        raise HTTPException(status_code=400, detail="You cannot delete your own account")
+    user = crud.get_user(db, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    crud.delete_user(db, user)
+```
+
+## Line by line
+
+**Rendu vera kelvigal, rendu vera status codes:**
+
+1. Login aagradhum allowed-a irukradhum thani thani checks:
+
+   | | Kelvi | Fail aana |
+   |---|---|---|
+   | **Authentication** | *Neenga yaaru?* (real user-ku valid token-a?) | `401 Unauthorized` + `WWW-Authenticate: Bearer` |
+   | **Authorization** | *Neenga enna panna mudiyum?* (andha user inga allowed-a?) | `403 Forbidden` |
+
+   Names kozhappamaana-vai — `401`-oda per literally "Unauthorized",
+   aana artham "unauthenticated" — so ippadi nyaabagam vachukkonga: `401`
+   = "(thirumba) login pannu", `403` = "thirumba login pannaalum help
+   aagadhu, neenga allowed illa".
+
+**`models.py`:**
+
+2. `role = Column(String(20), nullable=False, default="user")` — rendu
+   roles-ku oru plain string podhum, pudhu users-ku default `"user"`.
+   Table `sec_rbac_users`; ownership page identical model use
+   pannudhu, so rendum share pannalaam.
+
+**`security.py`:**
+
+3. `create_access_token(username, role)` — payload-la ippo role-um
+   irukku, so decode aana admin token idhu maadhiri irukkum:
+
+   ```json
+   {"sub": "admin", "role": "admin", "exp": 1791196775, "type": "access"}
+   ```
+
+4. `decode_access_token` — decode, type check, `sub` read panradhu
+   moonaiyum oru function-la wrap panni username illa `None` return
+   pannum. Endha failure-um (expired, bad signature, garbage, wrong
+   type) `None` aagidum.
+
+**`dependencies.py`:**
+
+5. `get_current_user` — authentication. Token-la edhavadhu problem,
+   illa ippo illadha user — ellam same `401`.
+6. `require_role(*roles)` — oru dependency-ah **build** panra function.
+   `Depends()`-ku oru function venum, aana ovoru route-kum *vera* allowed
+   list venum. So `require_role("admin")` oru pudhu function,
+   `role_checker`-ah return pannum, adhu `roles`-ah nyaabagam
+   vachukkum (oru closure). `role_checker` thaane `get_current_user`-ah
+   depend panradhaala, order eppovum: token illa/bad → first `401`,
+   wrong role → second `403`, apparam unga route.
+   `require_role("user", "admin")` rendaiyum allow pannum.
+
+**Token-la role irukku, aana database-la irundhu read pannuvom:**
+
+7. Token role-ah carry pannudhu, aana server-la `payload["role"]`-ah
+   yaarum read pannala. `get_current_user` ovoru request-kum oru
+   **fresh row** load pannum, `require_role` **andha row**-la irundhu
+   `user.role`-ah check pannum. Yen? Oru JWT issue aana appuram maatha
+   mudiyaadhu. Server adhukkulla irukra role-ah nambina, oruthara demote
+   (illa delete) panninaa, avanga token expire aagura varaikkum onnum
+   nadakkaadhu. Thirumba read panradhu oru chinna query dhan, role
+   changes-ah **udane** effect-ku kondu varum. Token-la irukra role
+   frontend-ku innum useful (oru "Admin" button-ah show/hide panna),
+   aana adhu verum hint — yaar venumnaalum JWT-ah read pannalaam, so
+   adhu secret-um illa.
+
+**`schemas.py`:**
+
+8. `role: Literal["user", "admin"]` — `{"role": "superuser"}` route
+   run aaguradhukku munnadiye `422`,
+   [Validation & Errors](/tanglish/docs/validation)-la paartha same
+   validation. `UserOut` `id`, `username`, `role` return pannum,
+   `hashed_password` eppovum illa.
+
+**`main.py`:**
+
+9. `admin: UserModel = Depends(require_role("admin"))` — oru route-ah
+   kaaka oru parameter podhum. Non-admin-ku body run-e aagadhu. Admin-oda
+   sontha row-um `admin`-a kidaikkum, adha `DELETE` use pannudhu. Oru
+   group of routes-ah ore shot-la kaaka,
+   `APIRouter(dependencies=[Depends(require_role("admin"))])` ezhudhalaam.
+10. `/users/me` plain `get_current_user` use pannudhu: endha role-um
+    thannai paakalaam.
+11. `change_role` — user illana `404`, illana `crud.set_role` column-ah
+    maathi commit pannum.
+12. `delete_user` — `if user_id == admin.id` → `400 You cannot delete
+    your own account`. Adhu business rule, permission illa, so `400`,
+    `403` illa. `PATCH`-la indha guard illa-nu note pannunga: oru admin
+    thannaiye demote *pannalaam*. Avanga dhan kadaisi admin-na, yaaraalum
+    adha undo panna mudiyaadhu. Real app kadaisi admin-ah remove panna
+    vidaadhu.
+
+## Try it
+
+```bash
+curl -X POST http://127.0.0.1:8000/token -d "username=alice&password=alice-password"
+curl -i http://127.0.0.1:8000/admin/users -H "Authorization: Bearer <paste alice token>"  # 403
+curl -X POST http://127.0.0.1:8000/token -d "username=admin&password=admin-password"
+curl http://127.0.0.1:8000/admin/users -H "Authorization: Bearer <paste admin token>"
+curl -X PATCH http://127.0.0.1:8000/admin/users/1/role -H "Authorization: Bearer <paste admin token>" -H "Content-Type: application/json" -d "{\"role\": \"admin\"}"
+curl -i -X DELETE http://127.0.0.1:8000/admin/users/2 -H "Authorization: Bearer <paste admin token>"  # 204
+```
+
+Rendaavadhu request `403`. Naalavadhu moonu users-aiyum list pannum.
+
+**Idhaiyum try pannunga:** alice-oda token-ah vachukkonga, mela irukra
+`PATCH` vachi ava-ah promote pannunga, apparam **same pazhaya token**-oda
+rendaavadhu request-ah thirumba pannunga. Ippo `200`. Thirumba demote
+pannunga, thirumba `403` — ava login pannaamale. Yen-nu step 7 solludhu.
+
+**/docs:** **Authorize** click panni `alice`-a, apparam `admin`-a login
+panni, admin routes-ah ovvoruthar-aagavum try pannunga.
+
+Adutha step: [Authorization by ownership](/tanglish/docs/security/ownership) —
+"indha row unga-dha?".

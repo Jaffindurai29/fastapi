@@ -1,0 +1,299 @@
+---
+title: "4. response_model"
+description: ORM rows-ah direct-a return panni, yentha fields server-ah vittu pogudhu-nu response_model decide panna vidradhu, plus 201 mattrum 204 status codes.
+---
+
+<GithubLink path="example/8/d" />
+
+Ivlo naal ovoru route-um response-ah kaila build pannuchu
+(`{"id": row.id, "name": row.name, ...}`). Inga routes database row-ah
+**direct-a** return pannudhu, `response_model=ItemOut` yentha fields
+server-ah vittu pogudhu-nu decide pannum. Table-la oru internal
+`supplier_cost` column irukku — client adha *anuppalaam*, aana
+eppovum *paakka* mudiyaadhu. Idhukku sontha table:
+`response_model_items`.
+
+| Route | Status | Response |
+|---|---|---|
+| `GET /items` | `200` | `list[ItemOut]` |
+| `GET /items/{item_id}` | `200`, `404` | `ItemOut` |
+| `POST /items` | `201 Created` | `ItemOut` |
+| `DELETE /items/{item_id}` | `204 No Content`, `404` | body illa |
+
+## Code
+
+**`database.py`** — topic 6-oda same:
+
+```python title="database.py"
+import os
+
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+load_dotenv()
+
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
+MYSQL_USER = os.getenv("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
+
+# Set DATABASE_URL directly to override everything above (e.g. to point
+# at SQLite for a quick local test with no MySQL server at all).
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
+)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+```
+
+**`models.py`** — `response_model_items` table, rendu pudhu columns-oda:
+
+```python title="models.py"
+from sqlalchemy import Column, DateTime, Float, Integer, String, func
+
+from database import Base
+
+
+class ItemModel(Base):
+    __tablename__ = "response_model_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(50), nullable=False, unique=True)
+    price = Column(Float, nullable=False)
+    quantity = Column(Integer, nullable=False, default=0)
+    # Internal: what we paid the supplier. Must never reach the client.
+    supplier_cost = Column(Float, nullable=False, default=0)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+```
+
+**`schemas.py`** — ulla varradhukku-um veliya pogradhukku-um thani models:
+
+```python title="schemas.py"
+from datetime import datetime
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+# What the client sends. supplier_cost goes IN...
+class ItemCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=50)
+    price: float = Field(gt=0)
+    quantity: int = Field(default=0, ge=0)
+    supplier_cost: float = Field(default=0, ge=0)
+
+
+# ...but never comes back OUT. response_model=ItemOut drops every field
+# that isn't listed here, even if the route returns the full database row.
+class ItemOut(BaseModel):
+    # Lets Pydantic read attributes off a SQLAlchemy object (row.name),
+    # not just keys out of a dict (row["name"]).
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    price: float
+    quantity: int
+    created_at: datetime
+```
+
+**`crud.py`** — database-oda pesura plain functions:
+
+```python title="crud.py"
+from sqlalchemy.orm import Session
+
+from models import ItemModel
+from schemas import ItemCreate
+
+
+def get_items(db: Session) -> list[ItemModel]:
+    return db.query(ItemModel).order_by(ItemModel.id).all()
+
+
+def get_item(db: Session, item_id: int) -> ItemModel | None:
+    return db.get(ItemModel, item_id)
+
+
+def create_item(db: Session, item: ItemCreate) -> ItemModel:
+    row = ItemModel(**item.model_dump())
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def delete_item(db: Session, row: ItemModel) -> None:
+    db.delete(row)
+    db.commit()
+
+
+def seed_items(db: Session) -> None:
+    if db.query(ItemModel).count() == 0:
+        db.add_all(
+            [
+                ItemModel(name="Laptop", price=999.99, quantity=5, supplier_cost=700),
+                ItemModel(name="Mouse", price=19.99, quantity=50, supplier_cost=6.5),
+            ]
+        )
+        db.commit()
+```
+
+**`main.py`** — ORM rows-ah direct-a return panra routes:
+
+```python title="main.py"
+from fastapi import Depends, FastAPI, HTTPException, status
+from sqlalchemy.orm import Session
+
+import crud
+from database import Base, SessionLocal, engine, get_db
+from schemas import ItemCreate, ItemOut
+
+Base.metadata.create_all(bind=engine)
+
+with SessionLocal() as db:
+    crud.seed_items(db)
+
+app = FastAPI()
+
+# Shown in /docs next to each route that can return it.
+NOT_FOUND = {404: {"description": "Item not found"}}
+
+
+# No more hand-built dicts: return the ORM rows directly and let
+# response_model decide which fields go out.
+@app.get("/items", response_model=list[ItemOut])
+def list_items(db: Session = Depends(get_db)):
+    return crud.get_items(db)
+
+
+@app.get("/items/{item_id}", response_model=ItemOut, responses=NOT_FOUND)
+def get_item(item_id: int, db: Session = Depends(get_db)):
+    row = crud.get_item(db, item_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Item not found")
+    return row  # still has supplier_cost — ItemOut filters it out
+
+
+@app.post("/items", response_model=ItemOut, status_code=status.HTTP_201_CREATED)
+def create_item(item: ItemCreate, db: Session = Depends(get_db)):
+    return crud.create_item(db, item)
+
+
+@app.delete("/items/{item_id}", status_code=status.HTTP_204_NO_CONTENT, responses=NOT_FOUND)
+def delete_item(item_id: int, db: Session = Depends(get_db)):
+    row = crud.get_item(db, item_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Item not found")
+    crud.delete_item(db, row)
+```
+
+## Line by line
+
+`database.py` topic 6-oda same. Indha lesson-oda point: **ulla**
+varradhu (`ItemCreate`) mattrum **veliya** pogradhu (`ItemOut`)
+naduvula irukra split.
+
+**`models.py`:**
+
+1. **`__tablename__ = "response_model_items"`** — 8/a–c-la irundhu thani
+   table, yen-na shape vera. `validation_items`-ah reuse pannina
+   already irukra table-ah alter pannanum, adha `create_all` pannadhu.
+2. **`supplier_cost = Column(Float, nullable=False, default=0)`** —
+   internal data: supplier-ku naama evlo kuduthom. Admin adha type
+   pannuvaanga, aana customer eppovum paakka koodadhu.
+3. **`created_at = Column(DateTime, nullable=False, server_default=func.now())`**
+   — `server_default` na insert time-la idha **database** fill pannum
+   (`func.now()` SQL-oda `NOW()`-a maarum), Python illa. Client idha
+   eppovum anuppadhu.
+
+**`schemas.py`:**
+
+4. **`ItemCreate` — client anuppradhu.** Adhula `supplier_cost` irukku
+   (`ge=0`-oda, default `0`), yen-na adhu input. `id`, `created_at`
+   *illa* — avanga server decide panradhu. (Output-la focus vachukka
+   indha lesson-la blank-name validator illa.)
+5. **`ItemOut` — client-ku thirumba kidaikkuradhu.** Adhu
+   `supplier_cost`-ah vittudum, `id`-um `created_at`-um add pannum,
+   client avangala eppovum anuppradhu illa. Oru table-ku rendu models
+   normal dhan: input-um output-um vera vera contracts.
+6. **`model_config = ConfigDict(from_attributes=True)`** — SQLAlchemy
+   object-la irundhu `row.name` read panna Pydantic-ah allow pannum.
+   Idhu illana, Pydantic-ku dicts (`row["name"]`) mattum dhan read
+   panna theriyum, route-la irundhu row return pannina validation
+   `500`-oda fail aagum.
+
+**`crud.py`:**
+
+7. **`ItemModel(**item.model_dump())`** — `model_dump()` validate aana
+   body-ah oru dict-a maathum, `**` adha keyword arguments-a unpack
+   pannum: `ItemModel(name=..., price=..., quantity=..., supplier_cost=...)`.
+   `ItemCreate`-la irukra field names column names-oda exact-a match
+   aagradhaala idhu work aagudhu — rendulayum oru field add pannina,
+   `create_item`-la edhuvum maathave vendaam.
+8. Miss aana `get_item` `None` return pannum (8/b style), `delete_item`
+   already fetch panna row-ah eduthukkum. `seed_items` Laptop-ku-um
+   Mouse-ku-um kuda `supplier_cost` kudukkum, so adhu hide aagradha
+   neenga paakkalaam.
+
+**`main.py`:**
+
+9. **`response_model=ItemOut` output-ah filter pannudhu.** `get_item`
+   *full* row-ah return pannum — comment solra maadhiri, adhula innum
+   `supplier_cost` irukku. FastAPI adha `ItemOut` vazhiya anuppi,
+   listed fields-ah mattum vachu, anuppradhukku munnadi avanga types-ah
+   check pannum. Adhunaala dhan idhu hand-built dicts-ah vida safe:
+   apparam table-ku innoru secret column add pannaalum, adhu accident-a
+   leak **aaga mudiyaadhu**, yen-na adhu `ItemOut`-la illa. Dicts-la,
+   ovoru route-layum adha vida nyabagam vachukkanum.
+10. **Lists-um same maadhiri dhan:** `GET /items`-la
+    `response_model=list[ItemOut]` list-la irukra ovoru row-aiyum
+    filter pannum.
+11. **Decorator-la `status_code=` success code-ah set pannum:**
+    `POST`-ku `status.HTTP_201_CREATED`, yen-na ippo pudhusa edho
+    exist aagudhu; `DELETE`-ku `status.HTTP_204_NO_CONTENT`, yen-na
+    velai mudinjidichu, thirumba anuppa edhuvum illa (function edhuvum
+    return pannadhu). Rendum `/docs`-la-um correct-a kaattum.
+12. **`responses=NOT_FOUND` documentation mattum dhan.** `NOT_FOUND`
+    mela define panna `{404: {"description": "Item not found"}}` dict.
+    Idhu behaviour-ah maathadhu — adha `raise HTTPException(...)` dhan
+    pannudhu. Indha route `404`-um answer pannalaam-nu `/docs`-ku-um,
+    OpenAPI schema-la irundhu client generate panra yaarukkum sollum.
+
+Inga irundhu, ovoru topic-um dicts-ah kaila build pannama
+`response_model`-oda ORM rows-ah return pannum.
+
+## Try it
+
+```bash
+curl -i -X POST http://127.0.0.1:8000/items -H "Content-Type: application/json" -d "{\"name\": \"Desk\", \"price\": 120, \"supplier_cost\": 80}"  # 201
+curl http://127.0.0.1:8000/items/1
+curl -i -X DELETE http://127.0.0.1:8000/items/3  # 204, use the id from the POST
+```
+
+Response-la `id`, `name`, `price`, `quantity`, `created_at` irukkum,
+aana `supplier_cost` illa, ippo dhan store aanaalum:
+
+```json
+{"id": 3, "name": "Desk", "price": 120.0, "quantity": 0, "created_at": "2026-10-05T10:18:17"}
+```
+
+[/docs](http://127.0.0.1:8000/docs) open pannunga, ovoru route-oda
+exact response schema-um, `responses=` vachi declare panna `404`
+response-um paakkalaam.
+
+Thirumba [Validation & Errors overview](/tanglish/docs/validation)-ku
+pogalaam.
+
+Adutha topic: [Pagination & Filtering](/tanglish/docs/pagination) — real table-ah paging, search, sort pannuvom.

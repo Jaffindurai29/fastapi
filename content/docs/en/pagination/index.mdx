@@ -1,0 +1,213 @@
+---
+title: Pagination & Filtering
+description: Teaching GET /items to return one page at a time, filter and sort on request, refuse nonsense parameters, and report the total.
+---
+
+<GithubLink path="example/9" />
+
+Every `GET /items` so far returned the **whole table**. That's fine for
+two rows and a real problem for two million: one request would load
+every row into memory, turn it into JSON and push megabytes over the
+network. This topic teaches the list endpoint to return **one page at a
+time**, to **filter and sort** on request, to **refuse nonsense
+parameters**, and finally to tell the client **how many pages there
+are** in total.
+
+All of it is driven by **query parameters**, the `?key=value&key=value`
+part after the path. In FastAPI they're nothing more than function
+arguments that aren't in the path.
+
+The table is a small product catalog, `catalog_items`, seeded with 25
+rows across five categories (`books`, `electronics`, `toys`, `kitchen`,
+`garden`), so every filter and every page has something visible to do.
+
+## One folder, five files
+
+Each letter (`example/9/a` through `example/9/d`) uses the same layered
+layout as [MySQL + CRUD](/en/docs/mysql-crud), plus the `schemas.py` +
+`response_model` pattern from [Validation](/en/docs/validation):
+
+| File | Responsibility |
+|---|---|
+| `database.py` | env vars, `engine`, `SessionLocal`, `Base`, `get_db()` |
+| `models.py` | `ItemModel` — the `catalog_items` table |
+| `schemas.py` | `ItemOut` (what a row looks like on the way out), plus `FilterParams` in 9/c and `ItemPage` in 9/d |
+| `crud.py` | the query that filters, sorts and pages, plus the 25-row seed |
+| `main.py` | the `FastAPI()` app; the query parameters live in the route signatures |
+
+`database.py` and `models.py` are byte-for-byte identical across all
+four folders — see "The pieces every page below shares" further down
+for those explained line by line. Each page below covers its own
+`crud.py`, `main.py` and `schemas.py` in full.
+
+All four folders share **one** table, `catalog_items`, so you can switch
+between them without resetting anything. The seed only runs when the
+table is empty, so the same 25 rows (ids 1–25) are there whichever
+letter you start first.
+
+## Setup
+
+No new packages — everything here was already installed for
+[MySQL + CRUD](/en/docs/mysql-crud):
+
+```bash
+pip install fastapi uvicorn sqlalchemy pymysql python-dotenv
+```
+
+9/c's query-parameter model needs **FastAPI 0.115 or newer**; if
+`pip show fastapi` says older, run `pip install -U fastapi`.
+
+Database, `.env` and the SQLite fallback are exactly the same as
+[MySQL + CRUD's setup](/en/docs/mysql-crud) — the same `fastapi_learn`
+database, just a new table inside it, created automatically on first
+run. No MySQL handy?
+
+```bash
+export DATABASE_URL="sqlite:///./test.db"
+```
+
+## Running this topic
+
+Backend only. Do the setup once, then run whichever letter you want:
+
+```bash
+cd example/9/a   # or b, c, d
+uvicorn main:app --reload
+```
+
+Then open [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs) —
+every query parameter appears as its own input box, which is the
+easiest way to play with them.
+
+**Quote URLs that contain `&`.** Every `curl` in this topic with more
+than one query parameter is wrapped in double quotes:
+
+```bash
+curl "http://127.0.0.1:8000/items?category=books&limit=5"
+```
+
+Without the quotes, your shell treats `&` as "run this in the
+background" and cuts the URL short at that point — `curl` only sees
+`?category=books`, and `limit=5` is run as a separate (useless)
+command. Double quotes work in bash, zsh, PowerShell and cmd alike.
+
+## The pieces every page below shares
+
+These two files are identical in `9/a`, `9/b`, `9/c` and `9/d`.
+
+**`database.py`** — the same connection and session setup as
+[MySQL + CRUD](/en/docs/mysql-crud), unchanged:
+
+```python title="database.py"
+import os
+
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+load_dotenv()
+
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
+MYSQL_USER = os.getenv("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
+
+# Set DATABASE_URL directly to override everything above (e.g. to point
+# at SQLite for a quick local test with no MySQL server at all).
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
+)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+```
+
+## Line by line: database.py
+
+1. `load_dotenv()` — reads a `.env` file (if one exists) into the
+   process's environment variables, so the `os.getenv(...)` calls below
+   see them. No `.env`? Nothing happens, and the defaults are used.
+2. `MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")` and its four
+   siblings — each connection detail comes from an environment
+   variable, with a working local default as the second argument.
+3. `DATABASE_URL = os.getenv("DATABASE_URL", f"mysql+pymysql://...")` —
+   if `DATABASE_URL` is set (the SQLite override above), it wins
+   outright; otherwise the URL is built from the `MYSQL_*` values.
+   `mysql+pymysql://` tells SQLAlchemy to speak to MySQL through the
+   `pymysql` driver.
+4. `create_engine(DATABASE_URL, pool_pre_ping=True)` — the engine is
+   SQLAlchemy's connection factory. `pool_pre_ping=True` pings a pooled
+   connection before reusing it, so one MySQL dropped while idle gets
+   quietly replaced instead of failing your request.
+5. `sessionmaker(autocommit=False, autoflush=False, bind=engine)` — a
+   factory for `Session` objects. Nothing is written until you call
+   `db.commit()`, and nothing is sent early behind your back. (This
+   topic only reads, apart from the one-time seed.)
+6. `Base = declarative_base()` — the parent class every model inherits
+   from; it's how SQLAlchemy knows which classes are tables.
+7. `get_db()` — opens a session, `yield`s it to the route that asked
+   for it with `db: Session = Depends(get_db)`, and closes it in
+   `finally` once the route is done — success or error.
+
+**`models.py`** — a richer table than before, so paging, filtering and
+sorting have real columns to work on:
+
+```python title="models.py"
+from sqlalchemy import Column, DateTime, Float, Integer, String, func
+
+from database import Base
+
+
+# 9/a–9/d all use this exact model, so they can share one table.
+class ItemModel(Base):
+    __tablename__ = "catalog_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(100), nullable=False)
+    category = Column(String(50), nullable=False)
+    price = Column(Float, nullable=False)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+```
+
+## Line by line: models.py
+
+1. `__tablename__ = "catalog_items"` — a new table, separate from the
+   `items` table of earlier topics, so this topic's 25-row seed never
+   collides with rows you created there.
+2. `id = Column(Integer, primary_key=True, autoincrement=True)` — the
+   unique, stable key. It matters more than ever here: it's the
+   tie-breaker that gives every page a fixed, repeatable order.
+3. `name = Column(String(100), nullable=False)` — what `?search=`
+   looks inside.
+4. `category = Column(String(50), nullable=False)` — what `?category=`
+   matches exactly.
+5. `price = Column(Float, nullable=False)` — what `?min_price=` and
+   `?max_price=` compare against, and a natural column to sort by.
+6. `created_at = Column(DateTime, nullable=False, server_default=func.now())`
+   — `server_default=func.now()` means the **database** fills in the
+   current time when a row is inserted without one, so the seed never
+   has to set it. All 25 seed rows are inserted together, so they all
+   get (nearly) the same timestamp — which is exactly why 9/b needs a
+   tie-breaker when sorting by it.
+7. Unlike the MySQL + CRUD pages, there's no
+   `Base.metadata.create_all(...)` in `models.py` — each `main.py`
+   calls it once at startup, then runs `crud.seed_items(db)` to insert
+   the 25 rows if the table is empty.
+
+## Pages in this topic
+
+1. [skip/limit pagination](/en/docs/pagination/skip-limit) — `?skip=10&limit=5`, and why you always `ORDER BY` before paging.
+2. [Search, filter, sort](/en/docs/pagination/filter-sort) — optional filters added one by one; `Literal` as a whitelist for `sort_by`.
+3. [Query(...) validation](/en/docs/pagination/query-validation) — `ge`/`le`/`min_length`, a repeatable `?category=`, and a Pydantic model for query params.
+4. [Page envelope](/en/docs/pagination/page-envelope) — `?page=2&size=10` returning `items`, `total`, `page`, `size`, `pages`.

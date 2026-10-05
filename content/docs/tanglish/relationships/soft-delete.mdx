@@ -1,0 +1,404 @@
+---
+title: "5. Soft delete"
+description: DELETE row-ah remove pannama deleted_at column-ah stamp pannum — hide, restore, purge, idhoda cost enna.
+---
+
+<GithubLink path="example/11/e" />
+
+`DELETE` ippo delete pannaadhu. Row-la `deleted_at`-ah stamp pannum,
+ovoru normal read-um andha row illadha maadhiri nadikkum. Row innum
+table-la irukku, so kettaa list pannalaam, restore pannalaam, illana
+apparam real-a purge pannalaam. Sontha table: `soft_items`, Laptop,
+Mouse, Desk-oda seed.
+
+| Route | Status | Description |
+|---|---|---|
+| `GET /items` | `200` | Live items mattum |
+| `GET /items?include_deleted=true` | `200` | Live **mattrum** soft-deleted items |
+| `GET /items/{item_id}` | `200`, `404` | Oru live item; illana **illa** soft-deleted-na `404` |
+| `POST /items` | `201`, `422` | Pudhu item |
+| `DELETE /items/{item_id}` | `204`, `404` | Soft delete: `deleted_at` set pannum; illana illa already deleted-na `404` |
+| `POST /items/{item_id}/restore` | `200`, `404`, `409` | Soft delete-ah undo pannum; deleted illana `409` |
+| `DELETE /items/{item_id}/permanent` | `204`, `404` | Real `DELETE`; live, soft-deleted rendu rows-layum work aagum |
+
+## Folder
+
+```text
+example/11/e/
+├── .env.example
+├── __init__.py
+├── crud.py
+├── database.py
+├── main.py
+├── models.py
+├── README.md
+├── schemas.py
+├── STEPS.md
+└── routers/
+    ├── __init__.py
+    └── items.py
+```
+
+## Code
+
+**`database.py`** — maarala:
+
+```python title="database.py"
+import os
+
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+load_dotenv()
+
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
+MYSQL_USER = os.getenv("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
+
+# Set DATABASE_URL directly to override everything above (e.g. to point
+# at SQLite for a quick local test with no MySQL server at all).
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
+)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+```
+
+**`models.py`** — oru table, oru pudhu column:
+
+```python title="models.py"
+from sqlalchemy import Column, DateTime, Float, Integer, String
+
+from database import Base
+
+
+class SoftItemModel(Base):
+    __tablename__ = "soft_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(50), nullable=False)
+    price = Column(Float, nullable=False)
+    # NULL = alive. A timestamp = "deleted at this moment". The row
+    # itself stays in the table.
+    deleted_at = Column(DateTime, nullable=True, default=None)
+```
+
+**`schemas.py`:**
+
+```python title="schemas.py"
+from datetime import datetime
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class ItemCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=50)
+    price: float = Field(gt=0)
+
+
+class ItemOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    price: float
+    # null for live items; a timestamp for soft-deleted ones, which you
+    # only see with GET /items?include_deleted=true.
+    deleted_at: datetime | None
+```
+
+**`crud.py`** — soft delete, restore, hard delete, mattrum filter:
+
+```python title="crud.py"
+from sqlalchemy import func
+from sqlalchemy.orm import Session
+
+from models import SoftItemModel
+from schemas import ItemCreate
+
+
+def get_items(db: Session, include_deleted: bool = False) -> list[SoftItemModel]:
+    query = db.query(SoftItemModel)
+    if not include_deleted:
+        # The price of soft delete: EVERY normal query needs this filter.
+        # Forget it once and "deleted" rows show up again.
+        query = query.filter(SoftItemModel.deleted_at.is_(None))
+    return query.order_by(SoftItemModel.id).all()
+
+
+def get_item(db: Session, item_id: int) -> SoftItemModel | None:
+    """Any row, deleted or not. Used by restore and permanent delete."""
+    return db.get(SoftItemModel, item_id)
+
+
+def get_live_item(db: Session, item_id: int) -> SoftItemModel | None:
+    """Only a row that isn't soft-deleted. What normal reads use."""
+    return (
+        db.query(SoftItemModel)
+        .filter(SoftItemModel.id == item_id, SoftItemModel.deleted_at.is_(None))
+        .first()
+    )
+
+
+def create_item(db: Session, item: ItemCreate) -> SoftItemModel:
+    row = SoftItemModel(**item.model_dump())
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def soft_delete_item(db: Session, row: SoftItemModel) -> None:
+    # An UPDATE, not a DELETE. func.now() lets the database fill in the
+    # time, same as server_default in 8/d.
+    row.deleted_at = func.now()
+    db.commit()
+
+
+def restore_item(db: Session, row: SoftItemModel) -> SoftItemModel:
+    row.deleted_at = None
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def hard_delete_item(db: Session, row: SoftItemModel) -> None:
+    # A real DELETE. The row is gone and can't be restored.
+    db.delete(row)
+    db.commit()
+
+
+def seed(db: Session) -> None:
+    if db.query(SoftItemModel).count() == 0:
+        db.add_all(
+            [
+                SoftItemModel(name="Laptop", price=999.99),
+                SoftItemModel(name="Mouse", price=19.99),
+                SoftItemModel(name="Desk", price=120.0),
+            ]
+        )
+        db.commit()
+```
+
+**`routers/items.py`:**
+
+```python title="routers/items.py"
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+
+import crud
+from database import get_db
+from schemas import ItemCreate, ItemOut
+
+router = APIRouter(prefix="/items", tags=["items"])
+
+
+@router.get("", response_model=list[ItemOut])
+def list_items(include_deleted: bool = False, db: Session = Depends(get_db)):
+    return crud.get_items(db, include_deleted)
+
+
+@router.get("/{item_id}", response_model=ItemOut)
+def get_item(item_id: int, db: Session = Depends(get_db)):
+    # A soft-deleted item answers 404, exactly like a missing one. To
+    # the client it IS deleted; only restore can bring it back.
+    row = crud.get_live_item(db, item_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Item not found")
+    return row
+
+
+@router.post("", response_model=ItemOut, status_code=status.HTTP_201_CREATED)
+def create_item(item: ItemCreate, db: Session = Depends(get_db)):
+    return crud.create_item(db, item)
+
+
+@router.delete("/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_item(item_id: int, db: Session = Depends(get_db)):
+    row = crud.get_live_item(db, item_id)
+    if row is None:  # missing, or already soft-deleted
+        raise HTTPException(status_code=404, detail="Item not found")
+    crud.soft_delete_item(db, row)
+
+
+@router.post("/{item_id}/restore", response_model=ItemOut)
+def restore_item(item_id: int, db: Session = Depends(get_db)):
+    row = crud.get_item(db, item_id)  # deleted rows included on purpose
+    if row is None:
+        raise HTTPException(status_code=404, detail="Item not found")
+    if row.deleted_at is None:
+        raise HTTPException(status_code=409, detail="Item is not deleted")
+    return crud.restore_item(db, row)
+
+
+@router.delete("/{item_id}/permanent", status_code=status.HTTP_204_NO_CONTENT)
+def delete_item_permanently(item_id: int, db: Session = Depends(get_db)):
+    # Works on live and soft-deleted rows alike (e.g. purging the bin).
+    row = crud.get_item(db, item_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Item not found")
+    crud.hard_delete_item(db, row)
+```
+
+**`main.py`:**
+
+```python title="main.py"
+from fastapi import FastAPI
+
+import crud
+from database import Base, SessionLocal, engine
+from routers import items
+
+Base.metadata.create_all(bind=engine)
+
+with SessionLocal() as db:
+    crud.seed(db)
+
+app = FastAPI()
+
+app.include_router(items.router)
+```
+
+## Line by line
+
+**Yen neraa delete pannakoodadhu?**
+
+1. Row-ah vachukka moonu reasons:
+   - **Undo.** "Thappana onna delete pannitten" romba common support
+     request. Real `DELETE`-na answer "nethu night-oda backup-ah restore
+     pannunga". Soft delete-na oru `UPDATE` dhan.
+   - **Audit.** Enna irundhuchu, eppo remove aachu-nu innum paakkalaam.
+   - **Mathha tables-la irundhu references.** Oru pazhaya order line
+     ([Transactions](/tanglish/docs/relationships/transactions) paarunga)
+     oru product-ah point pannum. Product-ah hard-delete pannina foreign
+     key-la fail aagum, illana line onnum illadhadha point pannum.
+     Soft-deleted product table-la irukkum, so pazhaya orders innum
+     resolve aagum, shop mattum adha list panradha niruthidum.
+
+**`models.py`:**
+
+2. **`deleted_at = Column(DateTime, nullable=True, default=None)`** —
+   `NULL`-na live; timestamp-na "indha nerathula delete aachu".
+   `is_deleted` true/false flag-ku pathila timestamp vachaa extra cost
+   illa, **eppo**-ngradhaiyum record pannum.
+
+**`schemas.py`:**
+
+3. **`ItemOut`-la `deleted_at: datetime | None`** — live items-ku
+   `null`; soft-deleted-ku timestamp, adha `?include_deleted=true`-la
+   mattum dhan paakka mudiyum.
+
+**`crud.py`:**
+
+4. **`soft_delete_item`** — `row.deleted_at = func.now()` apparam
+   `db.commit()`. `DELETE` illa, `UPDATE`. `func.now()` database-ae time
+   fill panna vidum, [response_model](/tanglish/docs/validation/response-model)-la
+   paartha `server_default=func.now()` maadhiri. Route innum
+   `204 No Content` dhan answer pannum; client-ku idhu delete **dhan**.
+5. **Ovoru normal read-kum venum-na filter**, `get_items`-la:
+   `query.filter(SoftItemModel.deleted_at.is_(None))`. `.is_(None)`
+   `WHERE deleted_at IS NULL`-a maarum. (`== None` ezhudhinaalum work
+   aagum aana linters flag pannum; SQL-la `= NULL` edhaiyum eppovum
+   match pannaadhu, adhanala dhan SQL-la `IS NULL` irukku.)
+6. **`include_deleted: bool = False`** — oru query parameter (route
+   signature-la irukku, path-la illa). FastAPI `?include_deleted=true`-ah
+   (`1`, `yes`, `on` kooda) `True`-a maathum.
+7. **Oru row fetch panna rendu vazhi:**
+   - `get_item` — `db.get(...)`, soft delete pathi adhukku onnum
+     theriyaadhu, rendu case-layum row-ah return pannum. Restore-kum
+     permanent delete-kum exact-a adhu dhan venum.
+   - `get_live_item` — `.filter(SoftItemModel.id == item_id, SoftItemModel.deleted_at.is_(None))`,
+     soft-delete aagadha row mattum. Normal reads idha dhan use
+     pannanum.
+8. **`restore_item`** — `row.deleted_at = None`, commit, refresh.
+9. **`hard_delete_item`** — `db.delete(row)`, real `DELETE`. Row
+   poyidum, restore panna mudiyaadhu.
+
+**`routers/items.py`:**
+
+10. **Deleted-um missing maadhiriye theriyum** — `GET /items/{item_id}`
+    mattrum `DELETE /items/{item_id}` rendum `get_live_item` use
+    pannudhu, so soft-deleted item eppovum illadha item maadhiriye
+    `404` answer pannum. Rendavadhu thadava delete pannaalum `404`:
+    andha URL-la (live-a) edhuvum illa.
+11. **Restore** `get_item` use pannudhu — deleted rows-um purpose-a
+    include. Row-ae illana `404` (eppovume illa, illana purge aachu).
+    Irukku aana live-na `409`: request artham irukku, current state
+    allow pannala.
+12. **`/permanent`** — sila nerathula data real-a poganum: user avanga
+    data-va erase panna kekkuraanga, illana cleanup job 30 naal munnadi
+    soft-delete aana rows-ah purge pannudhu. Idhu live, soft-deleted
+    rendu rows-layum real `DELETE` run pannum. Real app-la idhu
+    usually admin-only.
+
+## Cost: soft delete trade-offs
+
+| | Real `DELETE` | Soft delete |
+|---|---|---|
+| Thappa undo panna | backup restore | oru `UPDATE` (`/restore`) |
+| History / audit | poyidum | irukkum, time-oda |
+| Adha refer panra pazhaya rows (order lines) | foreign key-la fail, illana dangle | innum resolve aagum |
+| Ovoru query | nyabagam vachukka edhuvum illa | `deleted_at IS NULL` filter **kandippa** venum |
+| Unique columns | apdiye work aagum | "deleted" row innum adhoda name-ah block pannum |
+| Table size | kurayum | valandhukitte pogum — purge job venum |
+
+- **Ovoru query-um filter pannanum.** Ovoru list, ovoru lookup, ovoru
+  count, vera table-la irundhu ovoru join. Oru thadava
+  `deleted_at IS NULL` maranthaalum "deleted" data thirumba varum. Sila
+  projects idha oru helper (inga `get_live_item` maadhiri) illana
+  database view pinnaadi maraikkum, aana adhu full-a eppovum pogaadhu.
+- **Unique constraints tricky aagum.** `name` `unique=True`-a irundha,
+  "Mouse"-ah soft-delete pannaalum pudhu "Mouse" create panradha block
+  pannum: pazhaya row innum irukku. Ella fixes-kum trade-offs irukku:
+  unique key-ah `(name, deleted_at)` aakkalaam — aana MySQL unique
+  index-la pala `NULL`s allow pannum, so rendu **live** "Mouse" rows
+  nuzhanjudum — illana live rows-kulla mattum code-la uniqueness check
+  pannalaam. Adhanala dhan indha lesson-oda `name` unique illa.
+- **Table valandhukitte pogum.** Deleted rows innum space edukkum, scans
+  slow aakkum, adhanala dhan usually kooda oru purge job varum.
+
+Undo, history, references mukkiyam-na soft delete use pannunga (orders,
+users, documents). Throwaway data-ku (sessions, temp files) real delete
+simple.
+
+## Try it
+
+```bash
+curl -i -X DELETE http://127.0.0.1:8000/items/2  # 204
+curl -i http://127.0.0.1:8000/items/2  # 404
+curl "http://127.0.0.1:8000/items?include_deleted=true"
+curl -X POST http://127.0.0.1:8000/items/2/restore
+curl -i -X POST http://127.0.0.1:8000/items/2/restore  # 409
+curl -i -X DELETE http://127.0.0.1:8000/items/2/permanent  # 204
+curl -i -X POST http://127.0.0.1:8000/items/2/restore  # 404
+```
+
+First request-ku apparam `GET /items/2` `404`, aana `include_deleted`
+listing-la innum irukku:
+
+```json
+{"id": 2, "name": "Mouse", "price": 19.99, "deleted_at": "2026-10-05T10:28:35"}
+```
+
+Restore `deleted_at`-ah thirumba `null` aakkum. Live item-ah restore
+pannina `409 {"detail": "Item is not deleted"}`. `/permanent`-ku
+apparam row real-a poyidum: restore-um mathha ella routes-um `404`
+answer pannum. `?` irukra URL double quotes-la irukku, so shell `?`-ah
+wildcard-a treat pannaadhu.
+
+Adutha step: [Security](/tanglish/docs/security) — hashed passwords,
+JWT login, sariyaana user mattum reach panna mudiyura routes.

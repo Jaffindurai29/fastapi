@@ -1,0 +1,399 @@
+---
+title: "5. Soft delete"
+description: DELETE stamps a deleted_at column instead of removing the row — hide, restore, purge, and what that costs.
+---
+
+<GithubLink path="example/11/e" />
+
+`DELETE` no longer deletes. It stamps the row with `deleted_at`, and
+every normal read pretends the row is gone. The row is still in the
+table, so it can be listed on request, restored, or purged for real
+later. Own table: `soft_items`, seeded with Laptop, Mouse and Desk.
+
+| Route | Status | Description |
+|---|---|---|
+| `GET /items` | `200` | Live items only |
+| `GET /items?include_deleted=true` | `200` | Live **and** soft-deleted items |
+| `GET /items/{item_id}` | `200`, `404` | One live item; `404` if missing **or** soft-deleted |
+| `POST /items` | `201`, `422` | New item |
+| `DELETE /items/{item_id}` | `204`, `404` | Soft delete: sets `deleted_at`; `404` if missing or already deleted |
+| `POST /items/{item_id}/restore` | `200`, `404`, `409` | Undo a soft delete; `409` if it isn't deleted |
+| `DELETE /items/{item_id}/permanent` | `204`, `404` | Real `DELETE`; works on live and soft-deleted rows |
+
+## The folder
+
+```text
+example/11/e/
+├── .env.example
+├── __init__.py
+├── crud.py
+├── database.py
+├── main.py
+├── models.py
+├── README.md
+├── schemas.py
+├── STEPS.md
+└── routers/
+    ├── __init__.py
+    └── items.py
+```
+
+## The code
+
+**`database.py`** — unchanged:
+
+```python title="database.py"
+import os
+
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+load_dotenv()
+
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
+MYSQL_USER = os.getenv("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
+
+# Set DATABASE_URL directly to override everything above (e.g. to point
+# at SQLite for a quick local test with no MySQL server at all).
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
+)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+```
+
+**`models.py`** — one table, one new column:
+
+```python title="models.py"
+from sqlalchemy import Column, DateTime, Float, Integer, String
+
+from database import Base
+
+
+class SoftItemModel(Base):
+    __tablename__ = "soft_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(50), nullable=False)
+    price = Column(Float, nullable=False)
+    # NULL = alive. A timestamp = "deleted at this moment". The row
+    # itself stays in the table.
+    deleted_at = Column(DateTime, nullable=True, default=None)
+```
+
+**`schemas.py`:**
+
+```python title="schemas.py"
+from datetime import datetime
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class ItemCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=50)
+    price: float = Field(gt=0)
+
+
+class ItemOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    price: float
+    # null for live items; a timestamp for soft-deleted ones, which you
+    # only see with GET /items?include_deleted=true.
+    deleted_at: datetime | None
+```
+
+**`crud.py`** — soft delete, restore, hard delete, and the filter:
+
+```python title="crud.py"
+from sqlalchemy import func
+from sqlalchemy.orm import Session
+
+from models import SoftItemModel
+from schemas import ItemCreate
+
+
+def get_items(db: Session, include_deleted: bool = False) -> list[SoftItemModel]:
+    query = db.query(SoftItemModel)
+    if not include_deleted:
+        # The price of soft delete: EVERY normal query needs this filter.
+        # Forget it once and "deleted" rows show up again.
+        query = query.filter(SoftItemModel.deleted_at.is_(None))
+    return query.order_by(SoftItemModel.id).all()
+
+
+def get_item(db: Session, item_id: int) -> SoftItemModel | None:
+    """Any row, deleted or not. Used by restore and permanent delete."""
+    return db.get(SoftItemModel, item_id)
+
+
+def get_live_item(db: Session, item_id: int) -> SoftItemModel | None:
+    """Only a row that isn't soft-deleted. What normal reads use."""
+    return (
+        db.query(SoftItemModel)
+        .filter(SoftItemModel.id == item_id, SoftItemModel.deleted_at.is_(None))
+        .first()
+    )
+
+
+def create_item(db: Session, item: ItemCreate) -> SoftItemModel:
+    row = SoftItemModel(**item.model_dump())
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def soft_delete_item(db: Session, row: SoftItemModel) -> None:
+    # An UPDATE, not a DELETE. func.now() lets the database fill in the
+    # time, same as server_default in 8/d.
+    row.deleted_at = func.now()
+    db.commit()
+
+
+def restore_item(db: Session, row: SoftItemModel) -> SoftItemModel:
+    row.deleted_at = None
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def hard_delete_item(db: Session, row: SoftItemModel) -> None:
+    # A real DELETE. The row is gone and can't be restored.
+    db.delete(row)
+    db.commit()
+
+
+def seed(db: Session) -> None:
+    if db.query(SoftItemModel).count() == 0:
+        db.add_all(
+            [
+                SoftItemModel(name="Laptop", price=999.99),
+                SoftItemModel(name="Mouse", price=19.99),
+                SoftItemModel(name="Desk", price=120.0),
+            ]
+        )
+        db.commit()
+```
+
+**`routers/items.py`:**
+
+```python title="routers/items.py"
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+
+import crud
+from database import get_db
+from schemas import ItemCreate, ItemOut
+
+router = APIRouter(prefix="/items", tags=["items"])
+
+
+@router.get("", response_model=list[ItemOut])
+def list_items(include_deleted: bool = False, db: Session = Depends(get_db)):
+    return crud.get_items(db, include_deleted)
+
+
+@router.get("/{item_id}", response_model=ItemOut)
+def get_item(item_id: int, db: Session = Depends(get_db)):
+    # A soft-deleted item answers 404, exactly like a missing one. To
+    # the client it IS deleted; only restore can bring it back.
+    row = crud.get_live_item(db, item_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Item not found")
+    return row
+
+
+@router.post("", response_model=ItemOut, status_code=status.HTTP_201_CREATED)
+def create_item(item: ItemCreate, db: Session = Depends(get_db)):
+    return crud.create_item(db, item)
+
+
+@router.delete("/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_item(item_id: int, db: Session = Depends(get_db)):
+    row = crud.get_live_item(db, item_id)
+    if row is None:  # missing, or already soft-deleted
+        raise HTTPException(status_code=404, detail="Item not found")
+    crud.soft_delete_item(db, row)
+
+
+@router.post("/{item_id}/restore", response_model=ItemOut)
+def restore_item(item_id: int, db: Session = Depends(get_db)):
+    row = crud.get_item(db, item_id)  # deleted rows included on purpose
+    if row is None:
+        raise HTTPException(status_code=404, detail="Item not found")
+    if row.deleted_at is None:
+        raise HTTPException(status_code=409, detail="Item is not deleted")
+    return crud.restore_item(db, row)
+
+
+@router.delete("/{item_id}/permanent", status_code=status.HTTP_204_NO_CONTENT)
+def delete_item_permanently(item_id: int, db: Session = Depends(get_db)):
+    # Works on live and soft-deleted rows alike (e.g. purging the bin).
+    row = crud.get_item(db, item_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Item not found")
+    crud.hard_delete_item(db, row)
+```
+
+**`main.py`:**
+
+```python title="main.py"
+from fastapi import FastAPI
+
+import crud
+from database import Base, SessionLocal, engine
+from routers import items
+
+Base.metadata.create_all(bind=engine)
+
+with SessionLocal() as db:
+    crud.seed(db)
+
+app = FastAPI()
+
+app.include_router(items.router)
+```
+
+## Line by line
+
+**Why not just delete?**
+
+1. Three reasons to keep the row:
+   - **Undo.** "I deleted the wrong thing" is one of the most common
+     support requests. With a real `DELETE` the answer is "restore last
+     night's backup". With a soft delete it's one `UPDATE`.
+   - **Audit.** You can still see what existed and when it was removed.
+   - **References from other tables.** An old order line (see
+     [Transactions](/en/docs/relationships/transactions)) points at a
+     product. Hard-deleting the product either fails on the foreign key
+     or leaves the line pointing at nothing. A soft-deleted product stays
+     in the table, so old orders still resolve, while the shop stops
+     listing it.
+
+**`models.py`:**
+
+2. **`deleted_at = Column(DateTime, nullable=True, default=None)`** —
+   `NULL` means live; a timestamp means "deleted at this moment". A
+   timestamp instead of an `is_deleted` true/false flag costs nothing
+   extra and also records **when**.
+
+**`schemas.py`:**
+
+3. **`deleted_at: datetime | None`** in `ItemOut` — `null` for live
+   items; a timestamp for soft-deleted ones, which you only ever see
+   with `?include_deleted=true`.
+
+**`crud.py`:**
+
+4. **`soft_delete_item`** — `row.deleted_at = func.now()` then
+   `db.commit()`. An `UPDATE`, not a `DELETE`. `func.now()` lets the
+   database fill in the time, like `server_default=func.now()` in
+   [response_model](/en/docs/validation/response-model). The route still
+   answers `204 No Content`; to the client it **is** a delete.
+5. **The filter every normal read needs**, in `get_items`:
+   `query.filter(SoftItemModel.deleted_at.is_(None))`. `.is_(None)`
+   becomes `WHERE deleted_at IS NULL`. (Writing `== None` also works but
+   linters flag it; `= NULL` in SQL never matches anything, which is why
+   SQL has `IS NULL`.)
+6. **`include_deleted: bool = False`** — a query parameter (it's in the
+   route's signature but not in the path). FastAPI turns
+   `?include_deleted=true` (also `1`, `yes`, `on`) into `True`.
+7. **Two ways to fetch one row:**
+   - `get_item` — `db.get(...)`, which knows nothing about soft delete
+     and returns the row either way. That's exactly what restore and
+     permanent delete need.
+   - `get_live_item` — `.filter(SoftItemModel.id == item_id, SoftItemModel.deleted_at.is_(None))`,
+     only a row that isn't soft-deleted. What normal reads must use.
+8. **`restore_item`** — `row.deleted_at = None`, commit, refresh.
+9. **`hard_delete_item`** — `db.delete(row)`, a real `DELETE`. The row is
+   gone and can't be restored.
+
+**`routers/items.py`:**
+
+10. **Deleted looks like missing** — `GET /items/{item_id}` and
+    `DELETE /items/{item_id}` both use `get_live_item`, so a soft-deleted
+    item answers `404`, exactly like one that never existed. Deleting it
+    a second time is also a `404`: there's nothing (live) at that URL.
+11. **Restore** uses `get_item` — deleted rows included on purpose.
+    `404` if there's no row at all (never existed, or purged). `409` if
+    it exists but is live: the request makes sense, the current state
+    doesn't allow it.
+12. **`/permanent`** — sometimes data really must go: a user asks for
+    their data to be erased, or a cleanup job purges rows soft-deleted
+    more than 30 days ago. It runs a real `DELETE` on live and
+    soft-deleted rows alike. In a real app this is usually admin-only.
+
+## The cost: soft delete trade-offs
+
+| | Real `DELETE` | Soft delete |
+|---|---|---|
+| Undo a mistake | restore a backup | one `UPDATE` (`/restore`) |
+| History / audit | gone | kept, with the time |
+| Old rows referencing it (order lines) | fail on the foreign key, or dangle | still resolve |
+| Every query | nothing to remember | **must** filter `deleted_at IS NULL` |
+| Unique columns | just work | a "deleted" row still blocks its name |
+| Table size | shrinks | only grows — needs a purge job |
+
+- **Every query must filter.** Every list, every lookup, every count,
+  every join from another table. Forget `deleted_at IS NULL` once and
+  "deleted" data shows up again. Some projects hide this behind a helper
+  (like `get_live_item` here) or a database view, but it never goes away
+  completely.
+- **Unique constraints get tricky.** If `name` were `unique=True`,
+  soft-deleting "Mouse" would still block creating a new "Mouse": the
+  old row is still there. The fixes all have trade-offs: make the unique
+  key `(name, deleted_at)` — but MySQL allows many `NULL`s in a unique
+  index, so two **live** "Mouse" rows would slip through — or check
+  uniqueness in code among live rows only. That's why this lesson's
+  `name` isn't unique.
+- **The table only grows.** Deleted rows still take space and slow
+  scans, which is why a purge job usually comes with it.
+
+Use soft delete where undo, history, or references matter (orders,
+users, documents). For throwaway data (sessions, temp files), a real
+delete is simpler.
+
+## Try it
+
+```bash
+curl -i -X DELETE http://127.0.0.1:8000/items/2  # 204
+curl -i http://127.0.0.1:8000/items/2  # 404
+curl "http://127.0.0.1:8000/items?include_deleted=true"
+curl -X POST http://127.0.0.1:8000/items/2/restore
+curl -i -X POST http://127.0.0.1:8000/items/2/restore  # 409
+curl -i -X DELETE http://127.0.0.1:8000/items/2/permanent  # 204
+curl -i -X POST http://127.0.0.1:8000/items/2/restore  # 404
+```
+
+After the first request, `GET /items/2` is a `404`, but the
+`include_deleted` listing still has it:
+
+```json
+{"id": 2, "name": "Mouse", "price": 19.99, "deleted_at": "2026-10-05T10:28:35"}
+```
+
+Restore sets `deleted_at` back to `null`. Restoring a live item answers
+`409 {"detail": "Item is not deleted"}`. After `/permanent` the row is
+really gone: restore and every other route answer `404`. The URL with
+`?` is in double quotes so the shell doesn't treat `?` as a wildcard.
+
+Next: [Security](/en/docs/security) — hashed passwords, JWT login, and
+routes only the right user can reach.

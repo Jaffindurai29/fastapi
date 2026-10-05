@@ -1,0 +1,384 @@
+---
+title: "2. Search, filter, sort"
+description: Optional filters-ah query-la onnu onna add pannurathu, mattrum sort column-ku whitelist-a Literal.
+---
+
+<GithubLink path="example/9/b" />
+
+[skip/limit pagination](/tanglish/docs/pagination/skip-limit)-la
+paartha same paged `GET /items`, ippo optional filters-oda (name vachi
+search, category, price range) mattrum sort column, direction choose
+panna option-oda. Edha combination venumnaalum anuppunga, illa
+onnum anuppaama irukkalaam.
+
+| Route | Description |
+|---|---|
+| `GET /items` | Filter + sort aana oru page rows. Ella parameters-um optional (keezha) |
+| `GET /items/{item_id}` | Oru row; illana `404` |
+
+| Query parameter | Effect | Default |
+|---|---|---|
+| `search` | Name-la indha text irukkanum, case-insensitive | apply aagadhu |
+| `category` | Exact category (`books`, `electronics`, `toys`, `kitchen`, `garden`) | apply aagadhu |
+| `min_price` / `max_price` | Price range, inclusive | apply aagadhu |
+| `sort_by` | `id`, `name`, `price` illana `created_at` | `id` |
+| `order` | `asc` illana `desc` | `asc` |
+| `skip` / `limit` | Paging, 9/a maadhiri | `0` / `10` |
+
+## Code
+
+**`database.py`** — env vars, `engine`/`SessionLocal`/`Base`, mattrum
+`get_db()` dependency:
+
+```python title="database.py"
+import os
+
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+load_dotenv()
+
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
+MYSQL_USER = os.getenv("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
+
+# Set DATABASE_URL directly to override everything above (e.g. to point
+# at SQLite for a quick local test with no MySQL server at all).
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
+)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+```
+
+**`models.py`** — `catalog_items` table:
+
+```python title="models.py"
+from sqlalchemy import Column, DateTime, Float, Integer, String, func
+
+from database import Base
+
+
+# 9/a–9/d all use this exact model, so they can share one table.
+class ItemModel(Base):
+    __tablename__ = "catalog_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(100), nullable=False)
+    category = Column(String(50), nullable=False)
+    price = Column(Float, nullable=False)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+```
+
+**`schemas.py`** — 9/a-la irundhu maaradhu:
+
+```python title="schemas.py"
+from datetime import datetime
+
+from pydantic import BaseModel, ConfigDict
+
+
+class ItemOut(BaseModel):
+    # Read attributes off the SQLAlchemy row (see 8/d).
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    category: str
+    price: float
+    created_at: datetime
+```
+
+**`crud.py`** — oru oru filter-a build aagra query:
+
+```python title="crud.py"
+from typing import Literal
+
+from sqlalchemy.orm import Session
+
+from models import ItemModel
+
+# The only columns a client may sort by. main.py's Literal type already
+# guarantees sort_by is one of these keys, so this lookup can't fail.
+SORT_COLUMNS = {
+    "id": ItemModel.id,
+    "name": ItemModel.name,
+    "price": ItemModel.price,
+    "created_at": ItemModel.created_at,
+}
+
+
+def get_items(
+    db: Session,
+    skip: int,
+    limit: int,
+    search: str | None,
+    category: str | None,
+    min_price: float | None,
+    max_price: float | None,
+    sort_by: Literal["id", "name", "price", "created_at"],
+    order: Literal["asc", "desc"],
+) -> list[ItemModel]:
+    # Start with "every row" and narrow it down one step at a time.
+    # Nothing is sent to the database until .all() at the end.
+    query = db.query(ItemModel)
+
+    # Only add a filter when the client actually sent that parameter.
+    if search is not None:
+        # ilike = case-insensitive LIKE. %...% means "contains".
+        query = query.filter(ItemModel.name.ilike(f"%{search}%"))
+    if category is not None:
+        query = query.filter(ItemModel.category == category)
+    if min_price is not None:
+        query = query.filter(ItemModel.price >= min_price)
+    if max_price is not None:
+        query = query.filter(ItemModel.price <= max_price)
+
+    column = SORT_COLUMNS[sort_by]
+    column = column.desc() if order == "desc" else column.asc()
+    # id as a tie-breaker: rows with the same price (or created_at) still
+    # come back in a fixed order, so pages never overlap.
+    query = query.order_by(column, ItemModel.id)
+
+    return query.offset(skip).limit(limit).all()
+
+
+def get_item(db: Session, item_id: int) -> ItemModel | None:
+    return db.get(ItemModel, item_id)
+
+
+# 25 rows across 5 categories, so paging and filtering have something to do.
+SEED = [
+    ("Python Crash Course", "books", 29.99),
+    ("Clean Code", "books", 34.5),
+    ("The Pragmatic Programmer", "books", 42.0),
+    ("Dune", "books", 9.99),
+    ("Cooking for Engineers", "books", 18.75),
+    ("Laptop", "electronics", 999.99),
+    ("Mouse", "electronics", 19.99),
+    ("Mechanical Keyboard", "electronics", 89.0),
+    ("USB-C Cable", "electronics", 7.49),
+    ("27in Monitor", "electronics", 249.0),
+    ("Noise-Cancelling Headphones", "electronics", 199.95),
+    ("Building Blocks Set", "toys", 49.99),
+    ("Rubber Duck", "toys", 3.5),
+    ("Remote Control Car", "toys", 64.0),
+    ("Jigsaw Puzzle 1000pc", "toys", 15.0),
+    ("Plush Bear", "toys", 12.25),
+    ("Chef's Knife", "kitchen", 79.0),
+    ("Cast Iron Pan", "kitchen", 45.5),
+    ("Coffee Grinder", "kitchen", 59.99),
+    ("Measuring Cups", "kitchen", 8.99),
+    ("Garden Hose", "garden", 27.0),
+    ("Pruning Shears", "garden", 22.5),
+    ("Tomato Seeds", "garden", 2.99),
+    ("Watering Can", "garden", 14.0),
+    ("Lawn Mower", "garden", 329.0),
+]
+
+
+def seed_items(db: Session) -> None:
+    if db.query(ItemModel).count() == 0:
+        db.add_all(
+            [ItemModel(name=n, category=c, price=p) for n, c, p in SEED]
+        )
+        db.commit()
+```
+
+**`main.py`** — innum konjam query parameters, ellame optional:
+
+```python title="main.py"
+from typing import Literal
+
+from fastapi import Depends, FastAPI, HTTPException
+from sqlalchemy.orm import Session
+
+import crud
+from database import Base, SessionLocal, engine, get_db
+from schemas import ItemOut
+
+Base.metadata.create_all(bind=engine)
+
+with SessionLocal() as db:
+    crud.seed_items(db)
+
+app = FastAPI()
+
+NOT_FOUND = {404: {"description": "Item not found"}}
+
+
+# Every parameter is optional. "= None" means "not sent", and crud.py
+# skips that filter entirely.
+@app.get("/items", response_model=list[ItemOut])
+def list_items(
+    search: str | None = None,
+    category: str | None = None,
+    min_price: float | None = None,
+    max_price: float | None = None,
+    # Literal = a whitelist. Anything else (e.g. sort_by=password) is a 422
+    # before our code runs, so a user string never reaches order_by().
+    sort_by: Literal["id", "name", "price", "created_at"] = "id",
+    order: Literal["asc", "desc"] = "asc",
+    skip: int = 0,
+    limit: int = 10,
+    db: Session = Depends(get_db),
+):
+    return crud.get_items(
+        db,
+        skip=skip,
+        limit=limit,
+        search=search,
+        category=category,
+        min_price=min_price,
+        max_price=max_price,
+        sort_by=sort_by,
+        order=order,
+    )
+
+
+@app.get("/items/{item_id}", response_model=ItemOut, responses=NOT_FOUND)
+def get_item(item_id: int, db: Session = Depends(get_db)):
+    row = crud.get_item(db, item_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Item not found")
+    return row
+```
+
+## Line by line
+
+`database.py` mattrum `models.py` share aagra pieces, adha
+[index page](/tanglish/docs/pagination)-la explain pannirukkom,
+`schemas.py` [9/a](/tanglish/docs/pagination/skip-limit)-la paartha
+same `ItemOut`. Keezha `main.py`, `crud.py`-la enna pudhusu-nu paarpom.
+
+**`main.py`:**
+
+1. `search: str | None = None` (kooda `category`, `min_price`,
+   `max_price`) — **optional parameters default `None`**, `None` na
+   "client idha anuppala"-nu artham. Adhu empty illa zero value-la
+   irundhu vera: `?min_price=0` real filter ("0 illa adhukku mela"),
+   `min_price` anuppave illana filter-e illa.
+2. Value anuppumbodhu types innum apply aagum: `min_price` oru `float`,
+   so `?min_price=19.99` number `19.99`-a varum, `?min_price=cheap`
+   `422` (`float_parsing`).
+3. `sort_by: Literal["id", "name", "price", "created_at"] = "id"` —
+   `Literal[...]` oru **whitelist**. FastAPI value-ah andha list-oda
+   check pannum, vera edhu vandhaalum `422` sollum, so `crud.py`-ku
+   andha naalu strings-la onnu mattum dhan varum. `?sort_by=password`
+   unga code-ku varave varaadhu.
+4. `order: Literal["asc", "desc"] = "asc"` — direction-ku same trick.
+5. Bonus: allowed values ellam FastAPI-ku theriyum-nala, `/docs`-la
+   `sort_by`, `order` free text box-a illama **dropdowns**-a varum.
+6. `return crud.get_items(db, skip=skip, ..., order=order)` — route
+   thaane edhaiyum filter pannala; ovoru parameter-ayum name vachi
+   `crud.py`-ku pass pannudhu, avlo dhan.
+
+**`crud.py`:**
+
+7. `query = db.query(ItemModel)` — **broad-a start pannunga**. Idhu
+   innum database-ah thodala; idhu oru query-oda *description* mattum
+   ("`catalog_items`-oda ella row-um").
+8. `if search is not None: query = query.filter(...)` mattrum adhoda
+   moonu siblings — **step by step narrow pannunga**. Ovoru
+   `.filter(...)`-um innum oru `WHERE` condition-oda pudhu description
+   return pannum, mathadhoda `AND` vachi join aagum. Kadaisi `.all()`
+   varaikkum edhuvum run aagadhu, so aaru steps-la build pannradhu
+   oru line-la ezhudhuradhukku exact same cost dhan.
+9. `if ... is not None` checks dhan full trick. Avanga illana, ovoru
+   filter combination-kum thani query venum (naalu filters-ku 16
+   combinations). Avanga irundha, oru function ella mix-ayum handle
+   pannum — `?category=electronics&max_price=100&sort_by=price` rendu
+   `WHERE` conditions mattrum oru `ORDER BY` add pannum, pudhu code
+   edhuvum venaam.
+10. `ItemModel.name.ilike(f"%{search}%")` — `LIKE '%chef%'` name-la
+    engayavadhu `chef` irukra edha name-ayum match pannum (`%` na "edha
+    characters-um, illa onnume illa"). `ilike`-la irukra `i` adha
+    **case-insensitive** aakkudhu, so `chef`, `CHEF`, `Chef` moonume
+    `Chef's Knife`-ah kandupidikkum. SQLAlchemy adha database-ku
+    puriyura maadhiri maathum (MySQL-la `lower(name) LIKE
+    lower(...)`).
+11. **SQL injection illa.** Search text database-ku **bound
+    parameter**-a pogudhu, SQL string-kulla paste aagala, so
+    `?search=' OR 1=1 --` verum oru weird name thedal dhan. User type
+    panna `%` illa `_` pattern-kulla innum wildcard-a work aagum,
+    inga adhu harmless.
+12. `ItemModel.category == category`, `ItemModel.price >= min_price`,
+    `ItemModel.price <= max_price` — plain comparisons; SQLAlchemy
+    ovvonnaiyum `WHERE` clause-a maathum. Rendu price bounds-um
+    inclusive.
+13. `SORT_COLUMNS = {...}` — **whitelist panna name-ah neengale real
+    column-ku map pannunga.** Search value maadhiri illama, column name
+    bound parameter-a irukka mudiyaadhu, so user input SQL-kulla
+    poga koodiya ore idam sort column dhan. Rendu safe rules: user
+    string-ah eppovum `order_by()`-ku pass pannaadheenga
+    (`order_by(text(sort_by))` neenga expose panna ninaikkaadha column
+    vachi client sort panna vidum, illa idhai vida mosam, SQL inject
+    panna vidum), mattrum eppovum andha name-ah real `ItemModel`
+    columns irukra dict-la lookup pannunga. `Literal` already `sort_by`
+    naalu keys-la onnu-nu guarantee pannudhu, so `SORT_COLUMNS[sort_by]`
+    fail aagave aagaadhu.
+14. `column = column.desc() if order == "desc" else column.asc()` —
+    column-ah `price DESC` illa `price ASC`-a maathum.
+15. `query.order_by(column, ItemModel.id)` — **oru tie-breaker.** 9/a-oda
+    rule ("paging-ku munnadi order") order **unique**-a irundha mattum
+    dhan work aagum. 25 seed rows-kum same `created_at` (ore nerathula
+    insert aachu), so `ORDER BY created_at` mattum vachaa avanga order
+    thirumba database kaiyila dhan, pages overlap aagalaam. Second sort
+    key-a `id` add pannina ovoru tie-um break aagum.
+16. `query.offset(skip).limit(limit).all()` — **filter, apparam sort,
+    apparam page**, indha order-la. First page pannina "10 rows edu,
+    apparam filter pannu"-nu aagum, 10 irukka vendiya page-la 2 rows
+    dhan micham irukkum.
+17. Edhuvum match aagadha filter (`?category=furniture`) `200` with
+    `[]`, error illa — query nalla run aachu, rows kidaikkala.
+18. **Innum enna missing.** `?limit=1000000` innum ellathaiyum return
+    pannudhu, `?search=a` kittathatta ella row-ayum match pannudhu,
+    oru thadava oru category mattum dhan pick panna mudiyum.
+    [Query(...) validation](/tanglish/docs/pagination/query-validation)
+    ovoru parameter-kum rules add pannum.
+
+## Try it
+
+```bash
+curl "http://127.0.0.1:8000/items?search=chef"
+curl "http://127.0.0.1:8000/items?category=electronics&max_price=100&sort_by=price"
+curl "http://127.0.0.1:8000/items?sort_by=price&order=desc&limit=3"
+curl -i "http://127.0.0.1:8000/items?sort_by=password"  # 422
+curl "http://127.0.0.1:8000/items?category=furniture"
+```
+
+1. `Chef's Knife` — `chef`, `CHEF`, `Chef` moonume match aagum.
+2. 100-ku keezha irukra electronics, cheap-aanadhu first:
+   `USB-C Cable`, `Mouse`, `Mechanical Keyboard`.
+3. Romba costly-aana moonu items: `Laptop`, `Lawn Mower`,
+   `27in Monitor`.
+4. `422`, `sort_by` list panna naalu columns-ah mattum dhan accept
+   pannum:
+
+```json
+{"detail": [{"type": "literal_error", "loc": ["query", "sort_by"], "msg": "Input should be 'id', 'name', 'price' or 'created_at'", "input": "password", "...": "..."}]}
+```
+
+5. `[]` — endha row-um match aagala, adhu `200` dhan.
+
+**Postman:** Method `GET`, URL `http://127.0.0.1:8000/items`, apparam
+venum parameters-ah **Params** tab-la add pannunga. Oru row-ah
+delete pannama andha filter-ah vida, adha untick pannunga.
+
+Adutha step: [Query(...) validation](/tanglish/docs/pagination/query-validation)
+— ovoru parameter-kum rules, repeat aagra `category`, query params-ku
+oru Pydantic model.

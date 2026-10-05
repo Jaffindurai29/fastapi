@@ -1,0 +1,1041 @@
+---
+title: "10. Everything together"
+description: A secure notes API that uses every piece of this topic, walked through as a security checklist.
+---
+
+<GithubLink path="example/12/j" />
+
+Every earlier page taught one idea on its own. This app uses all of
+them at once: hashed passwords, JWT login, access **and** refresh tokens
+(with rotation), role checks, ownership checks, a rate-limited login,
+and the boring-but-important production settings (secrets from the
+environment, strict CORS, no `/docs` in production, security headers).
+It's a small "secure notes" API: each user owns their notes, admins can
+see everyone's. It's also the backend for the
+[React login UI](/en/docs/security/react).
+
+Instead of walking file by file, this page goes item by item down a
+**security checklist**: the rule, where it lives in the code, and why
+it's there. Every item is also marked with a `# CHECKLIST:` comment in
+the code, so `grep CHECKLIST` finds them all.
+
+## The checklist
+
+| # | Item | Where in the code | Why |
+|---|---|---|---|
+| 1 | Passwords are hashed, never stored | `security.py`, `models.py` | A leaked database doesn't hand out passwords |
+| 2 | Generic login error, constant time | `routers/auth.py`, `security.py` (`DUMMY_HASH`) | Attackers can't learn which usernames exist |
+| 3 | Rate-limited login | `rate_limit.py`, `routers/auth.py`, `main.py` | Brute-force guessing becomes impractical |
+| 4 | Short-lived access tokens + refresh tokens | `config.py`, `security.py` | A stolen access token is only useful for minutes |
+| 5 | Token type is checked | `security.py` (`decode_token`) | A 7-day refresh token can't act as an access token |
+| 6 | The server fixes the algorithm | `security.py` (`algorithms=[ALGORITHM]`) | Blocks the `"alg": "none"` forgery trick |
+| 7 | Refresh tokens rotate | `models.py`, `routers/auth.py` (`/refresh`) | A stolen refresh token works at most once |
+| 8 | Role re-read from the database | `dependencies.py` (`get_current_user`) | Demotion and deactivation take effect immediately |
+| 9 | Role checks return `403` | `dependencies.py` (`require_role`), `routers/users.py` | "Known but not allowed" differs from "not logged in" |
+| 10 | Ownership check on every note route | `routers/notes.py` (`get_owned_note`) | Logged in is not the same as "may read note 3" |
+| 11 | The client never picks owner or role | `schemas.py`, `crud.py`, `routers/auth.py` | Prevents mass assignment |
+| 12 | `response_model` never exposes `hashed_password` | `schemas.py` (`UserOut`) | Hashes can be cracked offline with no rate limit |
+| 13 | Nothing secret in the JWT payload | `security.py` (`_create_token`) | A JWT is signed, not encrypted: anyone can read it |
+| 14 | Secrets come from the environment | `config.py` (`Settings`, `SecretStr`) | Keys stay out of git, logs and error messages |
+| 15 | Production refuses a weak secret | `config.py` (`check_production_secret`) | Never run publicly with a known signing key |
+| 16 | No `/docs` in production | `main.py` | Don't hand strangers a map of every route |
+| 17 | CORS only from settings | `main.py`, `config.py` | Only your frontend's origin may call the API from a browser |
+| 18 | Security headers on every response | `main.py` (`add_security_headers`) | Cheap protection against whole classes of browser tricks |
+
+Each item is explained in detail [below the code](#the-checklist-item-by-item).
+
+## Files
+
+| File | Responsibility |
+|---|---|
+| `config.py` | `Settings` (pydantic-settings): every setting and secret, read from env / `.env`; refuses a weak `SECRET_KEY` in production |
+| `database.py` | `engine`, `SessionLocal`, `Base`, `get_db()`, using the URL from `config.py` |
+| `models.py` | `secure_users`, `secure_notes`, `secure_refresh_tokens` tables |
+| `schemas.py` | request bodies and `*Out` response models (no `hashed_password` anywhere) |
+| `crud.py` | database functions + demo seed data |
+| `security.py` | password hashing (pwdlib/argon2), creating and decoding JWTs |
+| `dependencies.py` | `get_current_user`, `require_role(...)` |
+| `rate_limit.py` | the shared slowapi `Limiter` |
+| `routers/auth.py` | `/token`, `/refresh`, `/register` |
+| `routers/users.py` | `/users/me`, `/admin/users` |
+| `routers/notes.py` | notes CRUD with ownership checks |
+| `main.py` | creates the app: docs switch, CORS, security headers, rate-limit handler, routers |
+
+The routes now live in a `routers/` folder: each file creates an
+`APIRouter`, declares its routes on it, and `main.py` plugs them in with
+`app.include_router(...)`. Same routes as one big `main.py`, just
+grouped by subject. `routers/__init__.py` is empty; it only makes
+`routers` a package so `from routers import auth, notes, users` works.
+
+## The code
+
+**`.env.example`** — every setting is optional in development:
+
+```bash title=".env.example"
+# Copy this file to .env and adjust the values. Every setting below has
+# a working development default baked into config.py, so creating a
+# .env is optional — the app runs with zero setup if you skip it.
+
+MYSQL_HOST=127.0.0.1
+MYSQL_PORT=3306
+MYSQL_USER=root
+MYSQL_PASSWORD=
+MYSQL_DB=fastapi_learn
+
+# Set this to override everything above at once — e.g. point at SQLite
+# for a quick local try with no MySQL server running at all.
+# DATABASE_URL=sqlite:///./test.db
+
+# Signs every JWT. The built-in default is fine for development, but
+# with ENVIRONMENT=production the app REFUSES TO START unless you set a
+# real one (32+ characters). Generate one with:
+#   python -c "import secrets; print(secrets.token_urlsafe(48))"
+# SECRET_KEY=
+
+# "development" (default) or "production". Production also turns off
+# /docs, /redoc and /openapi.json.
+# ENVIRONMENT=development
+
+# Short-lived access tokens, longer-lived refresh tokens.
+# ACCESS_TOKEN_EXPIRE_MINUTES=15
+# REFRESH_TOKEN_EXPIRE_DAYS=7
+
+# Which browser origins may call this API (a JSON list).
+# CORS_ORIGINS=["http://localhost:5173","http://127.0.0.1:5173"]
+
+# How many POST /token attempts one IP gets (slowapi syntax).
+# LOGIN_RATE_LIMIT=5/minute
+```
+
+**`config.py`** — all settings and secrets in one validated `Settings` object:
+
+```python title="config.py"
+from typing import Literal
+
+from pydantic import SecretStr, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Only ever used in development. Production refuses to start with it.
+DEV_SECRET_KEY = "dev-only-secret-key-do-not-use-in-production"
+
+
+class Settings(BaseSettings):
+    # CHECKLIST: secrets come from the environment (or .env), never from
+    # code. Each field is read from the env var of the same name,
+    # case-insensitive: SECRET_KEY -> secret_key, DATABASE_URL -> database_url.
+    # hide_input_in_errors: if validation fails, the error message must
+    # not print the values it was given (one of them is the secret key).
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore", hide_input_in_errors=True)
+
+    environment: Literal["development", "production"] = "development"
+
+    # SecretStr hides the value in repr()/logs: it prints as '**********'.
+    # Call .get_secret_value() at the one place that really needs it.
+    secret_key: SecretStr = SecretStr(DEV_SECRET_KEY)
+
+    # CHECKLIST: short-lived access tokens. A stolen one is useful for
+    # 15 minutes, not forever. The refresh token gets a new one.
+    access_token_expire_minutes: int = 15
+    refresh_token_expire_days: int = 7
+
+    # CHECKLIST: CORS origins are an explicit list from settings.
+    cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
+
+    # CHECKLIST: rate-limited login (see routers/auth.py).
+    login_rate_limit: str = "5/minute"
+
+    mysql_host: str = "127.0.0.1"
+    mysql_port: int = 3306
+    mysql_user: str = "root"
+    mysql_password: SecretStr = SecretStr("")
+    mysql_db: str = "fastapi_learn"
+    # Set DATABASE_URL to override all the mysql_* fields at once.
+    database_url: str | None = None
+
+    @property
+    def sqlalchemy_url(self) -> str:
+        if self.database_url:
+            return self.database_url
+        password = self.mysql_password.get_secret_value()
+        return (
+            f"mysql+pymysql://{self.mysql_user}:{password}"
+            f"@{self.mysql_host}:{self.mysql_port}/{self.mysql_db}"
+        )
+
+    @property
+    def is_production(self) -> bool:
+        return self.environment == "production"
+
+    # CHECKLIST: fail fast. A production server with the well-known dev
+    # key would let anyone forge tokens, so it must not start at all.
+    @model_validator(mode="after")
+    def check_production_secret(self) -> "Settings":
+        if self.is_production:
+            key = self.secret_key.get_secret_value()
+            if key == DEV_SECRET_KEY:
+                raise ValueError("SECRET_KEY must be set in production (the dev default is public)")
+            if len(key) < 32:
+                raise ValueError("SECRET_KEY must be at least 32 characters in production")
+        return self
+
+
+settings = Settings()
+```
+
+**`database.py`** — now takes its URL from `settings` instead of `os.getenv()`:
+
+```python title="database.py"
+from sqlalchemy import create_engine
+from sqlalchemy.orm import declarative_base, sessionmaker
+
+from config import settings
+
+# Connection details now come from config.py (pydantic-settings) instead
+# of os.getenv() calls here. DATABASE_URL still overrides everything.
+engine = create_engine(settings.sqlalchemy_url, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+```
+
+**`models.py`** — users (with `role`), notes (with `owner_id`), refresh tokens:
+
+```python title="models.py"
+from sqlalchemy import Boolean, Column, ForeignKey, Integer, String, Text
+
+from database import Base
+
+
+class UserModel(Base):
+    __tablename__ = "secure_users"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    username = Column(String(50), nullable=False, unique=True)
+    # Only ever the argon2 hash, never the password itself.
+    hashed_password = Column(String(255), nullable=False)
+    role = Column(String(20), nullable=False, default="user")
+    is_active = Column(Boolean, nullable=False, default=True)
+
+
+class NoteModel(Base):
+    __tablename__ = "secure_notes"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    title = Column(String(100), nullable=False)
+    body = Column(Text, nullable=False)
+    owner_id = Column(Integer, ForeignKey("secure_users.id"), nullable=False)
+
+
+class RefreshTokenModel(Base):
+    # One row per refresh token ever issued, keyed by its "jti" (a random
+    # id inside the token). This is what makes rotation real: a used or
+    # revoked refresh token is rejected even though its signature and
+    # expiry are still fine.
+    __tablename__ = "secure_refresh_tokens"
+
+    jti = Column(String(64), primary_key=True)
+    user_id = Column(Integer, ForeignKey("secure_users.id"), nullable=False)
+    revoked = Column(Boolean, nullable=False, default=False)
+```
+
+**`schemas.py`** — request bodies with limits, response models without secrets:
+
+```python title="schemas.py"
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class UserCreate(BaseModel):
+    username: str = Field(min_length=3, max_length=50, pattern=r"^[a-zA-Z0-9_.-]+$")
+    # max_length stops someone sending a 10 MB "password" to burn CPU
+    # in the hasher.
+    password: str = Field(min_length=8, max_length=128)
+    # No "role" field on purpose: a client must never be able to make
+    # itself an admin by sending {"role": "admin"}. Extra keys are ignored.
+
+
+# CHECKLIST: response_model never exposes hashed_password. It simply
+# isn't listed here, so it can't leave the server even by accident.
+class UserOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    username: str
+    role: str
+    is_active: bool
+
+
+class Token(BaseModel):
+    access_token: str
+    refresh_token: str
+    token_type: str = "bearer"
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
+
+class NoteCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=100)
+    body: str = Field(default="", max_length=2000)
+
+
+class NoteOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    title: str
+    body: str
+    owner_id: int
+```
+
+**`crud.py`** — database functions and demo seed data:
+
+```python title="crud.py"
+from sqlalchemy.orm import Session
+
+from models import NoteModel, RefreshTokenModel, UserModel
+from schemas import NoteCreate, UserCreate
+from security import hash_password
+
+
+# ---- users ----
+
+def get_user_by_username(db: Session, username: str) -> UserModel | None:
+    return db.query(UserModel).filter(UserModel.username == username).first()
+
+
+def get_users(db: Session) -> list[UserModel]:
+    return db.query(UserModel).order_by(UserModel.id).all()
+
+
+def create_user(db: Session, data: UserCreate, role: str = "user") -> UserModel:
+    row = UserModel(username=data.username, hashed_password=hash_password(data.password), role=role)
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+# ---- refresh tokens ----
+
+def save_refresh_token(db: Session, jti: str, user_id: int) -> None:
+    db.add(RefreshTokenModel(jti=jti, user_id=user_id))
+    db.commit()
+
+
+def get_refresh_token(db: Session, jti: str) -> RefreshTokenModel | None:
+    return db.get(RefreshTokenModel, jti)
+
+
+def revoke_refresh_token(db: Session, row: RefreshTokenModel) -> None:
+    row.revoked = True
+    db.commit()
+
+
+# ---- notes ----
+
+def get_notes(db: Session, owner_id: int | None = None) -> list[NoteModel]:
+    query = db.query(NoteModel)
+    if owner_id is not None:
+        query = query.filter(NoteModel.owner_id == owner_id)
+    return query.order_by(NoteModel.id).all()
+
+
+def get_note(db: Session, note_id: int) -> NoteModel | None:
+    return db.get(NoteModel, note_id)
+
+
+def create_note(db: Session, data: NoteCreate, owner_id: int) -> NoteModel:
+    # owner_id comes from the logged-in user, never from the request body.
+    row = NoteModel(**data.model_dump(), owner_id=owner_id)
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def update_note(db: Session, row: NoteModel, data: NoteCreate) -> NoteModel:
+    row.title = data.title
+    row.body = data.body
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def delete_note(db: Session, row: NoteModel) -> None:
+    db.delete(row)
+    db.commit()
+
+
+# ---- demo data ----
+
+def seed(db: Session) -> None:
+    if db.query(UserModel).count() > 0:
+        return
+    alice = UserModel(username="alice", hashed_password=hash_password("alice-password"), role="user")
+    bob = UserModel(username="bob", hashed_password=hash_password("bob-password"), role="user")
+    admin = UserModel(username="admin", hashed_password=hash_password("admin-password"), role="admin")
+    db.add_all([alice, bob, admin])
+    db.flush()  # assigns the ids so the notes below can point at them
+    db.add_all(
+        [
+            NoteModel(title="Alice's shopping list", body="Milk, eggs", owner_id=alice.id),
+            NoteModel(title="Alice's secret", body="Only Alice (and admins) can read this", owner_id=alice.id),
+            NoteModel(title="Bob's todo", body="Fix the bike", owner_id=bob.id),
+        ]
+    )
+    db.commit()
+```
+
+**`security.py`** — hashing, creating and decoding tokens:
+
+```python title="security.py"
+import uuid
+from datetime import datetime, timedelta, timezone
+
+import jwt
+from fastapi import HTTPException, status
+from pwdlib import PasswordHash
+
+from config import settings
+
+ALGORITHM = "HS256"
+
+# Argon2 with sensible defaults (salted, deliberately slow).
+password_hash = PasswordHash.recommended()
+
+# Used when the username doesn't exist, so a failed login takes the same
+# time either way and the response time can't reveal which usernames exist.
+DUMMY_HASH = password_hash.hash("dummy-password-for-timing")
+
+
+def hash_password(password: str) -> str:
+    return password_hash.hash(password)
+
+
+def verify_password(password: str, hashed: str) -> bool:
+    return password_hash.verify(password, hashed)
+
+
+def _create_token(username: str, token_type: str, expires_delta: timedelta, extra: dict | None = None) -> str:
+    payload = {
+        "sub": username,
+        "exp": datetime.now(timezone.utc) + expires_delta,
+        "type": token_type,
+        **(extra or {}),
+    }
+    # Note what is NOT in here: no role, no password, nothing secret.
+    # Anyone holding the token can base64-decode and read the payload.
+    return jwt.encode(payload, settings.secret_key.get_secret_value(), algorithm=ALGORITHM)
+
+
+def create_access_token(username: str) -> str:
+    return _create_token(username, "access", timedelta(minutes=settings.access_token_expire_minutes))
+
+
+def create_refresh_token(username: str) -> tuple[str, str]:
+    """Returns (token, jti). The jti is stored in the database so the
+    token can be rotated/revoked."""
+    jti = uuid.uuid4().hex
+    token = _create_token(
+        username, "refresh", timedelta(days=settings.refresh_token_expire_days), {"jti": jti}
+    )
+    return token, jti
+
+
+def credentials_error(detail: str = "Could not validate credentials") -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail=detail,
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+def decode_token(token: str, expected_type: str) -> dict:
+    """Checks signature + expiry + type. Raises 401 on any problem."""
+    try:
+        # algorithms=[...] is required: never let the token pick its own
+        # algorithm (the classic "alg": "none" attack).
+        payload = jwt.decode(token, settings.secret_key.get_secret_value(), algorithms=[ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        raise credentials_error("Token expired")
+    except jwt.InvalidTokenError:
+        raise credentials_error()
+    # A refresh token must not work as an access token, and vice versa.
+    if payload.get("type") != expected_type or not payload.get("sub"):
+        raise credentials_error()
+    return payload
+```
+
+**`dependencies.py`** — who is calling, and are they allowed:
+
+```python title="dependencies.py"
+from fastapi import Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
+from sqlalchemy.orm import Session
+
+import crud
+from database import get_db
+from models import UserModel
+from security import credentials_error, decode_token
+
+# Reads "Authorization: Bearer <token>" and powers the Authorize button
+# in /docs. tokenUrl is where /docs sends the username + password.
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+
+def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> UserModel:
+    payload = decode_token(token, expected_type="access")
+    # CHECKLIST: the role is re-read from the database on every request,
+    # never trusted from the token. Demote or deactivate a user and it
+    # takes effect immediately, not when their token expires.
+    user = crud.get_user_by_username(db, payload["sub"])
+    if user is None:
+        raise credentials_error()
+    if not user.is_active:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Inactive user")
+    return user
+
+
+def require_role(role: str):
+    """Dependency factory: Depends(require_role("admin"))."""
+
+    def checker(user: UserModel = Depends(get_current_user)) -> UserModel:
+        if user.role != role:
+            # 403, not 401: we know who you are, you just aren't allowed.
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not enough permissions")
+        return user
+
+    return checker
+```
+
+**`rate_limit.py`** — one shared `Limiter`:
+
+```python title="rate_limit.py"
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+
+# One shared Limiter for the whole app. Requests are counted per client
+# IP address, in memory. With several server processes you'd point it at
+# Redis instead (Limiter(..., storage_uri="redis://...")) so they share
+# one count.
+limiter = Limiter(key_func=get_remote_address)
+```
+
+**`routers/auth.py`** — login, refresh, register:
+
+```python title="routers/auth.py"
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.security import OAuth2PasswordRequestForm
+from sqlalchemy.orm import Session
+
+import crud
+from config import settings
+from database import get_db
+from models import UserModel
+from rate_limit import limiter
+from schemas import RefreshRequest, Token, UserCreate, UserOut
+from security import (
+    DUMMY_HASH,
+    create_access_token,
+    create_refresh_token,
+    credentials_error,
+    decode_token,
+    verify_password,
+)
+
+router = APIRouter(tags=["auth"])
+
+
+def issue_tokens(db: Session, user: UserModel) -> Token:
+    refresh_token, jti = create_refresh_token(user.username)
+    crud.save_refresh_token(db, jti, user.id)
+    return Token(access_token=create_access_token(user.username), refresh_token=refresh_token)
+
+
+# CHECKLIST: rate-limited login. The 6th attempt within a minute from
+# the same IP gets 429 Too Many Requests, which makes guessing passwords
+# by brute force impractical. slowapi needs the `request` argument.
+@router.post("/token", response_model=Token)
+@limiter.limit(settings.login_rate_limit)
+def login(request: Request, form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    user = crud.get_user_by_username(db, form.username)
+    # Hash-check even when the user doesn't exist, so both failures take
+    # the same time.
+    password_ok = verify_password(form.password, user.hashed_password if user else DUMMY_HASH)
+    # CHECKLIST: generic login error. "No such user" vs "wrong password"
+    # would tell an attacker which usernames exist.
+    if user is None or not password_ok or not user.is_active:
+        raise credentials_error("Incorrect username or password")
+    return issue_tokens(db, user)
+
+
+@router.post("/refresh", response_model=Token)
+def refresh(body: RefreshRequest, db: Session = Depends(get_db)):
+    payload = decode_token(body.refresh_token, expected_type="refresh")
+    stored = crud.get_refresh_token(db, payload.get("jti", ""))
+    # Rotation: each refresh token works exactly once. Reusing an old one
+    # (e.g. a stolen copy) fails here.
+    if stored is None or stored.revoked:
+        raise credentials_error("Refresh token is no longer valid")
+    user = crud.get_user_by_username(db, payload["sub"])
+    if user is None or not user.is_active:
+        raise credentials_error()
+    crud.revoke_refresh_token(db, stored)
+    return issue_tokens(db, user)
+
+
+@router.post("/register", response_model=UserOut, status_code=status.HTTP_201_CREATED)
+def register(data: UserCreate, db: Session = Depends(get_db)):
+    if crud.get_user_by_username(db, data.username) is not None:
+        raise HTTPException(status_code=409, detail="Username already taken")
+    # Always "user". Admins are made by an admin, not by signing up.
+    return crud.create_user(db, data, role="user")
+```
+
+**`routers/users.py`** — who am I, and the admin-only user list:
+
+```python title="routers/users.py"
+from fastapi import APIRouter, Depends
+from sqlalchemy.orm import Session
+
+import crud
+from database import get_db
+from dependencies import get_current_user, require_role
+from models import UserModel
+from schemas import UserOut
+
+router = APIRouter(tags=["users"])
+
+
+@router.get("/users/me", response_model=UserOut)
+def read_me(user: UserModel = Depends(get_current_user)):
+    return user  # the ORM row has hashed_password; UserOut drops it
+
+
+@router.get("/admin/users", response_model=list[UserOut])
+def list_users(db: Session = Depends(get_db), admin: UserModel = Depends(require_role("admin"))):
+    return crud.get_users(db)
+```
+
+**`routers/notes.py`** — notes CRUD, every route behind the ownership check:
+
+```python title="routers/notes.py"
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+
+import crud
+from database import get_db
+from dependencies import get_current_user
+from models import NoteModel, UserModel
+from schemas import NoteCreate, NoteOut
+
+router = APIRouter(prefix="/notes", tags=["notes"])
+
+NOTE_ERRORS = {403: {"description": "Not your note"}, 404: {"description": "Note not found"}}
+
+
+def get_owned_note(db: Session, note_id: int, user: UserModel) -> NoteModel:
+    """Load a note and check the current user may touch it."""
+    note = crud.get_note(db, note_id)
+    if note is None:
+        raise HTTPException(status_code=404, detail="Note not found")
+    # Ownership check: logged in is not enough, it has to be YOUR note.
+    # Admins may act on any note.
+    if note.owner_id != user.id and user.role != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You don't own this note")
+    return note
+
+
+@router.get("", response_model=list[NoteOut])
+def list_notes(db: Session = Depends(get_db), user: UserModel = Depends(get_current_user)):
+    # Users see their own notes; admins see everyone's.
+    owner_id = None if user.role == "admin" else user.id
+    return crud.get_notes(db, owner_id=owner_id)
+
+
+@router.post("", response_model=NoteOut, status_code=status.HTTP_201_CREATED)
+def create_note(data: NoteCreate, db: Session = Depends(get_db), user: UserModel = Depends(get_current_user)):
+    return crud.create_note(db, data, owner_id=user.id)
+
+
+@router.get("/{note_id}", response_model=NoteOut, responses=NOTE_ERRORS)
+def read_note(note_id: int, db: Session = Depends(get_db), user: UserModel = Depends(get_current_user)):
+    return get_owned_note(db, note_id, user)
+
+
+@router.put("/{note_id}", response_model=NoteOut, responses=NOTE_ERRORS)
+def update_note(
+    note_id: int, data: NoteCreate, db: Session = Depends(get_db), user: UserModel = Depends(get_current_user)
+):
+    return crud.update_note(db, get_owned_note(db, note_id, user), data)
+
+
+@router.delete("/{note_id}", status_code=status.HTTP_204_NO_CONTENT, responses=NOTE_ERRORS)
+def delete_note(note_id: int, db: Session = Depends(get_db), user: UserModel = Depends(get_current_user)):
+    crud.delete_note(db, get_owned_note(db, note_id, user))
+```
+
+**`main.py`** — builds the app and wires everything together:
+
+```python title="main.py"
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+
+import crud
+from config import settings
+from database import Base, SessionLocal, engine
+from rate_limit import limiter
+from routers import auth, notes, users
+
+Base.metadata.create_all(bind=engine)
+
+with SessionLocal() as db:
+    crud.seed(db)
+
+# CHECKLIST: no interactive docs in production. /docs is great while
+# building, but in production it hands strangers a map of every route.
+docs_off = settings.is_production
+app = FastAPI(
+    title="Secure notes",
+    docs_url=None if docs_off else "/docs",
+    redoc_url=None if docs_off else "/redoc",
+    openapi_url=None if docs_off else "/openapi.json",
+)
+
+# slowapi looks for the limiter on app.state, and this handler turns a
+# blocked request into a 429 response.
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# CHECKLIST: CORS only from settings. Never allow_origins=["*"] together
+# with allow_credentials=True (browsers reject it, and it would let any
+# site make logged-in requests). We send tokens in the Authorization
+# header, not cookies, so credentials aren't needed at all.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
+    allow_headers=["Authorization", "Content-Type"],
+)
+
+
+# CHECKLIST: security headers on every response.
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    # Don't let the browser guess a different content type than we sent.
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    # Don't allow this API to be framed by another site (clickjacking).
+    response.headers["X-Frame-Options"] = "DENY"
+    # Don't leak our URLs (which might contain ids) to other sites.
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
+
+
+app.include_router(auth.router)
+app.include_router(users.router)
+app.include_router(notes.router)
+```
+
+## The checklist, item by item
+
+### Part 1 — Who are you? (authentication)
+
+1. **Passwords are hashed, never stored.** (`security.py`, as in
+   [Password hashing](/en/docs/security/password-hashing))
+   - The `secure_users` table only has a `hashed_password` column, and
+     `crud.create_user` / `crud.seed` always go through
+     `hash_password()`.
+   - Argon2 is slow on purpose and salts every hash, so a leaked
+     database doesn't hand out passwords.
+   - `UserCreate.password` also has `max_length=128`, so nobody can make
+     the hasher chew on a 10 MB string to burn CPU.
+2. **Generic login error, in constant time.** (`routers/auth.py`)
+   - **What:** a missing user, a wrong password and a deactivated
+     account all get the same `401 Incorrect username or password`.
+   - **Why:** "No such user" and "Wrong password" are two different
+     answers, and that difference tells an attacker which usernames are
+     real.
+   - **Timing:** checking an Argon2 hash takes tens of milliseconds, so
+     returning early for an unknown user would be noticeably faster.
+     `verify_password(form.password, user.hashed_password if user else DUMMY_HASH)`
+     runs a real hash check against `DUMMY_HASH` (built once at import)
+     even when there's no user, so both paths take the same time.
+3. **Rate-limited login.** (`rate_limit.py`, `routers/auth.py`,
+   `main.py`, as in [Rate limiting](/en/docs/security/rate-limiting))
+   - The `Limiter` now lives in its own `rate_limit.py` because two
+     files need it: `routers/auth.py` (the decorator) and `main.py`
+     (`app.state.limiter` and the `429` handler). Putting it in
+     `main.py` would make the router import `main.py`, which imports
+     the router: a circular import.
+   - With `5/minute` per IP, the 6th try gets `429 Too Many Requests`,
+     even with the right password.
+   - `@limiter.limit` must sit **below** `@router.post`, and the
+     function must take a `request: Request` argument, because slowapi
+     reads the client IP from it.
+   - The limit comes from `settings.login_rate_limit`
+     (`LOGIN_RATE_LIMIT`), so production can tune it without a code
+     change. Unlike 12/i, this limiter doesn't set `headers_enabled`, so
+     the route doesn't need a `response: Response` parameter.
+4. **Short-lived access tokens, refresh tokens for the rest.**
+   (`config.py`, `security.py`, as in
+   [JWT login](/en/docs/security/jwt-login) and
+   [Refresh tokens](/en/docs/security/refresh-tokens))
+   - `access_token_expire_minutes: int = 15`,
+     `refresh_token_expire_days: int = 7`.
+   - **Why:** an access token can't be "logged out": once issued, it's
+     valid until `exp`. Keeping it to 15 minutes caps the damage if one
+     leaks.
+   - The refresh token lasts longer but is only ever sent to one route
+     (`/refresh`), never with every request.
+5. **Token type is checked.** (`security.py`)
+   - `_create_token` puts `"type": "access"` or `"type": "refresh"` in
+     every payload, and `decode_token(token, expected_type)` rejects the
+     wrong one (also a token with no `sub`).
+   - **Why:** both tokens are signed with the same key, so the signature
+     alone can't tell them apart. Without this check a 7-day refresh
+     token would work as a 7-day access token, and item 4 would be
+     meaningless.
+6. **The algorithm is fixed by the server.** (`security.py`)
+   - `jwt.decode(..., algorithms=[ALGORITHM])`.
+   - **Why:** a JWT's header says which algorithm it uses, and the token
+     is attacker-controlled. `algorithms=[...]` means the server only
+     accepts HS256, so a token claiming `"alg": "none"` (no signature at
+     all) is rejected.
+7. **Refresh tokens rotate.** (`models.py`, `routers/auth.py`)
+   - **The problem:** a JWT is valid until it expires; nothing about the
+     token itself can be "used up".
+   - **The fix:** `create_refresh_token` puts a random `jti`
+     (`uuid.uuid4().hex`) in each refresh token, and `issue_tokens`
+     saves it in `secure_refresh_tokens`.
+   - `/refresh` decodes the token, looks the `jti` up, and refuses it if
+     it's unknown or already `revoked`. Otherwise it marks it revoked and
+     hands back a **new pair**.
+   - **Why:** if someone steals a refresh token, they get one use at
+     most, and the real user's next refresh fails, which is a signal
+     something is wrong.
+   - `/refresh` also re-checks the user: a deleted or deactivated
+     account can't refresh, even with a valid token.
+
+### Part 2 — What may you do? (authorization)
+
+8. **Role re-read from the database, not trusted from the token.**
+   (`dependencies.py`)
+   - `get_current_user` decodes the access token, then loads the user
+     by `payload["sub"]` on every request.
+   - **Why:** the token only says *who* you are. If it also said
+     `"role": "admin"`, demoting someone would do nothing until their
+     token expired. One small query per request buys instant demotion
+     and instant deactivation (`is_active=False` → `403 Inactive user`).
+9. **Role checks return `403`.** (`dependencies.py`, `routers/users.py`,
+   as in [Roles](/en/docs/security/roles))
+   - `require_role("admin")` is a dependency **factory**: it returns a
+     `checker` function that FastAPI then runs as the real dependency.
+     `checker` itself depends on `get_current_user`, so it's
+     authentication first, then the role check.
+   - `/admin/users` uses `Depends(require_role("admin"))`; the `admin`
+     parameter isn't used in the body, it's there to run the check.
+   - **`401` vs `403`:** `401` means "I don't know who you are". `403`
+     means "I know exactly who you are, and the answer is no." Logging in
+     again won't help a `403`, so a frontend should show a message, not
+     a login form.
+10. **Ownership checks on every note route.** (`routers/notes.py`, as in
+    [Ownership](/en/docs/security/ownership))
+    - `get_owned_note` loads the note (`404` if missing), then raises
+      `403 You don't own this note` unless `note.owner_id == user.id` or
+      the user is an admin.
+    - **Why:** "is logged in" is not the same as "may read note 3". Ids
+      are easy to guess (1, 2, 3...), so without this check Alice could
+      read Bob's notes just by changing the number in the URL.
+    - GET, PUT and DELETE all go through this one function, so none of
+      them can forget the check. The list route filters instead:
+      `owner_id = None if user.role == "admin" else user.id`.
+11. **The client never picks its owner or role.** (`schemas.py`,
+    `crud.py`, `routers/auth.py`)
+    - `NoteCreate` has no `owner_id`: `crud.create_note` takes it from
+      the logged-in user (`owner_id=user.id`).
+    - `UserCreate` has no `role`, and `/register` always passes
+      `role="user"`. Sending `{"role": "admin"}` is silently ignored.
+    - **Why:** this mistake is called **mass assignment**: copying
+      whatever the client sent straight into the database row.
+
+### Part 3 — What leaves the server?
+
+12. **`response_model` never exposes `hashed_password`.** (`schemas.py`)
+    - `/users/me` returns the full ORM row, hash and all, and
+      `response_model=UserOut` filters it down to `id`, `username`,
+      `role` and `is_active`. The hash simply isn't listed, so it can't
+      leave the server even by accident.
+    - **Why:** a hash isn't the password, but it lets an attacker guess
+      offline at full speed, with no rate limit.
+13. **Nothing secret in the JWT payload.** (`security.py`)
+    - The payload holds only `sub`, `exp`, `type` (and `jti` for
+      refresh tokens). No role, no password.
+    - **Why:** a JWT is **signed**, not **encrypted**. Paste one into
+      [jwt.io](https://jwt.io) and you can read it. The signature only
+      proves nobody changed it.
+
+### Part 4 — Configuration and deployment
+
+14. **Secrets come from the environment.** (`config.py`)
+    - `Settings(BaseSettings)` reads each field from the env var of the
+      same name, case-insensitive (`SECRET_KEY` → `secret_key`,
+      `CORS_ORIGINS` → `cors_origins`), or from `.env`. Types are
+      validated too: `mysql_port: int` rejects `"abc"`, and
+      `cors_origins: list[str]` is parsed from a JSON list.
+    - `extra="ignore"` lets `.env` hold keys `Settings` doesn't know.
+    - `SecretStr` prints as `'**********'`, so the key can't end up in a
+      log by accident, and `hide_input_in_errors=True` keeps it out of
+      validation error messages too.
+    - The real value is only read where it's needed:
+      `settings.secret_key.get_secret_value()` in `security.py`.
+    - `sqlalchemy_url` builds the MySQL URL (or returns `DATABASE_URL`),
+      which is why `database.py` no longer reads any env vars itself.
+15. **Production refuses to start with a weak secret.** (`config.py`)
+    - `check_production_secret` is a `model_validator(mode="after")`: it
+      runs after every field is loaded. In production it rejects the dev
+      key and anything shorter than 32 characters.
+    - `settings = Settings()` runs when `config.py` is imported, so the
+      validator raises before uvicorn finishes starting.
+    - **Why:** the dev key is printed right here in a public repo.
+      Anyone who knows it can sign their own token saying
+      `"sub": "admin"`. Crashing loudly at startup beats running quietly
+      with a public key.
+16. **No `/docs` in production.** (`main.py`)
+    - `docs_url`, `redoc_url` and `openapi_url` are all `None` when
+      `settings.is_production`.
+    - **Why:** `/openapi.json` is a complete map of every route,
+      parameter and error. Turning off `openapi_url` matters most:
+      `/docs` and `/redoc` both load it. This is defence in depth, not a
+      lock: the routes are still protected by the checks above either
+      way.
+17. **CORS only from settings.** (`main.py`)
+    - `allow_origins=settings.cors_origins`, so production can list its
+      real frontend domain via `CORS_ORIGINS`. Compare
+      [React + MySQL](/en/docs/mysql-react), which hard-coded the origins
+      and allowed every method and header; here methods and headers are
+      exact lists too.
+    - **Never** `allow_origins=["*"]` with `allow_credentials=True`: that
+      would let any website make logged-in requests on a visitor's
+      behalf (and browsers refuse that combination anyway).
+    - This app sends tokens in the `Authorization` header, not in
+      cookies, so it doesn't need credentials at all:
+      `allow_credentials=False`.
+18. **Security headers on every response.** (`main.py`)
+    - `@app.middleware("http")` wraps **every** request, including
+      `401`s and `404`s: run the route (`await call_next(request)`), then
+      add headers to whatever came back.
+    - `X-Content-Type-Options: nosniff` stops the browser guessing a
+      different content type; `X-Frame-Options: DENY` blocks framing by
+      other sites (clickjacking); `Referrer-Policy: no-referrer` keeps
+      URLs (which might contain ids) from leaking to other sites.
+    - A real deployment usually adds `Strict-Transport-Security` too,
+      once it's served over HTTPS (often by the reverse proxy rather
+      than the app).
+
+### Not in this app (but on a real checklist)
+
+- **HTTPS.** Tokens and passwords travel in plain text over HTTP. In
+  production, always put the app behind HTTPS.
+- **Encrypting sensitive fields** at rest: see
+  [Encrypt & decrypt fields](/en/docs/security/encryption).
+- **Hiding sequential ids** in URLs: see
+  [ID hashing](/en/docs/security/id-hashing). This app keeps plain ids
+  because the ownership check (item 10) is the real protection; hiding
+  ids only makes guessing harder.
+- **A shared rate-limit store** (Redis) when running more than one
+  server process. The in-memory count in `rate_limit.py` is per process.
+
+## Routes
+
+Seeded users (only when the table is empty):
+
+| Username | Password | Role |
+|---|---|---|
+| `alice` | `alice-password` | user (owns notes 1 and 2) |
+| `bob` | `bob-password` | user (owns note 3) |
+| `admin` | `admin-password` | admin |
+
+| Route | Auth | Description |
+|---|---|---|
+| `POST /token` | none | Form body `username` + `password`. Returns `access_token` + `refresh_token`. `401` "Incorrect username or password"; `429` after 5 tries a minute |
+| `POST /refresh` | none | JSON body with `refresh_token`. Returns a **new pair**; the old refresh token stops working. `401` if expired, reused, or not a refresh token |
+| `POST /register` | none | JSON body with `username` and `password`. `201` (always role `user`), `409` if taken, `422` if invalid |
+| `GET /users/me` | user | Who am I (`id`, `username`, `role`, `is_active`) |
+| `GET /admin/users` | admin | Every user. `403` for non-admins |
+| `GET /notes` | user | Your notes (admins: everyone's) |
+| `POST /notes` | user | JSON body with `title` and `body`. `201`; owner is always you |
+| `GET /notes/{note_id}` | user | `404` if missing, `403` if not yours (admins may) |
+| `PUT /notes/{note_id}` | user | Replace title + body. Same `404` / `403` |
+| `DELETE /notes/{note_id}` | user | `204`. Same `404` / `403` |
+
+Every route marked "user" or "admin" answers `401` without a valid
+access token.
+
+## Try it
+
+```bash
+cd example/12/j
+uvicorn main:app --reload
+```
+
+Log in (a **form** body, not JSON, as OAuth2 requires), then use the
+`access_token` from the response in place of `TOKEN` and the
+`refresh_token` in place of `REFRESH`:
+
+```bash
+curl -X POST http://127.0.0.1:8000/token -d "username=alice&password=alice-password"
+curl http://127.0.0.1:8000/users/me -H "Authorization: Bearer TOKEN"
+curl http://127.0.0.1:8000/notes -H "Authorization: Bearer TOKEN"
+curl -X POST http://127.0.0.1:8000/notes -H "Authorization: Bearer TOKEN" -H "Content-Type: application/json" -d "{\"title\": \"Groceries\", \"body\": \"Bread\"}"
+curl -X PUT http://127.0.0.1:8000/notes/1 -H "Authorization: Bearer TOKEN" -H "Content-Type: application/json" -d "{\"title\": \"Edited\", \"body\": \"New body\"}"
+curl -X DELETE http://127.0.0.1:8000/notes/1 -H "Authorization: Bearer TOKEN"
+curl -X POST http://127.0.0.1:8000/refresh -H "Content-Type: application/json" -d "{\"refresh_token\": \"REFRESH\"}"
+curl -X POST http://127.0.0.1:8000/register -H "Content-Type: application/json" -d "{\"username\": \"carol\", \"password\": \"carol-password\"}"
+```
+
+Things worth trying as `alice`:
+
+- `GET /notes/3` → `403` "You don't own this note" (it's Bob's).
+- `GET /admin/users` → `403` "Not enough permissions". Log in as
+  `admin` and it works.
+- Run the same `/refresh` call twice → the second one is `401`
+  "Refresh token is no longer valid" (rotation).
+- Send the **refresh** token as the Bearer token to `/users/me` → `401`.
+- Log in with a wrong password 6 times in a minute → the 6th answer is
+  `429 Too Many Requests`, even if the password is right.
+- Add `-i` to any curl to see the security headers.
+- Paste an access token into [jwt.io](https://jwt.io): the payload
+  (`sub`, `exp`, `type`) is readable by anyone.
+
+### Production mode
+
+```bash
+export ENVIRONMENT=production
+uvicorn main:app
+```
+
+...refuses to start: `SECRET_KEY must be set in production`. Generate a
+real one and try again:
+
+```bash
+export SECRET_KEY=$(python -c "import secrets; print(secrets.token_urlsafe(48))")
+uvicorn main:app
+```
+
+Now it starts, and `/docs`, `/redoc` and `/openapi.json` all return
+`404`.
+
+Next: [React login UI](/en/docs/security/react) — a frontend that logs
+in, stores tokens and refreshes them automatically.

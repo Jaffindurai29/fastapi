@@ -1,0 +1,399 @@
+---
+title: "2. JWT login"
+description: POST /token checks the password and returns a signed JSON Web Token that expires in 15 minutes — readable by anyone, forgeable by no one.
+---
+
+<GithubLink path="example/12/b" />
+
+Logging in now returns a **token**: a signed string the client sends on
+later requests instead of the password. `POST /token` checks the
+password (Argon2, as in [Password hashing](/en/docs/security/password-hashing))
+and returns a JWT that expires in 15 minutes. `GET /token/inspect` takes
+a token apart so you can see that anyone can **read** it, but only the
+server can **make** a valid one.
+
+| Route | Description |
+|---|---|
+| `POST /token` | Form fields `username`, `password` → `access_token` + `token_type: "bearer"`; `401` if wrong |
+| `GET /token/inspect?token=...` | Header + payload (read **without** the key), plus whether the signature and expiry check out; `400` if it isn't a JWT |
+
+Table: `sec_users`, shared with 12/c, 12/d and 12/i. Seeded users:
+`alice`, `bob`, `admin` (password `<name>-password`), and `carol` /
+`carol-password` (deactivated, which matters from the next page on).
+
+## The code
+
+**`config.py`** — the secret key and token lifetimes, from the
+environment:
+
+```python title="config.py"
+import os
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# Signs every token. Anyone who knows it can mint valid tokens for any
+# user, so in production set a long random value in .env, generated with:
+#   python -c "import secrets; print(secrets.token_hex(32))"
+SECRET_KEY = os.getenv("SECRET_KEY", "dev-only-secret-change-me-in-production-0123456789")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "15"))
+REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7"))
+```
+
+**`database.py`** — the same as topic 6:
+
+```python title="database.py"
+import os
+
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+load_dotenv()
+
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
+MYSQL_USER = os.getenv("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
+
+# Set DATABASE_URL directly to override everything above (e.g. to point
+# at SQLite for a quick local test with no MySQL server at all).
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
+)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+```
+
+**`models.py`** — `sec_users`, now with `is_active`:
+
+```python title="models.py"
+from sqlalchemy import Boolean, Column, Integer, String
+
+from database import Base
+
+
+# Shared by 12/b, 12/c, 12/d and 12/i. Keep it identical in all four:
+# create_all never alters an existing table.
+class UserModel(Base):
+    __tablename__ = "sec_users"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    username = Column(String(30), nullable=False, unique=True)
+    hashed_password = Column(String(255), nullable=False)
+    is_active = Column(Boolean, nullable=False, default=True)
+```
+
+**`schemas.py`** — the token response, and a safe user shape:
+
+```python title="schemas.py"
+from pydantic import BaseModel, ConfigDict
+
+
+# The OAuth2 spec fixes these two field names, and /docs relies on them.
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+
+class UserOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    username: str
+    is_active: bool
+```
+
+**`security.py`** — hashing (as before) plus making and checking tokens:
+
+```python title="security.py"
+from datetime import datetime, timedelta, timezone
+
+import jwt
+from pwdlib import PasswordHash
+
+from config import ACCESS_TOKEN_EXPIRE_MINUTES, ALGORITHM, SECRET_KEY
+
+# Argon2, exactly as in 12/a.
+password_hash = PasswordHash.recommended()
+
+
+def hash_password(password: str) -> str:
+    return password_hash.hash(password)
+
+
+def verify_password(password: str, hashed: str) -> bool:
+    return password_hash.verify(password, hashed)
+
+
+def create_access_token(username: str, expires_delta: timedelta | None = None) -> str:
+    if expires_delta is None:
+        expires_delta = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    payload = {
+        "sub": username,  # who the token is about (the "subject")
+        "exp": datetime.now(timezone.utc) + expires_delta,  # stored as a Unix timestamp
+        "type": "access",
+    }
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def decode_token(token: str) -> dict:
+    # Checks the signature AND the exp claim. Raises jwt.InvalidTokenError
+    # (or its subclass jwt.ExpiredSignatureError) if either fails.
+    # algorithms= is a whitelist: never let the token pick its own.
+    return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+```
+
+**`crud.py`** — look up, authenticate, seed:
+
+```python title="crud.py"
+from sqlalchemy.orm import Session
+
+from models import UserModel
+from security import hash_password, verify_password
+
+
+def get_user_by_username(db: Session, username: str) -> UserModel | None:
+    return db.query(UserModel).filter(UserModel.username == username).first()
+
+
+def authenticate(db: Session, username: str, password: str) -> UserModel | None:
+    user = get_user_by_username(db, username)
+    if user is None or not verify_password(password, user.hashed_password):
+        return None
+    return user
+
+
+def seed_users(db: Session) -> None:
+    if db.query(UserModel).count() == 0:
+        db.add_all(
+            [
+                UserModel(username="alice", hashed_password=hash_password("alice-password")),
+                UserModel(username="bob", hashed_password=hash_password("bob-password")),
+                UserModel(username="admin", hashed_password=hash_password("admin-password")),
+                # Deactivated account: can log in, but the protected
+                # routes from 12/c on turn it away with 403.
+                UserModel(username="carol", hashed_password=hash_password("carol-password"), is_active=False),
+            ]
+        )
+        db.commit()
+```
+
+**`main.py`** — the login route and the inspect route:
+
+```python title="main.py"
+import jwt
+from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi.security import OAuth2PasswordRequestForm
+from sqlalchemy.orm import Session
+
+import crud
+from database import Base, SessionLocal, engine, get_db
+from schemas import Token
+from security import create_access_token, decode_token
+
+Base.metadata.create_all(bind=engine)
+
+with SessionLocal() as db:
+    crud.seed_users(db)
+
+app = FastAPI()
+
+
+# OAuth2PasswordRequestForm reads FORM fields `username` and `password`
+# (not JSON). That's what the OAuth2 spec says, and it's what the
+# "Authorize" button in /docs sends.
+@app.post("/token", response_model=Token,
+          responses={401: {"description": "Incorrect username or password"}})
+def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    user = crud.authenticate(db, form_data.username, form_data.password)
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return {"access_token": create_access_token(user.username), "token_type": "bearer"}
+
+
+# Teaching route: what's inside a token, and is it genuine?
+@app.get("/token/inspect", responses={400: {"description": "Not a JWT at all"}})
+def inspect_token(token: str):
+    try:
+        # No key needed: the header and payload are only base64.
+        header = jwt.get_unverified_header(token)
+        payload = jwt.decode(token, options={"verify_signature": False})
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=400, detail="Not a JWT")
+
+    try:
+        # The real check: signature + expiry, using SECRET_KEY.
+        verified = decode_token(token)
+        return {"header": header, "payload": payload, "valid": True, "verified_payload": verified}
+    except jwt.InvalidTokenError as exc:
+        return {"header": header, "payload": payload, "valid": False, "error": str(exc)}
+```
+
+## Line by line
+
+**Why a token at all:**
+
+1. HTTP forgets you between requests. Without a token, the client would
+   send the password on every call. Instead it sends the password
+   **once** to `POST /token` and gets back a signed token that says
+   "this is alice, until 10:15". Every later request carries the token,
+   and the server only has to check the signature — no password lookup.
+
+**What's inside a JWT:**
+
+2. A JWT is three base64url chunks joined by dots,
+   `header.payload.signature`:
+
+   ```
+   eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhbGljZSIsImV4cCI6MTc5MTE5Njc3NSwidHlwZSI6ImFjY2VzcyJ9.NsiOoyiFzply8_zi-_4uHbrN66UwKP3twAZ6mv1BYPo
+   ```
+
+   Decode the first two chunks (any base64 decoder will do, no key
+   needed) and you get:
+
+   ```jsonc
+   // header: how it was signed
+   {"alg": "HS256", "typ": "JWT"}
+
+   // payload: the "claims"
+   {"sub": "alice", "exp": 1791196775, "type": "access"}
+   ```
+
+   - `sub` ("subject") — who the token is about.
+   - `exp` ("expires") — a Unix timestamp: seconds since 1 January 1970,
+     UTC. After that moment the token is dead.
+   - `type` — our own claim, `"access"`; it will separate access tokens
+     from refresh tokens later.
+   - The third chunk, the **signature**, is HMAC-SHA256 of the first two
+     chunks using `SECRET_KEY`. It's just bytes; there's nothing to read.
+
+3. **Base64 is not encryption.** The header and payload are only
+   *encoded*, so anyone holding the token can read them.
+   `/token/inspect` proves it by decoding with no key at all
+   (`jwt.get_unverified_header` and `verify_signature: False`). So
+   **never put secrets in the payload**: no passwords, no hashes, no card
+   numbers. A username and an expiry are fine. (Real code only ever turns
+   off signature checks for debugging, never to decide access.)
+4. **The signature proves nobody tampered with it.** Change one
+   character of the payload (say `"sub": "alice"` to `"admin"`) and the
+   signature no longer matches, because only someone who knows
+   `SECRET_KEY` can compute a matching one. `/token/inspect` then runs
+   the real check with `decode_token`, and a tampered token comes back
+   `"valid": false` with `"Signature verification failed"`, even though
+   its payload reads `admin`.
+
+**`config.py`:**
+
+5. `SECRET_KEY` — whoever knows it can mint a token for any user, so it
+   lives in `.env` (never in git) and should be long and random. The
+   default is fine on your laptop, but it's public (it's in this repo),
+   so never use it anywhere real. PyJWT prints an
+   `InsecureKeyLengthWarning` if the key is shorter than 32 bytes.
+   Changing the key logs everybody out, since old tokens stop verifying.
+6. `ALGORITHM = "HS256"` — HMAC with SHA-256: one shared secret both
+   signs and verifies.
+7. `ACCESS_TOKEN_EXPIRE_MINUTES` (15) and `REFRESH_TOKEN_EXPIRE_DAYS`
+   (7, used from [Refresh tokens](/en/docs/security/refresh-tokens)) —
+   `int(os.getenv(...))` because environment variables are always
+   strings.
+
+**`security.py`:**
+
+8. `create_access_token` — builds the payload and signs it with
+   `jwt.encode`. `"exp": datetime.now(timezone.utc) + expires_delta` is a
+   real `datetime`; PyJWT turns it into the Unix timestamp you saw in
+   step 2. Always use timezone-aware UTC, never local time.
+   `expires_delta` is a parameter so tests can make an already-expired
+   token.
+9. **Token expiry: tokens die on their own.** A stolen token is a stolen
+   login until it expires, so it should be short-lived. `decode_token`
+   (`jwt.decode`) checks the signature **and** `exp`. It raises
+   `jwt.ExpiredSignatureError` for an expired token and
+   `jwt.InvalidTokenError` (its parent class) for anything else wrong.
+   The server stores nothing — expiry is enforced purely by the number
+   inside the signed payload, which nobody can change.
+10. `algorithms=[ALGORITHM]` — a whitelist. Never trust the `alg` in the
+    token's own header; a classic attack sets it to `none` and hopes the
+    server skips the signature.
+
+**`models.py` and `crud.py`:**
+
+11. `sec_users` adds `is_active` and is shared by 12/b, 12/c, 12/d and
+    12/i, so the model is identical in all four. `carol` is seeded with
+    `is_active=False`. She can still get a token here; the next page is
+    where that's checked.
+12. `authenticate` is 12/a's two checks folded into one `if`: missing
+    user or wrong password, both return `None`.
+
+**`main.py`:**
+
+13. `form_data: OAuth2PasswordRequestForm = Depends()` — reads **form
+    fields** `username` and `password` (not JSON), because that's what
+    the OAuth2 "password flow" spec says. Following the spec is what lets
+    the **Authorize** button in `/docs` log in for you on the next page.
+    Reading forms needs the `python-multipart` package; sending JSON gets
+    a `422`.
+14. `return {"access_token": ..., "token_type": "bearer"}` — both key
+    names are fixed by the same spec, which is why `Token` in
+    `schemas.py` has exactly those two fields. "bearer" means "whoever
+    bears (holds) this token is let in".
+15. The `401` is the same for a missing user and a wrong password, as on
+    [Password hashing](/en/docs/security/password-hashing).
+16. `inspect_token` — first decodes **without** the key (a `400` if
+    it's not a JWT at all), then tries the real `decode_token` and
+    reports `valid` true or false with PyJWT's error message.
+17. **What's missing: anything that uses the token.** There are no
+    protected routes yet. The next page adds a dependency that reads
+    `Authorization: Bearer ...`, verifies the token, and loads the user.
+
+## Try it
+
+```bash
+curl -X POST http://127.0.0.1:8000/token -d "username=alice&password=alice-password"
+curl -i -X POST http://127.0.0.1:8000/token -d "username=alice&password=wrong"  # 401
+curl "http://127.0.0.1:8000/token/inspect?token=<paste token>"
+```
+
+A valid token inspects as:
+
+```json
+{
+  "header": {"alg": "HS256", "typ": "JWT"},
+  "payload": {"sub": "alice", "exp": 1791196775, "type": "access"},
+  "valid": true,
+  "verified_payload": {"sub": "alice", "exp": 1791196775, "type": "access"}
+}
+```
+
+**Try this too:** paste your token into [jwt.io](https://jwt.io). It
+shows `"sub": "alice"` without knowing the key. Edit the payload there to
+`"sub": "admin"`, copy the new token, and inspect it here: the payload
+says `admin`, but `"valid": false, "error": "Signature verification
+failed"`. Wait 15 minutes and inspect the original token:
+`"Signature has expired"`.
+
+**Postman:** `POST http://127.0.0.1:8000/token`, Body →
+x-www-form-urlencoded → keys `username` = `alice`, `password` =
+`alice-password`.
+
+Next: [Protected routes](/en/docs/security/protected-routes) — using the
+token to lock routes.

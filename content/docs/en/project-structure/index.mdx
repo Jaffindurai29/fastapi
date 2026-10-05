@@ -1,0 +1,163 @@
+---
+title: Project Structure
+description: Splitting one big main.py into routers, dependencies and a typed settings class, plus when a route should be async def.
+---
+
+<GithubLink path="example/10" />
+
+Up to [Validation & Errors](/en/docs/validation), each app was one
+`main.py` with every route in it, plus a few helper modules. That's fine
+for five routes and painful for fifty, and it stops scaling the moment
+an API has more than one resource. This topic splits the app the way
+real FastAPI projects are laid out:
+
+- routes grouped into **routers** (`routers/items.py`, `routers/health.py`);
+- shared "things a route needs before it can run" pulled out into
+  **dependencies** (`dependencies.py`);
+- every setting in one typed, validated **config** class (`config.py`).
+
+It ends with the question every FastAPI beginner hits next: should a
+route be `async def` or plain `def`?
+
+| Sub-topic | What it covers |
+|---|---|
+| [10/a — APIRouter](/en/docs/project-structure/routers) | Move routes into a `routers/` package; `prefix`, `tags`, `include_router`; a `/health` check. |
+| [10/b — Dependency injection](/en/docs/project-structure/dependencies) | `dependencies.py`: `get_db` explained, `get_item_or_404`, a `Pagination` class, an `X-API-Key` guard on write routes. |
+| [10/c — Settings](/en/docs/project-structure/settings) | `pydantic-settings`: one typed `Settings` class from env vars and `.env`; `SecretStr`; CORS and `/info` from settings. |
+| [10/d — `async def` vs `def`](/en/docs/project-structure/async-vs-sync) | No database. Timing 5 concurrent requests shows why a blocking call inside `async def` freezes the server. |
+
+## How the folders grow
+
+Each letter starts from the previous one and adds one idea. The API
+(full CRUD on the `name`/`price`/`quantity` item from
+[Validation & Errors](/en/docs/validation)) stays the same from 10/a to
+10/c; only the code around it is reorganised.
+
+```text
+10/c/                     where it came from
+├── main.py               10/a: no routes, just include_router(...)  (10/c: + CORS, GET /info)
+├── config.py             10/c: class Settings(BaseSettings)
+├── database.py           10/a: engine, SessionLocal, Base           (10/c: reads Settings)
+├── dependencies.py       10/b: get_db, get_item_or_404, Pagination, require_api_key
+├── models.py             10/a: ItemModel -> table structured_items
+├── schemas.py            10/a: ItemCreate / ItemPatch / ItemOut
+├── crud.py               10/a: plain database functions, no HTTP
+└── routers/
+    ├── __init__.py       10/a: makes routers/ a package (empty)
+    ├── items.py          10/a: /items                               (10/b: uses dependencies)
+    └── health.py         10/a: GET /health
+```
+
+10/d is a separate, database-free app: just `main.py` and `demo.py`.
+
+## One table for 10/a–10/c
+
+10/a, 10/b and 10/c share one table, **`structured_items`**. The model is
+byte-for-byte the same in all three folders, so if you run them one
+after another against the same database they see each other's rows. If
+you created a "Desk" in 10/a, it's still there in 10/b (and posting
+"Desk" again gives a `409`). Run `GET /items` first to see which ids
+currently exist before trying an example that uses a specific id.
+
+The table is created automatically on startup by
+`Base.metadata.create_all(...)` and seeded with a Laptop, a Mouse and a
+Keyboard if it's empty.
+
+## Setup
+
+One new package, used in 10/c:
+
+```bash
+pip install pydantic-settings
+```
+
+Starting fresh? Everything this topic needs:
+
+```bash
+pip install fastapi uvicorn sqlalchemy pymysql python-dotenv pydantic-settings
+```
+
+The database setup for 10/a–10/c is exactly the same as
+[MySQL + CRUD](/en/docs/mysql-crud): same `fastapi_learn` database, same
+`MYSQL_*` environment variables or `.env` file, same SQLite fallback:
+
+```bash
+export DATABASE_URL="sqlite:///./test.db"
+```
+
+10/b adds one optional variable, `API_KEY` (default `dev-api-key`), and
+10/c adds `APP_NAME`, `DEBUG` and `CORS_ORIGINS`. All of them have
+defaults, so a `.env` file is still optional. 10/d needs no database at
+all, and its `demo.py` uses only the Python standard library.
+
+## Running this topic
+
+Run each letter from **inside** its own folder. That's what makes
+`from routers import items` and `import crud` work (the
+[APIRouter page](/en/docs/project-structure/routers) explains why):
+
+```bash
+cd example/10/a   # or b, c
+uvicorn main:app --reload
+```
+
+10/d needs two terminals, and no `--reload` (the reloader adds noise to
+the timings):
+
+```bash
+cd example/10/d
+uvicorn main:app          # terminal 1
+python demo.py            # terminal 2
+```
+
+Open [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs): from 10/a
+on, the routes are grouped under headings, one per router tag.
+
+## The pieces every page below shares
+
+`database.py` in 10/a is the same as topic 6's (10/b moves `get_db` out
+of it, 10/c rewrites it to read settings); see the
+[MySQL + CRUD index](/en/docs/mysql-crud) for it explained line by line.
+`schemas.py` (`ItemCreate`, `ItemPatch`, `ItemOut`) and `crud.py` are
+the same in 10/a, 10/b and 10/c, and come straight from
+[Validation & Errors](/en/docs/validation).
+
+**The table (in `models.py`, 10/a–10/c):**
+
+```python
+class ItemModel(Base):
+    __tablename__ = "structured_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(50), nullable=False, unique=True)
+    price = Column(Float, nullable=False)
+    quantity = Column(Integer, nullable=False, default=0)
+```
+
+## Line by line: the table (in models.py)
+
+1. `__tablename__ = "structured_items"` — a new table, so this topic
+   doesn't collide with topic 6's `items` or topic 8's
+   `validation_items`.
+2. `id = Column(Integer, primary_key=True, autoincrement=True)` — the
+   same auto-incrementing primary key as every topic since 6.
+3. `name = Column(String(50), nullable=False, unique=True)` — required,
+   up to 50 characters, and **unique**: the database refuses a second
+   "Laptop". The routers check for duplicates first and answer `409`;
+   the unique column is the safety net behind that check.
+4. `price = Column(Float, nullable=False)` — a required decimal number.
+5. `quantity = Column(Integer, nullable=False, default=0)` — a required
+   whole number; if an insert leaves it out, SQLAlchemy fills in `0`.
+
+**PATCH merges, it doesn't replace.** Every letter's `PATCH` route uses
+`patch.model_dump(exclude_unset=True)`, which keeps only the fields the
+client actually sent. So `{"price": 899}` changes the price and leaves
+`name` and `quantity` alone, exactly as in
+[Status codes](/en/docs/validation/status-codes).
+
+## Pages in this topic
+
+1. [APIRouter](/en/docs/project-structure/routers) — routes move out of `main.py` into a `routers/` package.
+2. [Dependencies](/en/docs/project-structure/dependencies) — `Depends` for the session, the row, pagination and an API-key guard.
+3. [Settings](/en/docs/project-structure/settings) — one typed `Settings` class instead of `os.getenv` everywhere.
+4. [async def vs def](/en/docs/project-structure/async-vs-sync) — why every database route in this repo is plain `def`.

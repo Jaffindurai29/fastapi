@@ -1,0 +1,401 @@
+---
+title: "4. Page envelope"
+description: Page numbers instead of offsets, and a response that carries items, total, page, size and pages.
+---
+
+<GithubLink path="example/9/d" />
+
+`GET /items` now speaks in **page numbers** (`?page=2&size=10`) instead
+of `skip`/`limit`, and wraps each page in an **envelope** that says how
+many rows match in total and how many pages that makes. The filters and
+sort from [9/b](/en/docs/pagination/filter-sort) still work, and
+`total` counts only the rows they match.
+
+| Route | Description |
+|---|---|
+| `GET /items?page=1&size=10` | One page inside an envelope; also takes `search`, `category`, `min_price`, `max_price`, `sort_by`, `order` |
+| `GET /items/{item_id}` | One row; `404` if missing |
+
+`page` must be `1` or more, `size` `1`–`100`. The other parameters work
+as in 9/b, with 9/c's rules (`search` 2–50 characters, prices `>= 0`).
+
+## The code
+
+**`database.py`** — env vars, `engine`/`SessionLocal`/`Base`, and the
+`get_db()` dependency:
+
+```python title="database.py"
+import os
+
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+load_dotenv()
+
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
+MYSQL_USER = os.getenv("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
+
+# Set DATABASE_URL directly to override everything above (e.g. to point
+# at SQLite for a quick local test with no MySQL server at all).
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
+)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+```
+
+**`models.py`** — the `catalog_items` table:
+
+```python title="models.py"
+from sqlalchemy import Column, DateTime, Float, Integer, String, func
+
+from database import Base
+
+
+# 9/a–9/d all use this exact model, so they can share one table.
+class ItemModel(Base):
+    __tablename__ = "catalog_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(100), nullable=False)
+    category = Column(String(50), nullable=False)
+    price = Column(Float, nullable=False)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+```
+
+**`schemas.py`** — `ItemOut`, plus the `ItemPage` envelope:
+
+```python title="schemas.py"
+from datetime import datetime
+
+from pydantic import BaseModel, ConfigDict
+
+
+class ItemOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    category: str
+    price: float
+    created_at: datetime
+
+
+# The envelope: one page of rows, plus what a frontend needs to draw
+# "Page 2 of 3" and know whether a Next button makes sense.
+class ItemPage(BaseModel):
+    items: list[ItemOut]
+    total: int  # rows matching the filters, across ALL pages
+    page: int
+    size: int
+    pages: int  # ceil(total / size)
+```
+
+**`crud.py`** — filter, count, then sort and cut one page:
+
+```python title="crud.py"
+from typing import Literal
+
+from sqlalchemy.orm import Session
+
+from models import ItemModel
+
+SORT_COLUMNS = {
+    "id": ItemModel.id,
+    "name": ItemModel.name,
+    "price": ItemModel.price,
+    "created_at": ItemModel.created_at,
+}
+
+
+def get_items_page(
+    db: Session,
+    page: int,
+    size: int,
+    search: str | None,
+    category: str | None,
+    min_price: float | None,
+    max_price: float | None,
+    sort_by: Literal["id", "name", "price", "created_at"],
+    order: Literal["asc", "desc"],
+) -> tuple[list[ItemModel], int]:
+    # 1. Build the filtered query, exactly as in 9/b.
+    query = db.query(ItemModel)
+    if search is not None:
+        query = query.filter(ItemModel.name.ilike(f"%{search}%"))
+    if category is not None:
+        query = query.filter(ItemModel.category == category)
+    if min_price is not None:
+        query = query.filter(ItemModel.price >= min_price)
+    if max_price is not None:
+        query = query.filter(ItemModel.price <= max_price)
+
+    # 2. Count it NOW: same filters, but before offset/limit. Counting
+    #    db.query(ItemModel) instead would give 25 even when the filter
+    #    only matches 5, and the page numbers would be wrong.
+    total = query.count()
+
+    # 3. Then sort and cut out one page. page 1 -> rows 0..size-1,
+    #    page 2 -> rows size..2*size-1, and so on.
+    column = SORT_COLUMNS[sort_by]
+    column = column.desc() if order == "desc" else column.asc()
+    offset = (page - 1) * size
+    rows = query.order_by(column, ItemModel.id).offset(offset).limit(size).all()
+
+    return rows, total
+
+
+def get_item(db: Session, item_id: int) -> ItemModel | None:
+    return db.get(ItemModel, item_id)
+
+
+# 25 rows across 5 categories, so paging and filtering have something to do.
+SEED = [
+    ("Python Crash Course", "books", 29.99),
+    ("Clean Code", "books", 34.5),
+    ("The Pragmatic Programmer", "books", 42.0),
+    ("Dune", "books", 9.99),
+    ("Cooking for Engineers", "books", 18.75),
+    ("Laptop", "electronics", 999.99),
+    ("Mouse", "electronics", 19.99),
+    ("Mechanical Keyboard", "electronics", 89.0),
+    ("USB-C Cable", "electronics", 7.49),
+    ("27in Monitor", "electronics", 249.0),
+    ("Noise-Cancelling Headphones", "electronics", 199.95),
+    ("Building Blocks Set", "toys", 49.99),
+    ("Rubber Duck", "toys", 3.5),
+    ("Remote Control Car", "toys", 64.0),
+    ("Jigsaw Puzzle 1000pc", "toys", 15.0),
+    ("Plush Bear", "toys", 12.25),
+    ("Chef's Knife", "kitchen", 79.0),
+    ("Cast Iron Pan", "kitchen", 45.5),
+    ("Coffee Grinder", "kitchen", 59.99),
+    ("Measuring Cups", "kitchen", 8.99),
+    ("Garden Hose", "garden", 27.0),
+    ("Pruning Shears", "garden", 22.5),
+    ("Tomato Seeds", "garden", 2.99),
+    ("Watering Can", "garden", 14.0),
+    ("Lawn Mower", "garden", 329.0),
+]
+
+
+def seed_items(db: Session) -> None:
+    if db.query(ItemModel).count() == 0:
+        db.add_all(
+            [ItemModel(name=n, category=c, price=p) for n, c, p in SEED]
+        )
+        db.commit()
+```
+
+**`main.py`** — `page`/`size` in, envelope out:
+
+```python title="main.py"
+import math
+from typing import Literal
+
+from fastapi import Depends, FastAPI, HTTPException, Query
+from sqlalchemy.orm import Session
+
+import crud
+from database import Base, SessionLocal, engine, get_db
+from schemas import ItemOut, ItemPage
+
+Base.metadata.create_all(bind=engine)
+
+with SessionLocal() as db:
+    crud.seed_items(db)
+
+app = FastAPI()
+
+NOT_FOUND = {404: {"description": "Item not found"}}
+
+
+# page/size instead of skip/limit: clients think in page numbers, the
+# database thinks in offsets. crud.py does the conversion.
+@app.get("/items", response_model=ItemPage)
+def list_items(
+    search: str | None = Query(None, min_length=2, max_length=50),
+    category: str | None = None,
+    min_price: float | None = Query(None, ge=0),
+    max_price: float | None = Query(None, ge=0),
+    sort_by: Literal["id", "name", "price", "created_at"] = "id",
+    order: Literal["asc", "desc"] = "asc",
+    page: int = Query(1, ge=1, description="Page number, starting at 1"),
+    size: int = Query(10, ge=1, le=100, description="Rows per page (max 100)"),
+    db: Session = Depends(get_db),
+):
+    rows, total = crud.get_items_page(
+        db,
+        page=page,
+        size=size,
+        search=search,
+        category=category,
+        min_price=min_price,
+        max_price=max_price,
+        sort_by=sort_by,
+        order=order,
+    )
+    # A page past the end isn't an error: items is just [], and total/pages
+    # still tell the client where the real data ends.
+    return {
+        "items": rows,  # ORM rows; ItemPage turns each into an ItemOut
+        "total": total,
+        "page": page,
+        "size": size,
+        "pages": math.ceil(total / size),
+    }
+
+
+@app.get("/items/{item_id}", response_model=ItemOut, responses=NOT_FOUND)
+def get_item(item_id: int, db: Session = Depends(get_db)):
+    row = crud.get_item(db, item_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Item not found")
+    return row
+```
+
+## Line by line
+
+`database.py` and `models.py` are the shared pieces explained on the
+[index page](/en/docs/pagination). Below covers the envelope.
+
+**Why bother:**
+
+1. **A frontend needs `total`.** A bare list of 10 rows can't answer
+   the questions a UI asks: "Is there a next page?", "How many page
+   buttons do I draw?", "What do I put in '25 results'?". With
+   9/a–9/c the only way to know is to request the next page and see
+   whether it's empty. One extra number, the total, answers all three.
+
+**`schemas.py`:**
+
+2. `class ItemPage(BaseModel)` — the envelope. `items: list[ItemOut]`
+   is a list of the same `ItemOut` as before, so each row still goes
+   out through the same filter of allowed fields.
+3. `total` — rows matching the filters across **all** pages, not just
+   this one. `page` and `size` echo back what was asked for, and
+   `pages` is how many pages `total` fills.
+4. Returning an **object** instead of a bare list also leaves room to
+   add more keys later (say, `next_page`) without breaking clients
+   that already read `items`.
+
+**`main.py`:**
+
+5. `page: int = Query(1, ge=1, ...)` and
+   `size: int = Query(10, ge=1, le=100, ...)` — the same idea as
+   `skip`/`limit`, in friendlier units: people think "page 3",
+   databases think "skip 20". Pages start at 1, so `ge=1` makes
+   `?page=0` and `?page=-1` a `422`. `size` keeps 9/c's ceiling of 100.
+6. `search`, `min_price`, `max_price` keep 9/c's rules via
+   `Query(...)`; `category` is back to a single `str`, as in 9/b.
+7. `@app.get("/items", response_model=ItemPage)` — the response is now
+   one object, not `list[ItemOut]`.
+8. `rows, total = crud.get_items_page(...)` — the crud function returns
+   **two** things as a tuple, and this unpacks them.
+9. `return {"items": rows, "total": total, ...}` — a plain dict whose
+   `items` holds raw ORM rows. `response_model=ItemPage` validates the
+   dict and turns each row into an `ItemOut` (that's what
+   `from_attributes=True` on `ItemOut` allows).
+10. `"pages": math.ceil(total / size)` — a **ceiling division**. 25
+    rows at 10 per page is 2.5, and the half page still needs a page,
+    so round **up**: 3. Exact fits stay exact (25 / 25 = 1), and 0
+    rows gives 0 pages.
+11. **Out-of-range pages are not errors.** `?page=9` on 3 pages returns
+    `200` with `"items": []`, the same choice as 9/a's `?skip=100`.
+    Rows get deleted while people are reading; a client sitting on
+    page 3 when the data shrinks to 2 pages should get an empty page
+    and the new `pages` value, not a crash. `page` is still checked for
+    being `1` or more, because page 0 is never meaningful.
+
+**`crud.py`:**
+
+12. Step 1 builds the filtered `query` exactly as in 9/b — start broad,
+    add a `.filter(...)` only for parameters that were sent.
+13. `total = query.count()` — **count with the same filters, before
+    paging.** At this point `query` has every `WHERE` but no
+    `ORDER BY`, `OFFSET` or `LIMIT` yet. `.count()` runs
+    `SELECT count(*) FROM (that query)` and returns a number. Two rules
+    make it correct:
+    - **Same filters.** `?category=toys` must give `total: 5`, not 25.
+      If `total` counted the whole table (`db.query(ItemModel).count()`),
+      a UI would draw 3 pages of toys at `size=10`, and pages 2 and 3
+      would be empty. Reusing the very same `query` object makes it
+      impossible for the count and the page to drift apart.
+    - **Before `offset`/`limit`.** Counting after `.limit(size)` would
+      answer "how many on this page", which is at most `size` — and the
+      client already knows that from `len(items)`.
+14. That's **two queries per request** (one count, one page). It's the
+    normal price of a total.
+15. `offset = (page - 1) * size` — **page → offset.** The `- 1` is
+    because page 1 skips nothing:
+
+    | `page` | `size` | `offset` | Rows |
+    |---|---|---|---|
+    | 1 | 10 | 0 | 1–10 |
+    | 2 | 10 | 10 | 11–20 |
+    | 3 | 10 | 20 | 21–25 (only 5 left) |
+    | 3 | 2 | 4 | 5–6 |
+
+16. `query.order_by(column, ItemModel.id).offset(offset).limit(size).all()`
+    — then sort (with the `id` tie-breaker from 9/b) and cut out one
+    page.
+17. `return rows, total` — both go back to `main.py` as a tuple, so it
+    can build the envelope.
+
+## Try it
+
+```bash
+curl "http://127.0.0.1:8000/items?page=2"
+curl "http://127.0.0.1:8000/items?category=toys&size=2&page=3"
+curl "http://127.0.0.1:8000/items?page=9"
+curl -i "http://127.0.0.1:8000/items?page=0"  # 422
+curl "http://127.0.0.1:8000/items?category=furniture"
+```
+
+1. Rows 11–20, with `"total": 25, "page": 2, "size": 10, "pages": 3`.
+2. The last toy. Only 5 rows are toys, so the numbers describe the
+   filtered set, not the whole table:
+
+```json
+{
+  "items": [{"id": 16, "name": "Plush Bear", "category": "toys", "price": 12.25, "created_at": "..."}],
+  "total": 5,
+  "page": 3,
+  "size": 2,
+  "pages": 3
+}
+```
+
+3. Past the last page: `200` with `"items": []`, and `total`/`pages`
+   still say where the data ends.
+4. `422` — pages start at 1:
+
+```json
+{"detail": [{"type": "greater_than_equal", "loc": ["query", "page"], "msg": "Input should be greater than or equal to 1", "...": "..."}]}
+```
+
+5. A filter that matches nothing: `"total": 0, "pages": 0` and an empty
+   `items` list.
+
+**Postman:** Method `GET`, URL `http://127.0.0.1:8000/items`, then add
+`page`, `size` and any filters in the **Params** tab. Change `page` and
+resend to step through the results.
+
+Back to the [topic overview](/en/docs/pagination).
+
+Next topic: [Project Structure](/en/docs/project-structure) — routers, dependencies, settings, and async vs sync.

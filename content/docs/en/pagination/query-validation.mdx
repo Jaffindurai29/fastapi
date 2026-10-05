@@ -1,0 +1,448 @@
+---
+title: "3. Query(...) validation"
+description: Rules on every query parameter with Query(...), a repeatable ?category=, and the same filters as one Pydantic model.
+---
+
+<GithubLink path="example/9/c" />
+
+The same filters as [Search, filter, sort](/en/docs/pagination/filter-sort),
+now with rules. `limit` is capped at 100, `skip` can't be negative,
+`search` needs 2–50 characters, prices can't be negative, and
+`category` can be repeated to match several categories at once. A
+second route takes the exact same filters as one Pydantic model.
+
+| Route | Description |
+|---|---|
+| `GET /items` | Filters as separate `Query(...)` parameters |
+| `GET /items/search-model` | The same filters as one `FilterParams` model; unknown parameters are a `422` |
+| `GET /items/{item_id}` | One row; `404` if missing |
+
+| Query parameter | Rule | Default |
+|---|---|---|
+| `search` | 2–50 characters | not applied |
+| `category` | Repeatable: `?category=books&category=toys` | not applied |
+| `min_price` / `max_price` | `>= 0` | not applied |
+| `sort_by` | `id`, `name`, `price`, `created_at` | `id` |
+| `order` | `asc`, `desc` | `asc` |
+| `skip` | `>= 0` | `0` |
+| `limit` | `1`–`100` | `10` |
+
+## The code
+
+**`database.py`** — env vars, `engine`/`SessionLocal`/`Base`, and the
+`get_db()` dependency:
+
+```python title="database.py"
+import os
+
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+load_dotenv()
+
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
+MYSQL_USER = os.getenv("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
+
+# Set DATABASE_URL directly to override everything above (e.g. to point
+# at SQLite for a quick local test with no MySQL server at all).
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
+)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+```
+
+**`models.py`** — the `catalog_items` table:
+
+```python title="models.py"
+from sqlalchemy import Column, DateTime, Float, Integer, String, func
+
+from database import Base
+
+
+# 9/a–9/d all use this exact model, so they can share one table.
+class ItemModel(Base):
+    __tablename__ = "catalog_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(100), nullable=False)
+    category = Column(String(50), nullable=False)
+    price = Column(Float, nullable=False)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+```
+
+**`schemas.py`** — `ItemOut`, plus the new `FilterParams` model:
+
+```python title="schemas.py"
+from datetime import datetime
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class ItemOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    category: str
+    price: float
+    created_at: datetime
+
+
+# The same filters as GET /items, gathered into one model. Field(...)
+# takes the same rules (ge, le, min_length, description) as Query(...).
+class FilterParams(BaseModel):
+    # Unknown query parameters (a typo like ?limt=5) become a 422
+    # instead of being silently ignored.
+    model_config = {"extra": "forbid"}
+
+    search: str | None = Field(
+        None, min_length=2, max_length=50, description="Case-insensitive 'name contains'"
+    )
+    category: list[str] | None = Field(None, description="Repeat to match several categories")
+    min_price: float | None = Field(None, ge=0, description="Lowest price, inclusive")
+    max_price: float | None = Field(None, ge=0, description="Highest price, inclusive")
+    sort_by: Literal["id", "name", "price", "created_at"] = "id"
+    order: Literal["asc", "desc"] = "asc"
+    skip: int = Field(0, ge=0, description="Rows to skip")
+    limit: int = Field(10, ge=1, le=100, description="Rows to return (max 100)")
+```
+
+**`crud.py`** — the 9/b query, with `category` now a list:
+
+```python title="crud.py"
+from typing import Literal
+
+from sqlalchemy.orm import Session
+
+from models import ItemModel
+
+SORT_COLUMNS = {
+    "id": ItemModel.id,
+    "name": ItemModel.name,
+    "price": ItemModel.price,
+    "created_at": ItemModel.created_at,
+}
+
+
+# Same step-by-step query as 9/b. The only change: category is now a
+# LIST, so one request can ask for several categories at once.
+def get_items(
+    db: Session,
+    skip: int,
+    limit: int,
+    search: str | None,
+    category: list[str] | None,
+    min_price: float | None,
+    max_price: float | None,
+    sort_by: Literal["id", "name", "price", "created_at"],
+    order: Literal["asc", "desc"],
+) -> list[ItemModel]:
+    query = db.query(ItemModel)
+
+    if search is not None:
+        query = query.filter(ItemModel.name.ilike(f"%{search}%"))
+    if category:
+        # ?category=books&category=toys -> WHERE category IN ('books', 'toys')
+        query = query.filter(ItemModel.category.in_(category))
+    if min_price is not None:
+        query = query.filter(ItemModel.price >= min_price)
+    if max_price is not None:
+        query = query.filter(ItemModel.price <= max_price)
+
+    column = SORT_COLUMNS[sort_by]
+    column = column.desc() if order == "desc" else column.asc()
+    query = query.order_by(column, ItemModel.id)
+
+    return query.offset(skip).limit(limit).all()
+
+
+def get_item(db: Session, item_id: int) -> ItemModel | None:
+    return db.get(ItemModel, item_id)
+
+
+# 25 rows across 5 categories, so paging and filtering have something to do.
+SEED = [
+    ("Python Crash Course", "books", 29.99),
+    ("Clean Code", "books", 34.5),
+    ("The Pragmatic Programmer", "books", 42.0),
+    ("Dune", "books", 9.99),
+    ("Cooking for Engineers", "books", 18.75),
+    ("Laptop", "electronics", 999.99),
+    ("Mouse", "electronics", 19.99),
+    ("Mechanical Keyboard", "electronics", 89.0),
+    ("USB-C Cable", "electronics", 7.49),
+    ("27in Monitor", "electronics", 249.0),
+    ("Noise-Cancelling Headphones", "electronics", 199.95),
+    ("Building Blocks Set", "toys", 49.99),
+    ("Rubber Duck", "toys", 3.5),
+    ("Remote Control Car", "toys", 64.0),
+    ("Jigsaw Puzzle 1000pc", "toys", 15.0),
+    ("Plush Bear", "toys", 12.25),
+    ("Chef's Knife", "kitchen", 79.0),
+    ("Cast Iron Pan", "kitchen", 45.5),
+    ("Coffee Grinder", "kitchen", 59.99),
+    ("Measuring Cups", "kitchen", 8.99),
+    ("Garden Hose", "garden", 27.0),
+    ("Pruning Shears", "garden", 22.5),
+    ("Tomato Seeds", "garden", 2.99),
+    ("Watering Can", "garden", 14.0),
+    ("Lawn Mower", "garden", 329.0),
+]
+
+
+def seed_items(db: Session) -> None:
+    if db.query(ItemModel).count() == 0:
+        db.add_all(
+            [ItemModel(name=n, category=c, price=p) for n, c, p in SEED]
+        )
+        db.commit()
+```
+
+**`main.py`** — `Query(...)` rules, and a second route that takes a
+model:
+
+```python title="main.py"
+from typing import Annotated, Literal
+
+from fastapi import Depends, FastAPI, HTTPException, Query
+from sqlalchemy.orm import Session
+
+import crud
+from database import Base, SessionLocal, engine, get_db
+from schemas import FilterParams, ItemOut
+
+Base.metadata.create_all(bind=engine)
+
+with SessionLocal() as db:
+    crud.seed_items(db)
+
+app = FastAPI()
+
+NOT_FOUND = {404: {"description": "Item not found"}}
+
+
+# Same parameters as 9/b, now wrapped in Query(...) to add rules.
+# Break a rule and FastAPI answers 422 before this function runs.
+# description= shows up next to each parameter in /docs.
+@app.get("/items", response_model=list[ItemOut])
+def list_items(
+    search: str | None = Query(
+        None, min_length=2, max_length=50, description="Case-insensitive 'name contains'"
+    ),
+    # A list type tells FastAPI the parameter may repeat:
+    # ?category=books&category=toys -> ["books", "toys"]
+    category: list[str] | None = Query(None, description="Repeat to match several categories"),
+    min_price: float | None = Query(None, ge=0, description="Lowest price, inclusive"),
+    max_price: float | None = Query(None, ge=0, description="Highest price, inclusive"),
+    sort_by: Literal["id", "name", "price", "created_at"] = "id",
+    order: Literal["asc", "desc"] = "asc",
+    skip: int = Query(0, ge=0, description="Rows to skip"),
+    # le=100 caps the page size, so nobody can ask for a million rows.
+    limit: int = Query(10, ge=1, le=100, description="Rows to return (max 100)"),
+    db: Session = Depends(get_db),
+):
+    return crud.get_items(
+        db,
+        skip=skip,
+        limit=limit,
+        search=search,
+        category=category,
+        min_price=min_price,
+        max_price=max_price,
+        sort_by=sort_by,
+        order=order,
+    )
+
+
+# The same filters, declared once as a Pydantic model. This route must
+# come BEFORE /items/{item_id}, or "search-model" would be read as an
+# item_id (and fail with 422, since it isn't a number).
+@app.get("/items/search-model", response_model=list[ItemOut])
+def search_items(
+    # The one place this repo uses Annotated: it's how FastAPI documents
+    # query-parameter models. Query() says "fill this model's fields from
+    # the query string", not from a JSON body.
+    filters: Annotated[FilterParams, Query()],
+    db: Session = Depends(get_db),
+):
+    # Field names match crud.get_items' arguments, so ** unpacks them.
+    return crud.get_items(db, **filters.model_dump())
+
+
+@app.get("/items/{item_id}", response_model=ItemOut, responses=NOT_FOUND)
+def get_item(item_id: int, db: Session = Depends(get_db)):
+    row = crud.get_item(db, item_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Item not found")
+    return row
+```
+
+## Line by line
+
+`database.py` and `models.py` are the shared pieces explained on the
+[index page](/en/docs/pagination). The step-by-step query in `crud.py`
+is the one from [9/b](/en/docs/pagination/filter-sort). Below covers
+what's new.
+
+**`main.py` — rules on each parameter:**
+
+1. `skip: int = Query(0, ge=0, description="Rows to skip")` —
+   **`Query(...)` is `Field(...)` for query parameters.** The first
+   argument is the default, exactly like `= 0` was in 9/b. The rest
+   are the same rules you met on body fields in
+   [Validation](/en/docs/validation): `ge`/`le`/`gt`/`lt` for numbers,
+   `min_length`/`max_length` for strings.
+2. `limit: int = Query(10, ge=1, le=100, ...)` — `le=100` caps the page
+   size. Together with `skip`'s `ge=0`, this closes both holes left
+   open by 9/a: `?limit=1000000` is refused (the response size is
+   bounded again), and so is `?skip=-1` (which MySQL would have turned
+   into a `500`). `ge=1` also refuses `?limit=0`, a page that could
+   never contain anything.
+3. Break a rule and FastAPI answers `422` **before the function runs**,
+   listing **every** broken rule at once, not just the first.
+4. `search: str | None = Query(None, min_length=2, max_length=50, ...)`
+   — a one-letter search matches nearly every row, so it isn't a
+   useful filter, just an expensive one. `max_length=50` stops someone
+   sending a 10 MB search string. The rules only apply when the
+   parameter is actually sent; leaving it out is still fine, because
+   the default is `None`.
+5. `min_price` / `max_price` with `ge=0` — a negative price never
+   makes sense, so it's refused up front.
+6. `description="..."` — every `Query(...)` has one, and it shows up
+   in `/docs` next to that parameter, along with its limits
+   (`maximum: 100`). It costs nothing and saves every client developer
+   a question.
+7. `sort_by` and `order` stay as plain `Literal[...] = "id"` — a
+   whitelist already *is* a rule, so they don't need `Query(...)`.
+
+**A repeatable parameter:**
+
+8. `category: list[str] | None = Query(None, ...)` — a **list type**
+   tells FastAPI the parameter may repeat:
+   `?category=books&category=toys` arrives as `["books", "toys"]`.
+   With a plain `str`, FastAPI would keep only the last value
+   (`toys`).
+9. `Query(...)` is **required** here, not optional decoration: without
+   it, FastAPI would assume a `list` argument is a JSON **body**.
+10. In `crud.py`, `category: list[str] | None` and
+    `ItemModel.category.in_(category)` turn the list into
+    `WHERE category IN ('books', 'toys')`.
+11. `if category:` — not `is not None` like the other filters. An empty
+    list is falsy too, so this also skips the filter for `[]`, because
+    `IN ()` with nothing inside isn't valid SQL on every database.
+
+**`schemas.py` — the same filters as one model:**
+
+12. `class FilterParams(BaseModel)` — eight parameters is a long
+    function signature, and a second route that wanted the same filters
+    would have to copy all of them. Gathering them into one model means
+    they're declared once, reusable by any route, and testable on their
+    own.
+13. The fields use `Field(...)` instead of `Query(...)` because this is
+    an ordinary Pydantic model — but the rules are identical (`ge`,
+    `le`, `min_length`, `description`).
+14. `model_config = {"extra": "forbid"}` — **typos become errors.**
+    Any query parameter that isn't one of the eight fields is a `422`
+    with type `extra_forbidden` instead of being silently ignored.
+
+**`main.py` — the model route:**
+
+15. `filters: Annotated[FilterParams, Query()]` — a Pydantic model
+    argument normally means "read this from the JSON body".
+    `Query()` overrides that: FastAPI fills each field of
+    `FilterParams` from the **query string** instead. This feature
+    arrived in FastAPI 0.115.
+16. **Why `Annotated` here**, when the rest of the repo writes
+    `db: Session = Depends(get_db)`? `Annotated[Type, Query()]` keeps
+    the type and the "where does it come from" marker together, and
+    it's the form FastAPI's own documentation uses for query-parameter
+    models. This is the only place in the repo that uses it; everywhere
+    else keeps the default-argument style. (Current FastAPI also
+    accepts `filters: FilterParams = Query()`, but stick to the
+    documented form for this feature.)
+17. `crud.get_items(db, **filters.model_dump())` — `model_dump()` turns
+    the model into a dict like `{"search": None, "category": [...],
+    ...}`, and `**` unpacks it into keyword arguments. That works
+    because every field name matches a `crud.get_items` argument name
+    exactly.
+18. `/docs` shows the same eight parameters for this route as for
+    `GET /items`, because FastAPI unpacks the model's fields one by
+    one.
+19. **Why `extra: forbid` matters.** `GET /items?limt=5` (a typo) is
+    accepted: FastAPI only looks for the parameters you declared and
+    ignores the rest, so the client gets 10 rows and thinks `limit` is
+    broken. `GET /items/search-model?limt=5` is a `422` pointing
+    straight at the typo. Only a model can do this, because only a
+    model knows the full list of allowed names.
+20. **Route order matters.** `/items/search-model` is declared
+    **before** `/items/{item_id}`. FastAPI tries routes top to bottom,
+    and `{item_id}` would happily match the text `search-model`, then
+    fail with `422` because it isn't a number. Fixed paths go before
+    path parameters that could swallow them.
+21. **What's still missing.** The client gets a page of rows but has
+    no idea how many there are in total, so it can't show "Page 2 of
+    3" or know when to stop clicking Next.
+    [Page envelope](/en/docs/pagination/page-envelope) fixes that.
+
+## Try it
+
+```bash
+curl "http://127.0.0.1:8000/items?category=books&category=toys&limit=20"
+curl "http://127.0.0.1:8000/items/search-model?category=kitchen&min_price=20&sort_by=price"
+curl -i "http://127.0.0.1:8000/items?limit=500&search=a&skip=-1"  # 422, three errors
+curl -i "http://127.0.0.1:8000/items/search-model?limt=5"  # 422, typo caught
+curl "http://127.0.0.1:8000/items?limt=5"  # 200, typo silently ignored
+```
+
+1. All 10 books and toys (`WHERE category IN ('books', 'toys')`).
+2. Kitchen items from 20 up, cheapest first.
+3. `422` with **three** errors, one per broken rule:
+
+```json
+{
+  "detail": [
+    {"type": "string_too_short", "loc": ["query", "search"], "msg": "String should have at least 2 characters", "...": "..."},
+    {"type": "greater_than_equal", "loc": ["query", "skip"], "msg": "Input should be greater than or equal to 0", "...": "..."},
+    {"type": "less_than_equal", "loc": ["query", "limit"], "msg": "Input should be less than or equal to 100", "...": "..."}
+  ]
+}
+```
+
+4. `422`, because `limt` is a typo and `FilterParams` forbids unknown
+   parameters:
+
+```json
+{"detail": [{"type": "extra_forbidden", "loc": ["query", "limt"], "msg": "Extra inputs are not permitted", "input": "5"}]}
+```
+
+5. The same typo on `GET /items` is `200` with the default 10 rows and
+   no hint that `limt` did nothing.
+
+More `422` cases to try: `?limit=0`, `?limit=101`, `?min_price=-5`,
+`?search=` followed by 51 characters, `?sort_by=secret`. Or open
+[http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs) and see every
+parameter's description and limits.
+
+**Postman:** Method `GET`, URL `http://127.0.0.1:8000/items`. In the
+**Params** tab, add two rows both named `category` (values `books` and
+`toys`) to send a repeated parameter.
+
+Next: [Page envelope](/en/docs/pagination/page-envelope) — page numbers
+and a total count.

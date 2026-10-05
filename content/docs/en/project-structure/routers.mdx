@@ -1,0 +1,438 @@
+---
+title: "1. APIRouter"
+description: Moving routes out of main.py into a routers/ package with prefix, tags and include_router, plus a /health check.
+---
+
+<GithubLink path="example/10/a" />
+
+Up to now every route lived in `main.py`. Here the item routes move into
+`routers/items.py`, a health check goes into `routers/health.py`, and
+`main.py` shrinks to "create the app, plug in the routers". The API
+itself is the same full CRUD as
+[Status codes](/en/docs/validation/status-codes), returning `ItemOut`
+rows like [response_model](/en/docs/validation/response-model).
+
+| Route | Description |
+|---|---|
+| `GET /items` | Every row |
+| `GET /items/{item_id}` | One row; `404` if missing |
+| `POST /items` | Insert; `201`, `409` if the name is taken, `422` if the body breaks a rule |
+| `PATCH /items/{item_id}` | Change only the fields sent; `400` if empty or `null`, `404`, `409` |
+| `DELETE /items/{item_id}` | Remove; `204`, or `404` |
+| `GET /health` | Runs `SELECT 1`; `{"status": "ok", "database": "ok"}`, or `503` if the database is unreachable |
+
+## The folder
+
+```text
+10/a/
+├── main.py            # creates the app, include_router(...) — no routes
+├── database.py        # engine, SessionLocal, Base, get_db()
+├── models.py          # ItemModel -> table structured_items
+├── schemas.py         # ItemCreate / ItemPatch / ItemOut
+├── crud.py            # plain database functions, no HTTP
+└── routers/
+    ├── __init__.py    # makes routers/ a package (empty)
+    ├── items.py       # router = APIRouter(prefix="/items", tags=["items"])
+    └── health.py      # GET /health
+```
+
+## The code
+
+**`main.py`** — builds the app and plugs in the routers; no routes left:
+
+```python title="main.py"
+from fastapi import FastAPI
+
+import crud
+from database import Base, SessionLocal, engine
+from routers import health, items
+
+Base.metadata.create_all(bind=engine)
+
+with SessionLocal() as db:
+    crud.seed_items(db)
+
+app = FastAPI()
+
+# main.py no longer holds any routes. It builds the app and plugs in
+# each router. Every route in items.router gets the "/items" prefix and
+# the "items" tag that router was created with.
+app.include_router(items.router)
+app.include_router(health.router)
+```
+
+**`routers/__init__.py`** — an empty file. Its only job is to exist, so
+Python treats `routers/` as a package you can import from.
+
+**`routers/items.py`** — every `/items` route, on an `APIRouter`:
+
+```python title="routers/items.py"
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+
+import crud
+from database import get_db
+from models import ItemModel
+from schemas import ItemCreate, ItemOut, ItemPatch
+
+# prefix: every path below starts with /items, so the decorators only
+#         write the part after it.
+# tags:   groups these routes under an "items" heading in /docs.
+router = APIRouter(prefix="/items", tags=["items"])
+
+NOT_FOUND = {404: {"description": "Item not found"}}
+
+
+def get_item_or_404(db: Session, item_id: int) -> ItemModel:
+    row = crud.get_item(db, item_id)
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Item {item_id} not found")
+    return row
+
+
+def ensure_name_free(db: Session, name: str) -> None:
+    if crud.get_item_by_name(db, name) is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"An item named '{name}' already exists",
+        )
+
+
+# "" + prefix = "/items". (Writing "/" here would give "/items/".)
+@router.get("", response_model=list[ItemOut])
+def list_items(db: Session = Depends(get_db)):
+    return crud.get_items(db)
+
+
+@router.get("/{item_id}", response_model=ItemOut, responses=NOT_FOUND)
+def get_item(item_id: int, db: Session = Depends(get_db)):
+    return get_item_or_404(db, item_id)
+
+
+@router.post("", response_model=ItemOut, status_code=status.HTTP_201_CREATED)
+def create_item(item: ItemCreate, db: Session = Depends(get_db)):
+    ensure_name_free(db, item.name)
+    return crud.create_item(db, item)
+
+
+@router.patch("/{item_id}", response_model=ItemOut, responses=NOT_FOUND)
+def update_item(item_id: int, patch: ItemPatch, db: Session = Depends(get_db)):
+    row = get_item_or_404(db, item_id)
+
+    # exclude_unset=True keeps only the fields the client actually sent.
+    changes = patch.model_dump(exclude_unset=True)
+    if not changes:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Send at least one field to update")
+    if None in changes.values():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Fields cannot be set to null")
+    if "name" in changes and changes["name"] != row.name:
+        ensure_name_free(db, changes["name"])
+
+    return crud.update_item(db, row, changes)
+
+
+@router.delete("/{item_id}", status_code=status.HTTP_204_NO_CONTENT, responses=NOT_FOUND)
+def delete_item(item_id: int, db: Session = Depends(get_db)):
+    row = get_item_or_404(db, item_id)
+    crud.delete_item(db, row)
+```
+
+**`routers/health.py`** — a second router, with a single `/health` route:
+
+```python title="routers/health.py"
+from fastapi import APIRouter, Depends
+from fastapi.responses import JSONResponse
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
+
+from database import get_db
+
+# No prefix: this router's only route lives at /health.
+router = APIRouter(tags=["health"])
+
+
+@router.get("/health")
+def health(db: Session = Depends(get_db)):
+    try:
+        # The cheapest query there is. If it works, the database is up
+        # and the connection settings are right.
+        db.execute(text("SELECT 1"))
+    except SQLAlchemyError:
+        # 503 Service Unavailable — the app is running, but can't do its job.
+        return JSONResponse(status_code=503, content={"status": "error", "database": "unreachable"})
+    return {"status": "ok", "database": "ok"}
+```
+
+**`database.py`** — the same as topic 6:
+
+```python title="database.py"
+import os
+
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+load_dotenv()
+
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
+MYSQL_USER = os.getenv("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
+
+# Set DATABASE_URL directly to override everything above (e.g. to point
+# at SQLite for a quick local test with no MySQL server at all).
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
+)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+```
+
+**`models.py`** — the `structured_items` table:
+
+```python title="models.py"
+from sqlalchemy import Column, Float, Integer, String
+
+from database import Base
+
+
+class ItemModel(Base):
+    __tablename__ = "structured_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(50), nullable=False, unique=True)
+    price = Column(Float, nullable=False)
+    quantity = Column(Integer, nullable=False, default=0)
+```
+
+**`schemas.py`** — `ItemCreate`, `ItemPatch` and `ItemOut` from
+[Validation & Errors](/en/docs/validation):
+
+```python title="schemas.py"
+from typing import Optional
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+class ItemCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=50)
+    price: float = Field(gt=0, le=1_000_000)
+    quantity: int = Field(default=0, ge=0)
+
+    @field_validator("name")
+    @classmethod
+    def name_not_blank(cls, value: str) -> str:
+        value = value.strip()
+        if value == "":
+            raise ValueError("name must not be blank")
+        return value
+
+
+# Same rules as ItemCreate, but every field is optional — PATCH only
+# sends what changed.
+class ItemPatch(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=50)
+    price: Optional[float] = Field(default=None, gt=0, le=1_000_000)
+    quantity: Optional[int] = Field(default=None, ge=0)
+
+    @field_validator("name")
+    @classmethod
+    def name_not_blank(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        value = value.strip()
+        if value == "":
+            raise ValueError("name must not be blank")
+        return value
+
+
+# What goes back out. from_attributes lets response_model read a
+# SQLAlchemy row directly (row.name), as in 8/d.
+class ItemOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    price: float
+    quantity: int
+```
+
+**`crud.py`** — plain database functions, no HTTP:
+
+```python title="crud.py"
+from sqlalchemy.orm import Session
+
+from models import ItemModel
+from schemas import ItemCreate
+
+
+def get_items(db: Session, skip: int = 0, limit: int | None = None) -> list[ItemModel]:
+    query = db.query(ItemModel).order_by(ItemModel.id).offset(skip)
+    if limit is not None:
+        query = query.limit(limit)
+    return query.all()
+
+
+def get_item(db: Session, item_id: int) -> ItemModel | None:
+    return db.get(ItemModel, item_id)
+
+
+def get_item_by_name(db: Session, name: str) -> ItemModel | None:
+    return db.query(ItemModel).filter(ItemModel.name == name).first()
+
+
+def create_item(db: Session, item: ItemCreate) -> ItemModel:
+    row = ItemModel(**item.model_dump())
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def update_item(db: Session, row: ItemModel, changes: dict) -> ItemModel:
+    for field, value in changes.items():
+        setattr(row, field, value)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def delete_item(db: Session, row: ItemModel) -> None:
+    db.delete(row)
+    db.commit()
+
+
+def seed_items(db: Session) -> None:
+    if db.query(ItemModel).count() == 0:
+        db.add_all(
+            [
+                ItemModel(name="Laptop", price=999.99, quantity=5),
+                ItemModel(name="Mouse", price=19.99, quantity=50),
+                ItemModel(name="Keyboard", price=49.5, quantity=20),
+            ]
+        )
+        db.commit()
+```
+
+## Line by line
+
+`database.py`, `models.py`, `schemas.py` and `crud.py` are things you've
+seen before (see the [topic overview](/en/docs/project-structure)). What's
+new on this page is **where the routes live**.
+
+**`routers/__init__.py` — a package:**
+
+1. **An empty file that makes a package.** With it, `routers/` is
+   something Python can import from: `from routers import items` loads
+   `routers/items.py` and gives you the module as `items`.
+
+**`routers/items.py` — an `APIRouter` instead of `app`:**
+
+2. **`router = APIRouter(prefix="/items", tags=["items"])`.** An
+   `APIRouter` is a "mini app": it collects routes with exactly the same
+   decorators you already know (`@router.get`, `@router.post`, ...), but
+   it can't be run by itself. It only does something once it's plugged
+   into a real `FastAPI()` app.
+3. **`prefix` — write `/items` once, not five times.** The decorator
+   path is glued onto the prefix: `""` becomes `/items`, and
+   `"/{item_id}"` becomes `/items/{item_id}`. Renaming the resource later
+   (say, to `/products`) is now a one-line change instead of five.
+4. **Use `""`, not `"/"`, for the collection route.** `"/"` would
+   register `/items/` (with a trailing slash), and a request to `/items`
+   would then get a `307` redirect to the slash version instead of the
+   data. `curl` doesn't follow redirects unless you add `-L`, so you'd
+   just see an empty `307` answer. The empty string avoids all of that.
+5. **`tags` — how `/docs` groups routes.** Every route on this router is
+   tagged `items`, and every route on `routers/health.py` is tagged
+   `health`. Swagger UI draws one collapsible section per tag. Without
+   tags everything lands in one "default" list, which gets hard to read
+   once an API has a few resources.
+6. **The helpers moved with the routes.** `get_item_or_404` and
+   `ensure_name_free` are only used by item routes, so they live in
+   `routers/items.py` right beside them, not in `main.py`. GET, PATCH and
+   DELETE each still have to call `get_item_or_404` by hand;
+   [Dependencies](/en/docs/project-structure/dependencies) turns it into a
+   dependency so they don't.
+7. **`NOT_FOUND = {404: {"description": "Item not found"}}`** — passed as
+   `responses=NOT_FOUND` on the routes that can `404`, so `/docs`
+   documents that response too. Defined once, reused three times.
+8. **The routers import the shared pieces, never `main.py`.** The top of
+   `routers/items.py` imports `crud`, `get_db`, `ItemModel` and the
+   schemas. Nothing ever imports `main`: `main.py` imports the routers,
+   and the routers import `crud`/`database`/`schemas`. Imports point one
+   way only, so there are no circular imports.
+9. **`PATCH` merges, it doesn't replace.** `model_dump(exclude_unset=True)`
+   keeps only the fields the client sent, so `{"price": 899}` leaves
+   `name` and `quantity` alone. Empty bodies and `null` values get a
+   `400`, and a rename to a taken name gets a `409`, same as topic 8.
+
+**`routers/health.py` — a router with no prefix:**
+
+10. **`router = APIRouter(tags=["health"])`** — no `prefix`, so the
+    decorator path `"/health"` is the full path. A router doesn't need a
+    prefix; it can just be a way to keep related routes in their own
+    file.
+11. **Why a health check at all?** It's what a load balancer, Docker or
+    Kubernetes calls every few seconds to ask "is this app usable?".
+    Answering `200` just because Python is running isn't enough.
+12. **`db.execute(text("SELECT 1"))`** — the cheapest query there is. If
+    it works, the database is up and the connection settings are right.
+    `text(...)` marks a raw SQL string for SQLAlchemy.
+13. **`except SQLAlchemyError:` returns `503`.** `503 Service Unavailable`
+    means "the app is running, but can't do its job right now". It
+    returns a `JSONResponse` directly (instead of raising
+    `HTTPException`) so the body keeps the same
+    `{"status": ..., "database": ...}` shape as the success answer.
+
+**`main.py` — no routes left at all:**
+
+14. **`from routers import health, items`** — imports the two router
+    modules from the `routers` package.
+15. **`app.include_router(items.router)`** — copies every route from the
+    router onto the app, applying the router's `prefix` and `tags` on the
+    way. One line per router; adding a new resource later means a new
+    file in `routers/` and one more `include_router` line.
+16. **Why `from routers import items` works.** When you run
+    `uvicorn main:app` from inside `10/a`, that folder is the current
+    directory, and Python searches it for imports. So `routers` (the
+    folder), `crud`, `database`, `models` and `schemas` are all found as
+    top-level names. Run uvicorn from somewhere else and you get
+    `ModuleNotFoundError: No module named 'routers'`. That's why every
+    "Running" block says `cd example/10/a` first.
+
+## Try it
+
+```bash
+curl http://127.0.0.1:8000/items
+curl http://127.0.0.1:8000/items/1
+curl -X POST http://127.0.0.1:8000/items -H "Content-Type: application/json" -d "{\"name\": \"Desk\", \"price\": 120, \"quantity\": 2}"
+curl -X PATCH http://127.0.0.1:8000/items/1 -H "Content-Type: application/json" -d "{\"price\": 899}"
+curl -X DELETE http://127.0.0.1:8000/items/2
+curl http://127.0.0.1:8000/health
+```
+
+Open [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs): the routes
+now sit under two headings, **items** and **health**, one per tag.
+
+**Postman:** Method `PATCH`, URL `http://127.0.0.1:8000/items/1`, Body →
+raw → JSON:
+
+```json
+{"price": 899}
+```
+
+Next: [Dependencies](/en/docs/project-structure/dependencies) — letting
+`Depends` load the row, read pagination and check an API key.

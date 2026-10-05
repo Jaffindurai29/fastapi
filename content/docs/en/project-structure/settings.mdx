@@ -1,0 +1,644 @@
+---
+title: "3. Settings"
+description: One typed, validated Settings class from pydantic-settings instead of os.getenv calls scattered across files.
+---
+
+<GithubLink path="example/10/c" />
+
+Same API as [Dependencies](/en/docs/project-structure/dependencies), but
+every setting the app reads (database connection, API key, app name,
+debug flag, CORS origins) now lives in **one typed `Settings` class** in
+`config.py`, instead of `os.getenv` calls scattered across `database.py`
+and `dependencies.py`. Settings are read from environment variables and
+`.env`, converted to the right types, and validated **once, at startup**.
+
+New in the API: `GET /info`, the `/docs` page title comes from
+`APP_NAME`, and CORS is on (origins from `CORS_ORIGINS`), so a
+[React frontend](/en/docs/mysql-react) like topic 7's can call it.
+
+| Route | Key? | Description |
+|---|---|---|
+| `GET /info` | no | `{"app_name": ..., "debug": ...}` — never secrets |
+| `GET /items?skip=0&limit=10` | no | A page of rows; `422` if `skip`/`limit` are out of range |
+| `GET /items/{item_id}` | no | One row; `404` if missing |
+| `POST /items` | yes | Insert; `201`, `401`, `409`, `422` |
+| `PATCH /items/{item_id}` | yes | Change only the fields sent; `401`, `400`, `404`, `409` |
+| `DELETE /items/{item_id}` | yes | Remove; `204`, `401`, `404` |
+| `GET /health` | no | Runs `SELECT 1`; `200` or `503` |
+
+## The folder
+
+```text
+10/c/
+├── main.py            # app (title/debug from settings), CORS, routers, GET /info
+├── config.py          # class Settings(BaseSettings) + get_settings()
+├── database.py        # engine built from get_settings()
+├── dependencies.py    # get_db, get_item_or_404, Pagination, require_api_key
+├── models.py          # ItemModel -> table structured_items
+├── schemas.py         # ItemCreate / ItemPatch / ItemOut
+├── crud.py
+└── routers/
+    ├── __init__.py
+    ├── items.py
+    └── health.py
+```
+
+## The code
+
+**`config.py`** — new. Every setting the app reads, with a type and a
+default:
+
+```python title="config.py"
+from functools import lru_cache
+
+from pydantic import SecretStr
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+# Every setting the app reads, in one place, with a type and a default.
+# Each field is filled from (highest priority first):
+#   1. a real environment variable with the same name (any case:
+#      APP_NAME, app_name, App_Name all fill app_name)
+#   2. the .env file in the current folder
+#   3. the default written here
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        # .env may hold variables for other tools too; ignore them
+        # instead of refusing to start.
+        extra="ignore",
+    )
+
+    app_name: str = "Structured Items API"
+    debug: bool = False  # DEBUG=true / 1 / yes / on -> True
+
+    mysql_host: str = "127.0.0.1"
+    mysql_port: int = 3306  # MYSQL_PORT=abc fails at startup, not at first query
+    mysql_user: str = "root"
+    # SecretStr prints as '**********' in logs, tracebacks and repr().
+    # Call .get_secret_value() at the one place that needs the real value.
+    mysql_password: SecretStr = SecretStr("")
+    mysql_db: str = "fastapi_learn"
+
+    # Set to override every mysql_* field above at once.
+    database_url: str | None = None
+
+    api_key: SecretStr = SecretStr("dev-api-key")
+
+    # Lists come from the environment as JSON:
+    #   CORS_ORIGINS=["http://localhost:5173","https://example.com"]
+    cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
+
+    @property
+    def sqlalchemy_database_url(self) -> str:
+        if self.database_url:
+            return self.database_url
+        password = self.mysql_password.get_secret_value()
+        return (
+            f"mysql+pymysql://{self.mysql_user}:{password}"
+            f"@{self.mysql_host}:{self.mysql_port}/{self.mysql_db}"
+        )
+
+
+# Reading the environment and .env, then validating, happens once: the
+# first call builds Settings(); every later call returns that same object.
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
+```
+
+**`.env.example`** — lists every setting. Copy it to `.env` only if you
+want to change something; every value already has a default in
+`config.py`:
+
+```bash title=".env.example"
+# Copy this file to .env and adjust the values. Every one of these has a
+# working default in config.py, so creating a .env is optional — the
+# app runs with zero setup if you skip this file entirely.
+#
+# Names are case-insensitive: MYSQL_HOST fills the mysql_host field.
+# A real environment variable beats the same name in this file.
+
+APP_NAME=Structured Items API
+# true/false, 1/0, yes/no, on/off all work.
+DEBUG=false
+
+MYSQL_HOST=127.0.0.1
+MYSQL_PORT=3306
+MYSQL_USER=root
+MYSQL_PASSWORD=
+MYSQL_DB=fastapi_learn
+
+# Set this to override every MYSQL_* value above at once — e.g. point
+# at SQLite for a quick local try with no MySQL server running at all.
+# DATABASE_URL=sqlite:///./test.db
+
+# The key clients must send in the X-API-Key header for POST, PATCH and
+# DELETE. Change it for anything that isn't your own laptop.
+API_KEY=dev-api-key
+
+# A JSON list of browser origins allowed to call the API (CORS).
+CORS_ORIGINS=["http://localhost:5173","http://127.0.0.1:5173"]
+```
+
+**`database.py`** — three lines of setup instead of fifteen:
+
+```python title="database.py"
+from sqlalchemy import create_engine
+from sqlalchemy.orm import declarative_base, sessionmaker
+
+from config import get_settings
+
+# No more os.getenv / load_dotenv here: config.py already read and
+# validated every setting, including .env.
+settings = get_settings()
+
+engine = create_engine(settings.sqlalchemy_database_url, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+```
+
+**`dependencies.py`** — `require_api_key` now reads the key from
+`Settings`:
+
+```python title="dependencies.py"
+import secrets
+
+from fastapi import Depends, Header, HTTPException, Query, status
+from sqlalchemy.orm import Session
+
+import crud
+from config import Settings, get_settings
+from database import SessionLocal
+from models import ItemModel
+
+
+# 1. The dependency every route has used since topic 6.
+#    Code before `yield` runs before the route; the yielded value is
+#    what the route receives as `db`; `finally` runs after the response
+#    is ready, even if the route raised an exception, so the session is
+#    always closed and its connection goes back to the pool.
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+# 2. A dependency that depends on another dependency.
+#    item_id comes from the path (same name as {item_id}); db comes
+#    from get_db. The route gets back a real row, or never runs at all.
+def get_item_or_404(item_id: int, db: Session = Depends(get_db)) -> ItemModel:
+    row = crud.get_item(db, item_id)
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Item {item_id} not found")
+    return row
+
+
+# 3. A class as a dependency. FastAPI calls Pagination(skip=..., limit=...)
+#    with values read from the query string, and the route receives the
+#    instance. Query(...) validates them like any other parameter.
+class Pagination:
+    def __init__(
+        self,
+        skip: int = Query(default=0, ge=0, description="Rows to skip"),
+        limit: int = Query(default=10, ge=1, le=100, description="Max rows to return"),
+    ):
+        self.skip = skip
+        self.limit = limit
+
+
+# 4. A guard. It returns nothing useful; its only job is to raise 401
+#    before the route runs if the X-API-Key header is missing or wrong.
+#    FastAPI turns the parameter name x_api_key into the header name
+#    X-API-Key (underscores become hyphens, case doesn't matter).
+#    The expected key now comes from Settings, itself a dependency, so a
+#    test can swap it with app.dependency_overrides[get_settings].
+def require_api_key(
+    x_api_key: str | None = Header(default=None),
+    settings: Settings = Depends(get_settings),
+) -> None:
+    expected = settings.api_key.get_secret_value()
+    # compare_digest takes the same time whether the first or the last
+    # character is wrong, so the key can't be guessed by timing replies.
+    if x_api_key is None or not secrets.compare_digest(x_api_key, expected):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing or invalid API key")
+```
+
+**`main.py`** — the app's title, debug flag and CORS origins come from
+settings, plus `GET /info`:
+
+```python title="main.py"
+from fastapi import Depends, FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+import crud
+from config import Settings, get_settings
+from database import Base, SessionLocal, engine
+from routers import health, items
+
+Base.metadata.create_all(bind=engine)
+
+with SessionLocal() as db:
+    crud.seed_items(db)
+
+settings = get_settings()
+
+# The title shows at the top of /docs. debug=True makes unhandled errors
+# return a traceback page instead of a bare "Internal Server Error".
+app = FastAPI(title=settings.app_name, debug=settings.debug)
+
+# Which browser origins may call this API now comes from settings, so
+# production can allow its real domain without a code change.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(items.router)
+app.include_router(health.router)
+
+
+# Safe, non-secret facts about the running app. Never return the
+# password, the API key or the full database URL from an endpoint.
+@app.get("/info", tags=["meta"])
+def info(settings: Settings = Depends(get_settings)):
+    return {"app_name": settings.app_name, "debug": settings.debug}
+```
+
+**`routers/items.py`** — unchanged from 10/b:
+
+```python title="routers/items.py"
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+
+import crud
+from dependencies import Pagination, get_db, get_item_or_404, require_api_key
+from models import ItemModel
+from schemas import ItemCreate, ItemOut, ItemPatch
+
+router = APIRouter(prefix="/items", tags=["items"])
+
+NOT_FOUND = {404: {"description": "Item not found"}}
+
+# Write routes need a valid X-API-Key header. require_api_key returns
+# nothing, so it goes in dependencies=[...] instead of a parameter.
+LOCKED = [Depends(require_api_key)]
+
+
+def ensure_name_free(db: Session, name: str) -> None:
+    if crud.get_item_by_name(db, name) is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"An item named '{name}' already exists",
+        )
+
+
+@router.get("", response_model=list[ItemOut])
+def list_items(page: Pagination = Depends(Pagination), db: Session = Depends(get_db)):
+    return crud.get_items(db, skip=page.skip, limit=page.limit)
+
+
+# No 404 code here any more: if this function runs, `row` exists.
+@router.get("/{item_id}", response_model=ItemOut, responses=NOT_FOUND)
+def get_item(row: ItemModel = Depends(get_item_or_404)):
+    return row
+
+
+@router.post("", response_model=ItemOut, status_code=status.HTTP_201_CREATED, dependencies=LOCKED)
+def create_item(item: ItemCreate, db: Session = Depends(get_db)):
+    ensure_name_free(db, item.name)
+    return crud.create_item(db, item)
+
+
+# Both get_item_or_404 and this route ask for get_db. FastAPI calls
+# get_db ONCE for this request and hands the same session to both.
+@router.patch("/{item_id}", response_model=ItemOut, responses=NOT_FOUND, dependencies=LOCKED)
+def update_item(patch: ItemPatch, row: ItemModel = Depends(get_item_or_404), db: Session = Depends(get_db)):
+    # exclude_unset=True keeps only the fields the client actually sent.
+    changes = patch.model_dump(exclude_unset=True)
+    if not changes:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Send at least one field to update")
+    if None in changes.values():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Fields cannot be set to null")
+    if "name" in changes and changes["name"] != row.name:
+        ensure_name_free(db, changes["name"])
+
+    return crud.update_item(db, row, changes)
+
+
+@router.delete("/{item_id}", status_code=status.HTTP_204_NO_CONTENT, responses=NOT_FOUND, dependencies=LOCKED)
+def delete_item(row: ItemModel = Depends(get_item_or_404), db: Session = Depends(get_db)):
+    crud.delete_item(db, row)
+```
+
+**`routers/health.py`** — unchanged from 10/b:
+
+```python title="routers/health.py"
+from fastapi import APIRouter, Depends
+from fastapi.responses import JSONResponse
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
+
+from dependencies import get_db
+
+# No prefix: this router's only route lives at /health.
+router = APIRouter(tags=["health"])
+
+
+@router.get("/health")
+def health(db: Session = Depends(get_db)):
+    try:
+        # The cheapest query there is. If it works, the database is up
+        # and the connection settings are right.
+        db.execute(text("SELECT 1"))
+    except SQLAlchemyError:
+        # 503 Service Unavailable — the app is running, but can't do its job.
+        return JSONResponse(status_code=503, content={"status": "error", "database": "unreachable"})
+    return {"status": "ok", "database": "ok"}
+```
+
+**`models.py`** — unchanged:
+
+```python title="models.py"
+from sqlalchemy import Column, Float, Integer, String
+
+from database import Base
+
+
+class ItemModel(Base):
+    __tablename__ = "structured_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(50), nullable=False, unique=True)
+    price = Column(Float, nullable=False)
+    quantity = Column(Integer, nullable=False, default=0)
+```
+
+**`schemas.py`** — unchanged:
+
+```python title="schemas.py"
+from typing import Optional
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+class ItemCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=50)
+    price: float = Field(gt=0, le=1_000_000)
+    quantity: int = Field(default=0, ge=0)
+
+    @field_validator("name")
+    @classmethod
+    def name_not_blank(cls, value: str) -> str:
+        value = value.strip()
+        if value == "":
+            raise ValueError("name must not be blank")
+        return value
+
+
+# Same rules as ItemCreate, but every field is optional — PATCH only
+# sends what changed.
+class ItemPatch(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=50)
+    price: Optional[float] = Field(default=None, gt=0, le=1_000_000)
+    quantity: Optional[int] = Field(default=None, ge=0)
+
+    @field_validator("name")
+    @classmethod
+    def name_not_blank(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        value = value.strip()
+        if value == "":
+            raise ValueError("name must not be blank")
+        return value
+
+
+# What goes back out. from_attributes lets response_model read a
+# SQLAlchemy row directly (row.name), as in 8/d.
+class ItemOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    price: float
+    quantity: int
+```
+
+**`crud.py`** — unchanged:
+
+```python title="crud.py"
+from sqlalchemy.orm import Session
+
+from models import ItemModel
+from schemas import ItemCreate
+
+
+def get_items(db: Session, skip: int = 0, limit: int | None = None) -> list[ItemModel]:
+    query = db.query(ItemModel).order_by(ItemModel.id).offset(skip)
+    if limit is not None:
+        query = query.limit(limit)
+    return query.all()
+
+
+def get_item(db: Session, item_id: int) -> ItemModel | None:
+    return db.get(ItemModel, item_id)
+
+
+def get_item_by_name(db: Session, name: str) -> ItemModel | None:
+    return db.query(ItemModel).filter(ItemModel.name == name).first()
+
+
+def create_item(db: Session, item: ItemCreate) -> ItemModel:
+    row = ItemModel(**item.model_dump())
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def update_item(db: Session, row: ItemModel, changes: dict) -> ItemModel:
+    for field, value in changes.items():
+        setattr(row, field, value)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def delete_item(db: Session, row: ItemModel) -> None:
+    db.delete(row)
+    db.commit()
+
+
+def seed_items(db: Session) -> None:
+    if db.query(ItemModel).count() == 0:
+        db.add_all(
+            [
+                ItemModel(name="Laptop", price=999.99, quantity=5),
+                ItemModel(name="Mouse", price=19.99, quantity=50),
+                ItemModel(name="Keyboard", price=49.5, quantity=20),
+            ]
+        )
+        db.commit()
+```
+
+## Line by line
+
+`models.py`, `schemas.py`, `crud.py` and both routers are unchanged from
+[Dependencies](/en/docs/project-structure/dependencies). What changes is
+**where configuration comes from**: `config.py` is new, and
+`database.py`, `dependencies.py` and `main.py` all read from it.
+
+**The problem with `os.getenv`:**
+
+1. Until now settings were read like
+   `MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")`, in whichever file
+   needed them. That has three problems:
+   - Everything is a **string**. `os.getenv("DEBUG")` is `"false"`, and
+     `"false"` is truthy in Python, so `if DEBUG:` would be true.
+   - A typo (`MYSQL_PORT=33o6`) isn't noticed until the first database
+     query fails, maybe minutes after startup.
+   - To find out what the app can be configured with, you'd have to
+     grep every file for `getenv`.
+
+**`config.py` — one class lists every setting:**
+
+2. **`class Settings(BaseSettings)`** — `BaseSettings` (from the
+   `pydantic-settings` package) is a Pydantic model that fills its
+   fields from the environment instead of from a request body. Same
+   types, same validation as the `ItemCreate` schemas you already know.
+3. **`env_file=".env"`** — also read the `.env` file in the current
+   folder. No `load_dotenv()` call needed any more.
+4. **`extra="ignore"`** — `.env` may hold variables for other tools too;
+   ignore them instead of refusing to start.
+5. **Where each field's value comes from**, highest priority first:
+   1. a real **environment variable** with the same name. Matching is
+      case-insensitive: `MYSQL_HOST`, `mysql_host` and `Mysql_Host` all
+      fill `mysql_host`;
+   2. the **`.env` file**;
+   3. the **default** written in the class.
+
+   So `.env` is for your machine's everyday values, and an environment
+   variable still beats it for a one-off run. That's why
+   `DATABASE_URL=sqlite:///./test.db uvicorn main:app` keeps working
+   exactly as it did in topic 6.
+6. **Type conversion happens for you:**
+
+   | Environment | Field | Value in Python |
+   |---|---|---|
+   | `DEBUG=true` (or `1`, `yes`, `on`) | `debug: bool` | `True` |
+   | `MYSQL_PORT=3307` | `mysql_port: int` | `3307` |
+   | `MYSQL_PORT=abc` | `mysql_port: int` | **startup fails** with a `ValidationError` naming `mysql_port` |
+   | `CORS_ORIGINS=["http://localhost:5173","https://shop.example"]` | `cors_origins: list[str]` | a real list |
+
+   Lists (and dicts) are written as **JSON** in the environment, with
+   double quotes around each string.
+7. **`SecretStr` for passwords and keys.** `mysql_password` and
+   `api_key` are `SecretStr`, which prints as `**********` in logs,
+   tracebacks and `repr()`. If `settings` ever ends up in a log line or
+   an error page, the password stays hidden. To actually use it you have
+   to write `.get_secret_value()`, which makes every place that touches
+   a secret easy to find.
+8. **`database_url: str | None = None`** — set `DATABASE_URL` to
+   override every `mysql_*` field at once.
+9. **`sqlalchemy_database_url` is a `@property`.** Same rule as topic
+   6's `database.py`: if `DATABASE_URL` is set, use it as-is; otherwise
+   build a MySQL URL from the parts. A property is computed when it's
+   read, so it's never stale. This is the one place the real password
+   is unwrapped with `.get_secret_value()`.
+10. **`get_settings()` with `@lru_cache`** — `Settings()` reads the
+    environment, parses `.env` and validates everything. `@lru_cache`
+    remembers the result of the first call, so every later
+    `get_settings()` returns the **same object** without re-reading
+    anything. Changing `.env` therefore needs a restart (`--reload`
+    restarts when a `.py` file changes, not when `.env` does).
+
+**`database.py`:**
+
+11. **`settings = get_settings()`**, then
+    `create_engine(settings.sqlalchemy_database_url, pool_pre_ping=True)`.
+    No more `os.getenv` or `load_dotenv` here: `config.py` already read
+    and validated every setting, including `.env`.
+
+**`dependencies.py` — settings as a dependency:**
+
+12. **`settings: Settings = Depends(get_settings)`** in
+    `require_api_key`. `get_settings` is an ordinary function, so
+    `Depends(get_settings)` works like any other dependency from
+    [Dependencies](/en/docs/project-structure/dependencies).
+13. **`expected = settings.api_key.get_secret_value()`** — unwraps the
+    `SecretStr` at the one place that needs the real key.
+14. **Why `Depends` instead of calling it at the top of the file?** A
+    test can swap in different settings without touching
+    `os.environ`:
+    `app.dependency_overrides[get_settings] = lambda: Settings(api_key="test-key")`.
+
+**`main.py` — the app itself is configured from settings:**
+
+15. **`FastAPI(title=settings.app_name, debug=settings.debug)`** — the
+    title shows at the top of `/docs`. `debug=True` makes unhandled
+    errors return a traceback page instead of a bare
+    "Internal Server Error". Keep `DEBUG=false` anywhere real: a
+    traceback page tells an attacker a lot about your code.
+16. **`allow_origins=settings.cors_origins`** — CORS works exactly as in
+    [MySQL + React](/en/docs/mysql-react); only the list of allowed
+    origins moved out of the code, so production can allow its real
+    domain without a code change.
+17. **`GET /info` — show settings, never secrets.** It returns only
+    harmless fields, picked one by one: `app_name` and `debug`. Handy
+    for checking which configuration a running server actually picked
+    up. Never `return settings` from a route.
+
+**Why this beats `os.getenv`, in short:**
+
+18. **One place:** `config.py` is the full list of everything the app
+    can be configured with, with defaults. **Typed:**
+    `settings.mysql_port` is an `int`, `settings.debug` is a real
+    `bool`, and your editor autocompletes them. **Validated at
+    startup:** a bad value stops the app immediately with a clear error.
+    **Secrets are masked** with `SecretStr`. **Testable:** override
+    `get_settings` instead of patching `os.environ`.
+
+## Try it
+
+```bash
+curl http://127.0.0.1:8000/info
+curl "http://127.0.0.1:8000/items?limit=2"
+curl -X POST http://127.0.0.1:8000/items -H "X-API-Key: dev-api-key" -H "Content-Type: application/json" -d "{\"name\": \"Desk\", \"price\": 120, \"quantity\": 2}"
+curl -X DELETE http://127.0.0.1:8000/items/2 -H "X-API-Key: dev-api-key"
+```
+
+With the defaults, `/info` answers:
+
+```json
+{"app_name": "Structured Items API", "debug": false}
+```
+
+Change a setting without touching code:
+
+```bash
+APP_NAME="Shop API" DEBUG=true uvicorn main:app --reload
+```
+
+```powershell
+# Windows (PowerShell)
+$env:APP_NAME="Shop API"; $env:DEBUG="true"; uvicorn main:app --reload
+```
+
+Then `/info` shows the new name, and so does the title of `/docs`. Set
+`API_KEY=something-else` and restart: the old `dev-api-key` now gets
+`401`. Set `MYSQL_PORT=abc` and restart: the app refuses to start, with
+a validation error naming `mysql_port`.
+
+**Postman:** Method `GET`, URL `http://127.0.0.1:8000/info`, no Headers
+or Body. Write routes need the `X-API-Key` header, as on the
+[Dependencies](/en/docs/project-structure/dependencies) page.
+
+Next: [async def vs def](/en/docs/project-structure/async-vs-sync) — why
+every database route here is plain `def`.

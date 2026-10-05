@@ -1,0 +1,295 @@
+---
+title: "4. response_model"
+description: Returning ORM rows directly and letting response_model decide which fields leave the server, plus 201 and 204 status codes.
+---
+
+<GithubLink path="example/8/d" />
+
+So far every route built its response by hand
+(`{"id": row.id, "name": row.name, ...}`). Here the routes return the
+database row **directly**, and `response_model=ItemOut` decides which
+fields leave the server. The table has an internal `supplier_cost`
+column that the client can *send* but never *see*. Uses its own table,
+`response_model_items`.
+
+| Route | Status | Response |
+|---|---|---|
+| `GET /items` | `200` | `list[ItemOut]` |
+| `GET /items/{item_id}` | `200`, `404` | `ItemOut` |
+| `POST /items` | `201 Created` | `ItemOut` |
+| `DELETE /items/{item_id}` | `204 No Content`, `404` | no body |
+
+## The code
+
+**`database.py`** — same as topic 6:
+
+```python title="database.py"
+import os
+
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+load_dotenv()
+
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
+MYSQL_USER = os.getenv("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
+
+# Set DATABASE_URL directly to override everything above (e.g. to point
+# at SQLite for a quick local test with no MySQL server at all).
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
+)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+```
+
+**`models.py`** — the `response_model_items` table, with two new columns:
+
+```python title="models.py"
+from sqlalchemy import Column, DateTime, Float, Integer, String, func
+
+from database import Base
+
+
+class ItemModel(Base):
+    __tablename__ = "response_model_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(50), nullable=False, unique=True)
+    price = Column(Float, nullable=False)
+    quantity = Column(Integer, nullable=False, default=0)
+    # Internal: what we paid the supplier. Must never reach the client.
+    supplier_cost = Column(Float, nullable=False, default=0)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+```
+
+**`schemas.py`** — separate models for what comes in and what goes out:
+
+```python title="schemas.py"
+from datetime import datetime
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+# What the client sends. supplier_cost goes IN...
+class ItemCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=50)
+    price: float = Field(gt=0)
+    quantity: int = Field(default=0, ge=0)
+    supplier_cost: float = Field(default=0, ge=0)
+
+
+# ...but never comes back OUT. response_model=ItemOut drops every field
+# that isn't listed here, even if the route returns the full database row.
+class ItemOut(BaseModel):
+    # Lets Pydantic read attributes off a SQLAlchemy object (row.name),
+    # not just keys out of a dict (row["name"]).
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    price: float
+    quantity: int
+    created_at: datetime
+```
+
+**`crud.py`** — plain functions that talk to the database:
+
+```python title="crud.py"
+from sqlalchemy.orm import Session
+
+from models import ItemModel
+from schemas import ItemCreate
+
+
+def get_items(db: Session) -> list[ItemModel]:
+    return db.query(ItemModel).order_by(ItemModel.id).all()
+
+
+def get_item(db: Session, item_id: int) -> ItemModel | None:
+    return db.get(ItemModel, item_id)
+
+
+def create_item(db: Session, item: ItemCreate) -> ItemModel:
+    row = ItemModel(**item.model_dump())
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def delete_item(db: Session, row: ItemModel) -> None:
+    db.delete(row)
+    db.commit()
+
+
+def seed_items(db: Session) -> None:
+    if db.query(ItemModel).count() == 0:
+        db.add_all(
+            [
+                ItemModel(name="Laptop", price=999.99, quantity=5, supplier_cost=700),
+                ItemModel(name="Mouse", price=19.99, quantity=50, supplier_cost=6.5),
+            ]
+        )
+        db.commit()
+```
+
+**`main.py`** — routes that return ORM rows directly:
+
+```python title="main.py"
+from fastapi import Depends, FastAPI, HTTPException, status
+from sqlalchemy.orm import Session
+
+import crud
+from database import Base, SessionLocal, engine, get_db
+from schemas import ItemCreate, ItemOut
+
+Base.metadata.create_all(bind=engine)
+
+with SessionLocal() as db:
+    crud.seed_items(db)
+
+app = FastAPI()
+
+# Shown in /docs next to each route that can return it.
+NOT_FOUND = {404: {"description": "Item not found"}}
+
+
+# No more hand-built dicts: return the ORM rows directly and let
+# response_model decide which fields go out.
+@app.get("/items", response_model=list[ItemOut])
+def list_items(db: Session = Depends(get_db)):
+    return crud.get_items(db)
+
+
+@app.get("/items/{item_id}", response_model=ItemOut, responses=NOT_FOUND)
+def get_item(item_id: int, db: Session = Depends(get_db)):
+    row = crud.get_item(db, item_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Item not found")
+    return row  # still has supplier_cost — ItemOut filters it out
+
+
+@app.post("/items", response_model=ItemOut, status_code=status.HTTP_201_CREATED)
+def create_item(item: ItemCreate, db: Session = Depends(get_db)):
+    return crud.create_item(db, item)
+
+
+@app.delete("/items/{item_id}", status_code=status.HTTP_204_NO_CONTENT, responses=NOT_FOUND)
+def delete_item(item_id: int, db: Session = Depends(get_db)):
+    row = crud.get_item(db, item_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Item not found")
+    crud.delete_item(db, row)
+```
+
+## Line by line
+
+`database.py` is the same as topic 6. The point of this lesson is the
+split between what comes **in** (`ItemCreate`) and what goes **out**
+(`ItemOut`).
+
+**`models.py`:**
+
+1. **`__tablename__ = "response_model_items"`** — a separate table from
+   8/a–c, because the shape is different. Reusing `validation_items`
+   would mean altering an existing table, which `create_all` won't do.
+2. **`supplier_cost = Column(Float, nullable=False, default=0)`** —
+   internal data: what we paid the supplier. An admin types it in, but a
+   customer must never see it.
+3. **`created_at = Column(DateTime, nullable=False, server_default=func.now())`**
+   — `server_default` means the **database** fills this in at insert
+   time (`func.now()` becomes SQL's `NOW()`), not Python. The client
+   never sends it.
+
+**`schemas.py`:**
+
+4. **`ItemCreate` — what the client sends.** It includes
+   `supplier_cost` (with `ge=0` and a default of `0`), because that's
+   input. It does *not* include `id` or `created_at`, which the server
+   decides. (There's no blank-name validator in this lesson, to keep the
+   focus on output.)
+5. **`ItemOut` — what the client gets back.** It leaves `supplier_cost`
+   out, and adds `id` and `created_at`, which the client never sends.
+   Two models for one table is normal: input and output are different
+   contracts.
+6. **`model_config = ConfigDict(from_attributes=True)`** — lets Pydantic
+   read `row.name` off a SQLAlchemy object. Without it, Pydantic only
+   knows how to read dicts (`row["name"]`), and returning a row from a
+   route fails validation with a `500`.
+
+**`crud.py`:**
+
+7. **`ItemModel(**item.model_dump())`** — `model_dump()` turns the
+   validated body into a dict, and `**` unpacks it as keyword arguments:
+   `ItemModel(name=..., price=..., quantity=..., supplier_cost=...)`.
+   This works because the field names in `ItemCreate` match the column
+   names exactly — add a field to both, and `create_item` needs no
+   change.
+8. `get_item` returns `None` on a miss (the 8/b style), and `delete_item`
+   takes the already-fetched row. `seed_items` gives the Laptop and the
+   Mouse a `supplier_cost` too, so you can see it being hidden.
+
+**`main.py`:**
+
+9. **`response_model=ItemOut` filters the output.** `get_item` returns
+   the *full* row — it still has `supplier_cost`, as the comment says.
+   FastAPI passes it through `ItemOut`, keeps only the listed fields,
+   and checks their types before sending. That's why this is safer than
+   hand-built dicts: if you add another secret column to the table
+   later, it **can't** leak by accident, because it's not in `ItemOut`.
+   With dicts, you'd have to remember to leave it out in every single
+   route.
+10. **Lists work the same way:** `response_model=list[ItemOut]` on
+    `GET /items` filters every row in the list.
+11. **`status_code=` on the decorator sets the success code:**
+    `status.HTTP_201_CREATED` for `POST`, because something new now
+    exists, and `status.HTTP_204_NO_CONTENT` for `DELETE`, because it's
+    done and there's nothing to send back (the function returns
+    nothing). Both also show up correctly in `/docs`.
+12. **`responses=NOT_FOUND` is documentation only.** `NOT_FOUND` is the
+    dict `{404: {"description": "Item not found"}}` defined at the top.
+    It doesn't change behaviour — the `raise HTTPException(...)` does
+    that. It tells `/docs`, and anyone generating a client from the
+    OpenAPI schema, that this route can also answer `404`.
+
+From here on, every topic returns ORM rows with a `response_model`
+instead of building dicts by hand.
+
+## Try it
+
+```bash
+curl -i -X POST http://127.0.0.1:8000/items -H "Content-Type: application/json" -d "{\"name\": \"Desk\", \"price\": 120, \"supplier_cost\": 80}"  # 201
+curl http://127.0.0.1:8000/items/1
+curl -i -X DELETE http://127.0.0.1:8000/items/3  # 204, use the id from the POST
+```
+
+The response has `id`, `name`, `price`, `quantity` and `created_at`,
+but no `supplier_cost`, even though it was just stored:
+
+```json
+{"id": 3, "name": "Desk", "price": 120.0, "quantity": 0, "created_at": "2026-10-05T10:18:17"}
+```
+
+Open [/docs](http://127.0.0.1:8000/docs) and you'll see each route's
+exact response schema, plus the `404` response declared with
+`responses=`.
+
+Back to the [Validation & Errors overview](/en/docs/validation).
+
+Next topic: [Pagination & Filtering](/en/docs/pagination) — paging, searching and sorting a real table.

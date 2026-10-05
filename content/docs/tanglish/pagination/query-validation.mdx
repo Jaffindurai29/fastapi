@@ -1,0 +1,454 @@
+---
+title: "3. Query(...) validation"
+description: Query(...) vachi ovoru query parameter-kum rules, repeat aagra ?category=, mattrum same filters-ah oru Pydantic model-a.
+---
+
+<GithubLink path="example/9/c" />
+
+[Search, filter, sort](/tanglish/docs/pagination/filter-sort)-la
+paartha same filters, ippo rules-oda. `limit` 100-la cap aagudhu,
+`skip` negative-a irukka koodadhu, `search`-ku 2–50 characters venum,
+prices negative-a irukka koodadhu, mattrum `category`-ah repeat panni
+ore nerathula pala categories match pannalaam. Innoru route exact same
+filters-ah oru Pydantic model-a vaangudhu.
+
+| Route | Description |
+|---|---|
+| `GET /items` | Filters thani thani `Query(...)` parameters-a |
+| `GET /items/search-model` | Same filters oru `FilterParams` model-a; theriyaadha parameters `422` |
+| `GET /items/{item_id}` | Oru row; illana `404` |
+
+| Query parameter | Rule | Default |
+|---|---|---|
+| `search` | 2–50 characters | apply aagadhu |
+| `category` | Repeat pannalaam: `?category=books&category=toys` | apply aagadhu |
+| `min_price` / `max_price` | `>= 0` | apply aagadhu |
+| `sort_by` | `id`, `name`, `price`, `created_at` | `id` |
+| `order` | `asc`, `desc` | `asc` |
+| `skip` | `>= 0` | `0` |
+| `limit` | `1`–`100` | `10` |
+
+## Code
+
+**`database.py`** — env vars, `engine`/`SessionLocal`/`Base`, mattrum
+`get_db()` dependency:
+
+```python title="database.py"
+import os
+
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+load_dotenv()
+
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
+MYSQL_USER = os.getenv("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
+
+# Set DATABASE_URL directly to override everything above (e.g. to point
+# at SQLite for a quick local test with no MySQL server at all).
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
+)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+```
+
+**`models.py`** — `catalog_items` table:
+
+```python title="models.py"
+from sqlalchemy import Column, DateTime, Float, Integer, String, func
+
+from database import Base
+
+
+# 9/a–9/d all use this exact model, so they can share one table.
+class ItemModel(Base):
+    __tablename__ = "catalog_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(100), nullable=False)
+    category = Column(String(50), nullable=False)
+    price = Column(Float, nullable=False)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+```
+
+**`schemas.py`** — `ItemOut`, kooda pudhu `FilterParams` model:
+
+```python title="schemas.py"
+from datetime import datetime
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class ItemOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    category: str
+    price: float
+    created_at: datetime
+
+
+# The same filters as GET /items, gathered into one model. Field(...)
+# takes the same rules (ge, le, min_length, description) as Query(...).
+class FilterParams(BaseModel):
+    # Unknown query parameters (a typo like ?limt=5) become a 422
+    # instead of being silently ignored.
+    model_config = {"extra": "forbid"}
+
+    search: str | None = Field(
+        None, min_length=2, max_length=50, description="Case-insensitive 'name contains'"
+    )
+    category: list[str] | None = Field(None, description="Repeat to match several categories")
+    min_price: float | None = Field(None, ge=0, description="Lowest price, inclusive")
+    max_price: float | None = Field(None, ge=0, description="Highest price, inclusive")
+    sort_by: Literal["id", "name", "price", "created_at"] = "id"
+    order: Literal["asc", "desc"] = "asc"
+    skip: int = Field(0, ge=0, description="Rows to skip")
+    limit: int = Field(10, ge=1, le=100, description="Rows to return (max 100)")
+```
+
+**`crud.py`** — 9/b query, ippo `category` oru list:
+
+```python title="crud.py"
+from typing import Literal
+
+from sqlalchemy.orm import Session
+
+from models import ItemModel
+
+SORT_COLUMNS = {
+    "id": ItemModel.id,
+    "name": ItemModel.name,
+    "price": ItemModel.price,
+    "created_at": ItemModel.created_at,
+}
+
+
+# Same step-by-step query as 9/b. The only change: category is now a
+# LIST, so one request can ask for several categories at once.
+def get_items(
+    db: Session,
+    skip: int,
+    limit: int,
+    search: str | None,
+    category: list[str] | None,
+    min_price: float | None,
+    max_price: float | None,
+    sort_by: Literal["id", "name", "price", "created_at"],
+    order: Literal["asc", "desc"],
+) -> list[ItemModel]:
+    query = db.query(ItemModel)
+
+    if search is not None:
+        query = query.filter(ItemModel.name.ilike(f"%{search}%"))
+    if category:
+        # ?category=books&category=toys -> WHERE category IN ('books', 'toys')
+        query = query.filter(ItemModel.category.in_(category))
+    if min_price is not None:
+        query = query.filter(ItemModel.price >= min_price)
+    if max_price is not None:
+        query = query.filter(ItemModel.price <= max_price)
+
+    column = SORT_COLUMNS[sort_by]
+    column = column.desc() if order == "desc" else column.asc()
+    query = query.order_by(column, ItemModel.id)
+
+    return query.offset(skip).limit(limit).all()
+
+
+def get_item(db: Session, item_id: int) -> ItemModel | None:
+    return db.get(ItemModel, item_id)
+
+
+# 25 rows across 5 categories, so paging and filtering have something to do.
+SEED = [
+    ("Python Crash Course", "books", 29.99),
+    ("Clean Code", "books", 34.5),
+    ("The Pragmatic Programmer", "books", 42.0),
+    ("Dune", "books", 9.99),
+    ("Cooking for Engineers", "books", 18.75),
+    ("Laptop", "electronics", 999.99),
+    ("Mouse", "electronics", 19.99),
+    ("Mechanical Keyboard", "electronics", 89.0),
+    ("USB-C Cable", "electronics", 7.49),
+    ("27in Monitor", "electronics", 249.0),
+    ("Noise-Cancelling Headphones", "electronics", 199.95),
+    ("Building Blocks Set", "toys", 49.99),
+    ("Rubber Duck", "toys", 3.5),
+    ("Remote Control Car", "toys", 64.0),
+    ("Jigsaw Puzzle 1000pc", "toys", 15.0),
+    ("Plush Bear", "toys", 12.25),
+    ("Chef's Knife", "kitchen", 79.0),
+    ("Cast Iron Pan", "kitchen", 45.5),
+    ("Coffee Grinder", "kitchen", 59.99),
+    ("Measuring Cups", "kitchen", 8.99),
+    ("Garden Hose", "garden", 27.0),
+    ("Pruning Shears", "garden", 22.5),
+    ("Tomato Seeds", "garden", 2.99),
+    ("Watering Can", "garden", 14.0),
+    ("Lawn Mower", "garden", 329.0),
+]
+
+
+def seed_items(db: Session) -> None:
+    if db.query(ItemModel).count() == 0:
+        db.add_all(
+            [ItemModel(name=n, category=c, price=p) for n, c, p in SEED]
+        )
+        db.commit()
+```
+
+**`main.py`** — `Query(...)` rules, mattrum model vaangura innoru
+route:
+
+```python title="main.py"
+from typing import Annotated, Literal
+
+from fastapi import Depends, FastAPI, HTTPException, Query
+from sqlalchemy.orm import Session
+
+import crud
+from database import Base, SessionLocal, engine, get_db
+from schemas import FilterParams, ItemOut
+
+Base.metadata.create_all(bind=engine)
+
+with SessionLocal() as db:
+    crud.seed_items(db)
+
+app = FastAPI()
+
+NOT_FOUND = {404: {"description": "Item not found"}}
+
+
+# Same parameters as 9/b, now wrapped in Query(...) to add rules.
+# Break a rule and FastAPI answers 422 before this function runs.
+# description= shows up next to each parameter in /docs.
+@app.get("/items", response_model=list[ItemOut])
+def list_items(
+    search: str | None = Query(
+        None, min_length=2, max_length=50, description="Case-insensitive 'name contains'"
+    ),
+    # A list type tells FastAPI the parameter may repeat:
+    # ?category=books&category=toys -> ["books", "toys"]
+    category: list[str] | None = Query(None, description="Repeat to match several categories"),
+    min_price: float | None = Query(None, ge=0, description="Lowest price, inclusive"),
+    max_price: float | None = Query(None, ge=0, description="Highest price, inclusive"),
+    sort_by: Literal["id", "name", "price", "created_at"] = "id",
+    order: Literal["asc", "desc"] = "asc",
+    skip: int = Query(0, ge=0, description="Rows to skip"),
+    # le=100 caps the page size, so nobody can ask for a million rows.
+    limit: int = Query(10, ge=1, le=100, description="Rows to return (max 100)"),
+    db: Session = Depends(get_db),
+):
+    return crud.get_items(
+        db,
+        skip=skip,
+        limit=limit,
+        search=search,
+        category=category,
+        min_price=min_price,
+        max_price=max_price,
+        sort_by=sort_by,
+        order=order,
+    )
+
+
+# The same filters, declared once as a Pydantic model. This route must
+# come BEFORE /items/{item_id}, or "search-model" would be read as an
+# item_id (and fail with 422, since it isn't a number).
+@app.get("/items/search-model", response_model=list[ItemOut])
+def search_items(
+    # The one place this repo uses Annotated: it's how FastAPI documents
+    # query-parameter models. Query() says "fill this model's fields from
+    # the query string", not from a JSON body.
+    filters: Annotated[FilterParams, Query()],
+    db: Session = Depends(get_db),
+):
+    # Field names match crud.get_items' arguments, so ** unpacks them.
+    return crud.get_items(db, **filters.model_dump())
+
+
+@app.get("/items/{item_id}", response_model=ItemOut, responses=NOT_FOUND)
+def get_item(item_id: int, db: Session = Depends(get_db)):
+    row = crud.get_item(db, item_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Item not found")
+    return row
+```
+
+## Line by line
+
+`database.py` mattrum `models.py` share aagra pieces, adha
+[index page](/tanglish/docs/pagination)-la explain pannirukkom.
+`crud.py`-la irukra step-by-step query
+[9/b](/tanglish/docs/pagination/filter-sort)-la paarthadhu dhan. Keezha
+pudhusa irukradha paarpom.
+
+**`main.py` — ovoru parameter-kum rules:**
+
+1. `skip: int = Query(0, ge=0, description="Rows to skip")` —
+   **query parameters-ku `Query(...)` na body-ku `Field(...)` maadhiri.**
+   First argument default, 9/b-la `= 0` maadhiri-ye. Matha ellam
+   [Validation](/tanglish/docs/validation)-la body fields-la paartha
+   same rules: numbers-ku `ge`/`le`/`gt`/`lt`, strings-ku
+   `min_length`/`max_length`.
+2. `limit: int = Query(10, ge=1, le=100, ...)` — `le=100` page size-ah
+   cap pannudhu. `skip`-oda `ge=0`-oda sendhu, 9/a vittu pona rendu
+   ottaiyum moodudhu: `?limit=1000000` reject aagum (response size
+   thirumba bounded), `?skip=-1`-um (MySQL adha `500`-a
+   maathirukkum). `ge=1` `?limit=0`-ayum reject pannum, eppovum
+   edhuvum irukka mudiyaadha page adhu.
+3. Oru rule-ah break pannina FastAPI **function run aagradhukku
+   munnadiye** `422` sollum, first mattum illa, break aana **ella**
+   rules-ayum ore thadava list pannum.
+4. `search: str | None = Query(None, min_length=2, max_length=50, ...)`
+   — one-letter search kittathatta ella row-ayum match pannum, so adhu
+   useful filter illa, verum expensive filter. `max_length=50` yaaravadhu
+   10 MB search string anuppuradha thadukkum. Parameter real-a
+   anuppumbodhu mattum dhan rules apply aagum; vittuttaa innum ok,
+   default `None`-nala.
+5. `ge=0`-oda `min_price` / `max_price` — negative price-ku artham
+   illa, so munnadiye reject aagum.
+6. `description="..."` — ovoru `Query(...)`-kum onnu irukku, adhu
+   `/docs`-la andha parameter pakkathula varum, adhoda limits-oda
+   (`maximum: 100`). Cost onnum illa, ovoru client developer-oda
+   oru kelviyai save pannum.
+7. `sort_by`, `order` plain `Literal[...] = "id"`-a-ve irukku —
+   whitelist already oru rule dhan, so `Query(...)` thevaiyilla.
+
+**Repeat aagra parameter:**
+
+8. `category: list[str] | None = Query(None, ...)` — **list type**
+   FastAPI-ku indha parameter repeat aagalaam-nu solludhu:
+   `?category=books&category=toys` `["books", "toys"]`-a varum. Plain
+   `str`-a irundha, FastAPI kadaisi value-ah (`toys`) mattum dhan
+   vachukkum.
+9. Inga `Query(...)` **kandippa venum**, verum decoration illa: adhu
+   illana, FastAPI `list` argument-ah JSON **body**-nu ninaichukkum.
+10. `crud.py`-la, `category: list[str] | None` mattrum
+    `ItemModel.category.in_(category)` list-ah
+    `WHERE category IN ('books', 'toys')`-a maathudhu.
+11. `if category:` — matha filters maadhiri `is not None` illa. Empty
+    list-um falsy, so `[]`-kum filter skip aagum, yen-na ulla
+    onnume illadha `IN ()` ella database-layum valid SQL illa.
+
+**`schemas.py` — same filters oru model-a:**
+
+12. `class FilterParams(BaseModel)` — ettu parameters na neelamaana
+    function signature, same filters venum-nu ninaikkura innoru route
+    ellathaiyum copy pannanum. Avangala oru model-a sethaa, oru
+    thadava declare pannalaam, endha route-um reuse pannalaam, thaniya
+    test-um pannalaam.
+13. Fields `Query(...)`-ku pathila `Field(...)` use pannudhu, yen-na
+    idhu oru normal Pydantic model — aana rules same (`ge`, `le`,
+    `min_length`, `description`).
+14. `model_config = {"extra": "forbid"}` — **typos errors-a maarum.**
+    Ettu fields-la illadha edha query parameter-um silent-a ignore
+    aagama `extra_forbidden` type-oda `422` aagum.
+
+**`main.py` — model route:**
+
+15. `filters: Annotated[FilterParams, Query()]` — Pydantic model
+    argument normal-a "idha JSON body-la irundhu read pannu"-nu
+    artham. `Query()` adha override pannudhu: FastAPI `FilterParams`-oda
+    ovoru field-ayum **query string**-la irundhu fill pannum. Indha
+    feature FastAPI 0.115-la vandhuchu.
+16. **Inga mattum yen `Annotated`**, repo-la matha idathula
+    `db: Session = Depends(get_db)`-nu ezhudhum podhu?
+    `Annotated[Type, Query()]` type-ayum "idhu enga irundhu varudhu"
+    marker-ayum onna vachukkum, query-parameter models-ku FastAPI-oda
+    sontha documentation use panra form idhu dhan. Repo-la idhai use
+    panra ore idam idhu dhan; matha ellame default-argument style-la
+    dhan. (Current FastAPI `filters: FilterParams = Query()`-ayum
+    accept pannum, aana indha feature-ku documented form-ah follow
+    pannunga.)
+17. `crud.get_items(db, **filters.model_dump())` — `model_dump()` model-ah
+    `{"search": None, "category": [...], ...}` maadhiri dict-a
+    maathum, `**` adha keyword arguments-a unpack pannum. Ovoru field
+    name-um `crud.get_items` argument name-oda exact-a match aagradhunaala
+    dhan idhu work aagudhu.
+18. `/docs` indha route-kum `GET /items`-ku kaatra same ettu
+    parameters-ah kaattum, yen-na FastAPI model-oda fields-ah onnu onna
+    unpack pannudhu.
+19. **`extra: forbid` yen mukkiyam.** `GET /items?limt=5` (typo)
+    accept aagum: FastAPI neenga declare panna parameters-ah mattum
+    dhan thedum, mathadha ignore pannum, so client-ku 10 rows varum,
+    `limit` broken-nu ninaikkum. `GET /items/search-model?limt=5`
+    typo-va neraa point panra `422`. Idhu model-naala mattum dhan
+    mudiyum, yen-na allowed names-oda full list model-ku mattum dhan
+    theriyum.
+20. **Route order mukkiyam.** `/items/search-model` `/items/{item_id}`-ku
+    **munnadi** declare aagirukku. FastAPI routes-ah mela irundhu
+    keezha try pannum, `{item_id}` `search-model` text-ah santhoshama
+    match pannidum, apparam number illa-nu `422`-la fail aagum. Fixed
+    paths-ah, avangala muzhungura path parameters-ku munnadi vaikkanum.
+21. **Innum enna missing.** Client-ku oru page rows kidaikkudhu, aana
+    total evlo-nu theriyaadhu, so "Page 2 of 3" kaatta mudiyaadhu, Next
+    click panradha eppo niruthanum-nu theriyaadhu.
+    [Page envelope](/tanglish/docs/pagination/page-envelope) adha fix
+    pannum.
+
+## Try it
+
+```bash
+curl "http://127.0.0.1:8000/items?category=books&category=toys&limit=20"
+curl "http://127.0.0.1:8000/items/search-model?category=kitchen&min_price=20&sort_by=price"
+curl -i "http://127.0.0.1:8000/items?limit=500&search=a&skip=-1"  # 422, three errors
+curl -i "http://127.0.0.1:8000/items/search-model?limt=5"  # 422, typo caught
+curl "http://127.0.0.1:8000/items?limt=5"  # 200, typo silently ignored
+```
+
+1. Ella 10 books mattrum toys (`WHERE category IN ('books', 'toys')`).
+2. 20 mudhal kitchen items, cheap-aanadhu first.
+3. **Moonu** errors-oda `422`, break aana ovoru rule-kum onnu:
+
+```json
+{
+  "detail": [
+    {"type": "string_too_short", "loc": ["query", "search"], "msg": "String should have at least 2 characters", "...": "..."},
+    {"type": "greater_than_equal", "loc": ["query", "skip"], "msg": "Input should be greater than or equal to 0", "...": "..."},
+    {"type": "less_than_equal", "loc": ["query", "limit"], "msg": "Input should be less than or equal to 100", "...": "..."}
+  ]
+}
+```
+
+4. `422`, yen-na `limt` oru typo, `FilterParams` theriyaadha
+   parameters-ah forbid pannudhu:
+
+```json
+{"detail": [{"type": "extra_forbidden", "loc": ["query", "limt"], "msg": "Extra inputs are not permitted", "input": "5"}]}
+```
+
+5. Adhe typo `GET /items`-la default 10 rows-oda `200`, `limt` edhuvum
+   pannala-nu oru hint-um illa.
+
+Try panna innum `422` cases: `?limit=0`, `?limit=101`, `?min_price=-5`,
+51 characters-oda `?search=`, `?sort_by=secret`. Illana
+[http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs) open panni
+ovoru parameter-oda description, limits paarunga.
+
+**Postman:** Method `GET`, URL `http://127.0.0.1:8000/items`.
+**Params** tab-la `category`-nu rendu rows add pannunga (values
+`books`, `toys`), repeat aagra parameter anuppa.
+
+Adutha step: [Page envelope](/tanglish/docs/pagination/page-envelope) —
+page numbers mattrum total count.

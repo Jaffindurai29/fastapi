@@ -1,0 +1,511 @@
+---
+title: "9. Rate limiting"
+description: slowapi vachi password guessing-ah slow pannurathu — nimishathukku 5 login attempts-ku appuram 429 Too Many Requests.
+---
+
+<GithubLink path="example/12/i" />
+
+Argon2 ([Password hashing](/tanglish/docs/security/password-hashing))
+ovoru guess-ayum **offline**-la costly aakkudhu, aana attacker innum
+**online**-la `POST /token`-ah adichukitte irukkalaam. Inga
+[slowapi](https://github.com/laurentS/slowapi) **oru IP address-ku
+nimishathukku 5 login attempts** mattum allow pannudhu; 6-aavadhu
+andha nimisham mudiyura varaikkum `429 Too Many Requests` vaangum.
+`GET /users/me` [Protected routes](/tanglish/docs/security/protected-routes)-la
+irundha maadhiriye protect aagirukku.
+
+## Login-ah yen limit pannanum
+
+Limit illana, oru script `alice`-ku nimishathukku aayirakkanakkaana
+passwords try pannalaam (**brute force**), illa romba common passwords-ah
+ovoru username-kum try pannalaam (**password spraying**). Nimishathukku
+5 limit, "nimishathukku aayiram"-ah naalukku 7,200-a maathudhu. Romba
+common passwords dhan first try aagum, so limit-oda serthu oru minimum
+password length-um vachukonga.
+
+## Code
+
+`database.py`, `models.py`, `config.py`, `security.py`, `crud.py`
+mattrum `dependencies.py` ellam
+[Protected routes](/tanglish/docs/security/protected-routes)-la irukra
+adhe dhan. Pudhusa irukradhu ellam `main.py`-oda mela mattrum `/token`
+route-la. Table: `sec_users`, JWT, protected-routes, refresh-token
+lessons-oda share aagudhu. Seed users: `alice`, `bob`, `admin`
+(password `<name>-password`), mattrum deactivate aana
+`carol` / `carol-password`.
+
+**`.env.example`**:
+
+```bash title=".env.example"
+# Copy this file to .env and adjust the values for your local MySQL
+# server. All of these already have working defaults baked into the
+# code, so creating a .env is optional — the app runs with zero setup
+# if you skip this file entirely.
+
+MYSQL_HOST=127.0.0.1
+MYSQL_PORT=3306
+MYSQL_USER=root
+MYSQL_PASSWORD=
+MYSQL_DB=fastapi_learn
+
+# Set this to override everything above at once — e.g. point at SQLite
+# for a quick local try with no MySQL server running at all.
+# DATABASE_URL=sqlite:///./test.db
+
+# --- Security (topic 12) ---
+# Signs every JWT. Anyone who knows it can forge tokens, so in production
+# use a long random value and keep it out of git. Generate one with:
+#   python -c "import secrets; print(secrets.token_hex(32))"
+SECRET_KEY=dev-only-secret-change-me-in-production-0123456789
+ACCESS_TOKEN_EXPIRE_MINUTES=15
+REFRESH_TOKEN_EXPIRE_DAYS=7
+```
+
+**`config.py`** — secret key, algorithm mattrum token lifetimes:
+
+```python title="config.py"
+import os
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# Signs every token. Anyone who knows it can mint valid tokens for any
+# user, so in production set a long random value in .env, generated with:
+#   python -c "import secrets; print(secrets.token_hex(32))"
+SECRET_KEY = os.getenv("SECRET_KEY", "dev-only-secret-change-me-in-production-0123456789")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "15"))
+REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7"))
+```
+
+**`database.py`** — env vars, `engine`/`SessionLocal`/`Base`, mattrum `get_db()`:
+
+```python title="database.py"
+import os
+
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+load_dotenv()
+
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
+MYSQL_USER = os.getenv("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
+
+# Set DATABASE_URL directly to override everything above (e.g. to point
+# at SQLite for a quick local test with no MySQL server at all).
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
+)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+```
+
+**`models.py`** — share aagra `sec_users` table:
+
+```python title="models.py"
+from sqlalchemy import Boolean, Column, Integer, String
+
+from database import Base
+
+
+# Shared by 12/b, 12/c, 12/d and 12/i. Keep it identical in all four:
+# create_all never alters an existing table.
+class UserModel(Base):
+    __tablename__ = "sec_users"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    username = Column(String(30), nullable=False, unique=True)
+    hashed_password = Column(String(255), nullable=False)
+    is_active = Column(Boolean, nullable=False, default=True)
+```
+
+**`schemas.py`** — `Token` mattrum `UserOut`:
+
+```python title="schemas.py"
+from pydantic import BaseModel, ConfigDict
+
+
+# The OAuth2 spec fixes these two field names, and /docs relies on them.
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+
+class UserOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    username: str
+    is_active: bool
+```
+
+**`security.py`** — password hashing mattrum access tokens:
+
+```python title="security.py"
+from datetime import datetime, timedelta, timezone
+
+import jwt
+from pwdlib import PasswordHash
+
+from config import ACCESS_TOKEN_EXPIRE_MINUTES, ALGORITHM, SECRET_KEY
+
+# Argon2, exactly as in 12/a.
+password_hash = PasswordHash.recommended()
+
+
+def hash_password(password: str) -> str:
+    return password_hash.hash(password)
+
+
+def verify_password(password: str, hashed: str) -> bool:
+    return password_hash.verify(password, hashed)
+
+
+def create_access_token(username: str, expires_delta: timedelta | None = None) -> str:
+    if expires_delta is None:
+        expires_delta = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    payload = {
+        "sub": username,  # who the token is about (the "subject")
+        "exp": datetime.now(timezone.utc) + expires_delta,  # stored as a Unix timestamp
+        "type": "access",
+    }
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def decode_token(token: str) -> dict:
+    # Checks the signature AND the exp claim. Raises jwt.InvalidTokenError
+    # (or its subclass jwt.ExpiredSignatureError) if either fails.
+    # algorithms= is a whitelist: never let the token pick its own.
+    return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+```
+
+**`crud.py`** — user lookup, `authenticate()`, seed data:
+
+```python title="crud.py"
+from sqlalchemy.orm import Session
+
+from models import UserModel
+from security import hash_password, verify_password
+
+
+def get_user_by_username(db: Session, username: str) -> UserModel | None:
+    return db.query(UserModel).filter(UserModel.username == username).first()
+
+
+def authenticate(db: Session, username: str, password: str) -> UserModel | None:
+    user = get_user_by_username(db, username)
+    if user is None or not verify_password(password, user.hashed_password):
+        return None
+    return user
+
+
+def seed_users(db: Session) -> None:
+    if db.query(UserModel).count() == 0:
+        db.add_all(
+            [
+                UserModel(username="alice", hashed_password=hash_password("alice-password")),
+                UserModel(username="bob", hashed_password=hash_password("bob-password")),
+                UserModel(username="admin", hashed_password=hash_password("admin-password")),
+                # Deactivated account: can log in, but the protected
+                # routes from 12/c on turn it away with 403.
+                UserModel(username="carol", hashed_password=hash_password("carol-password"), is_active=False),
+            ]
+        )
+        db.commit()
+```
+
+**`dependencies.py`** — `get_current_user` / `get_current_active_user`:
+
+```python title="dependencies.py"
+import jwt
+from fastapi import Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
+from sqlalchemy.orm import Session
+
+import crud
+from database import get_db
+from models import UserModel
+from security import decode_token
+
+# Reads "Authorization: Bearer <token>" and hands the <token> part to
+# the route. No header at all -> 401 "Not authenticated" automatically.
+# tokenUrl tells /docs where the "Authorize" button should log in.
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+
+def credentials_error(detail: str = "Could not validate credentials") -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail=detail,
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> UserModel:
+    try:
+        payload = decode_token(token)
+    except jwt.ExpiredSignatureError:  # subclass, so it must come first
+        raise credentials_error("Token has expired")
+    except jwt.InvalidTokenError:  # bad signature, garbage, wrong algorithm...
+        raise credentials_error()
+
+    if payload.get("type") != "access":
+        raise credentials_error()
+
+    username = payload.get("sub")
+    user = crud.get_user_by_username(db, username) if username else None
+    if user is None:  # valid token, but the account was deleted since
+        raise credentials_error()
+    return user
+
+
+# Builds on get_current_user: authenticated AND allowed in.
+def get_current_active_user(user: UserModel = Depends(get_current_user)) -> UserModel:
+    if not user.is_active:
+        # 403, not 401: we know exactly who this is, and the answer is no.
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Inactive user")
+    return user
+```
+
+**`main.py`** — limiter, `429` handler, mattrum limit aana `/token` route:
+
+```python title="main.py"
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
+from fastapi.security import OAuth2PasswordRequestForm
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
+from sqlalchemy.orm import Session
+
+import crud
+from database import Base, SessionLocal, engine, get_db
+from dependencies import get_current_active_user
+from models import UserModel
+from schemas import Token, UserOut
+from security import create_access_token
+
+Base.metadata.create_all(bind=engine)
+
+with SessionLocal() as db:
+    crud.seed_users(db)
+
+# Counts requests per client IP address. Storage is in-memory by
+# default: it resets on restart and isn't shared between workers. In
+# production pass storage_uri="redis://localhost:6379" so every worker
+# shares one set of counters.
+# headers_enabled=True adds X-RateLimit-* headers to every limited
+# response and Retry-After to the 429.
+limiter = Limiter(key_func=get_remote_address, headers_enabled=True)
+
+app = FastAPI()
+app.state.limiter = limiter
+# Turns RateLimitExceeded into a 429 JSON response.
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+AUTH_ERRORS = {
+    401: {"description": "Missing, invalid or expired token"},
+    403: {"description": "Inactive user"},
+}
+
+
+# 5 attempts per minute per IP, successful or not. slowapi needs the
+# `request` parameter to find the client IP, and (because of
+# headers_enabled) the `response` parameter to attach its headers to,
+# since this route returns a dict rather than a Response.
+@app.post("/token", response_model=Token, responses={
+    401: {"description": "Incorrect username or password"},
+    429: {"description": "Too many login attempts"},
+})
+@limiter.limit("5/minute")
+def login(request: Request, response: Response,
+          form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    user = crud.authenticate(db, form_data.username, form_data.password)
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return {"access_token": create_access_token(user.username), "token_type": "bearer"}
+
+
+# Not rate limited: only /token is a password-guessing target.
+@app.get("/users/me", response_model=UserOut, responses=AUTH_ERRORS)
+def read_me(current_user: UserModel = Depends(get_current_active_user)):
+    return current_user
+```
+
+## Line by line
+
+**App-ku oru limiter (`main.py`):**
+
+1. **`Limiter(key_func=get_remote_address, ...)`** — `key_func` dhan
+   **yaarai** count pannanum nu decide pannudhu. `get_remote_address`
+   client-oda IP address-ah use pannum, so oru machine-la irundhu vara
+   ella requests-um oru counter-ah share pannum.
+2. **`headers_enabled=True`** limit aana responses-la
+   `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`-um,
+   `429`-la `Retry-After`-um add pannum. Default-a idhu off.
+3. **`app.state.limiter = limiter`** — request time-la slowapi limiter-ah
+   inga dhan thedum. Idha maranthaa decorator-ku adhoda counters
+   kidaikkaadhu.
+4. **`app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)`**
+   — limit hit aana, slowapi `RateLimitExceeded` raise pannum. Built-in
+   handler adha
+   `{"error": "Rate limit exceeded: 5 per 1 minute"}`-oda `429`-a
+   maathum. Key `error`, FastAPI-oda vazhakkamaana `detail` illa nu
+   kavaninga; unga client `detail` expect pannina, ungaludhu handler
+   ezhudhunga.
+
+**Route (`main.py`):**
+
+5. **`@limiter.limit("5/minute")` `@app.post(...)`-ku keezha
+   irukku.** Decorators keezha irundhu mela apply aagum, so FastAPI
+   already-limited function-ah register pannum. Mela vechaa limit
+   silent-a apply-e aagaadhu. String `"100/hour"`, `"5/minute;20/hour"`
+   nu kooda irukkalaam.
+6. **`request: Request` kandippa venum, per `request`-a dhan
+   irukkanum.** slowapi adhula irundhu IP-ah padikkum, adhu illana
+   start aagave maattengudhu
+   (`No "request" or "websocket" argument on function ...`), route body
+   adha use pannalanaalum.
+7. **`response: Response` `headers_enabled`-naala mattum dhan
+   venum.** Indha route `Response` illa, oru dict return pannudhu, so
+   slowapi-ku headers poda FastAPI-oda `response` object venum. Adha
+   vittutta ovoru successful login-um `500` aagum, server log-la
+   "parameter `response` must be an instance of
+   starlette.responses.Response" varum.
+8. **`responses={... 429: ...}`** — documentation mattum dhan:
+   `/docs`-la `401` pakkathula `429`-um theriyum.
+
+**Edhu count aagudhu:**
+
+9. **`/token`-ku vara ovoru request-um count aagum, password sari-yo
+   thappo.** Limiter route body-ku **munnadi** run aagudhu, so result
+   enna nu adhukku theriyaadhu. Login-ku adhu paravaa illa; real user-ku
+   nimishathukku 5 tries-ku mela theva padradhu romba rare.
+10. **`/token` mattum dhan limit aagudhu.** `/users/me` password-guessing
+    target illa, anga token check cheap. `/token`-la lock aagirukkumbodhu
+    kooda, munnadi login panna token work aagikitte irukkum.
+
+**Headers padikkurathu:**
+
+11. Successful login-la ungaloda meedhi budget theriyum:
+
+    ```
+    x-ratelimit-limit: 5
+    x-ratelimit-remaining: 4
+    x-ratelimit-reset: 1791196147.93
+    ```
+
+    `429`-la `retry-after: 60`-um (wait panna vendiya seconds)
+    kidaikkum. `x-ratelimit-reset` window reset aagra Unix time. Nalla
+    client `Retry-After` padichu, loop-la retry pannama wait pannum. Oru
+    gap: thappaana password-ku varra `401`-la rate-limit headers
+    **illa**. slowapi response-ah decorate panra munnadiye adhu
+    exception-a raise aagidudhu.
+
+**Production concerns:**
+
+12. **In-memory storage.** Default-a counters server process-kulla oru
+    Python dict-la irukku. Adhoda artham:
+    - **Restart = reset.** Ovoru `--reload`-um ellarukkum pudhu 5
+      kudukkum.
+    - **Workers naduvula share aagaadhu.** `uvicorn main:app --workers 4`
+      (illa load balancer pinnadi 4 containers) ovoru worker-kum thani
+      counters kudukkum, so endha worker answer pannudho adha poruthu
+      real limit nimishathukku 20 varaikkum pogum.
+
+    Fix oru argument dhan, ella workers-ayum same store-ku point
+    pannunga:
+
+    ```python
+    limiter = Limiter(key_func=get_remote_address, storage_uri="redis://localhost:6379")
+    ```
+
+    (slowapi ulla `limits` library use pannudhu, adhu Memcached,
+    MongoDB-um support pannum.)
+13. **IP vachi limit pannradhoda limits.**
+    - Reverse proxy pinnadi (nginx, cloud load balancer), ovoru
+      request-um **proxy-oda** IP-la irundhu varum, so ellarum oru
+      counter-ah share pannuvaanga. uvicorn-ah `--proxy-headers`-um,
+      unga proxy-ku set panna `--forwarded-allow-ips`-um vachi run
+      pannunga, appo real client IP (`X-Forwarded-For`-la irundhu) use
+      aagum. Andha header-ah unga sontha proxy-la irundhu mattum
+      nambunga; yaar venaalum fake-a anuppalaam.
+    - Oru office illa mobile-carrier IP pinnadi irukra pala users oru
+      limit-ah share pannuvaanga.
+    - Aayirakkanakkaana IPs irukra attacker (botnet) ovonnulayum
+      nimishathukku 5 vaanguvaan. Anga defences: **username** vachi-um
+      limit pannradhu (form field padikkura custom `key_func`),
+      temporary account lockouts, CAPTCHAs, multi-factor login.
+14. **Testing.** FastAPI-oda `TestClient` adhoda address-ah
+    `"testclient"` nu sollum, so ella test requests-um oru counter-ah
+    share pannum: test-la 6-aavadhu login `429` return pannum. Same
+    process-la tests naduvula counters persist aagum; ovonnum pudhu
+    budget expect panra tests naduvula `limiter.reset()` call pannunga.
+
+## Routes
+
+| Route | Description |
+|---|---|
+| `POST /token` | Form login → access token; thappa-na `401`, nimishathula 5 attempts-ku appuram `429` (sari-yo thappo) |
+| `GET /users/me` | Login aana user; valid token illana `401`, deactivate aagirundha `403`. Rate limit illa |
+
+## Try it
+
+```bash
+cd example/12/i
+uvicorn main:app --reload
+```
+
+```bash
+curl -i -X POST http://127.0.0.1:8000/token -d "username=alice&password=alice-password"
+curl http://127.0.0.1:8000/users/me -H "Authorization: Bearer TOKEN"
+```
+
+`-i` response headers-ah print pannum, unga rate-limit budget-um
+serthu. `TOKEN`-ah first response-la irukra `access_token`-ala
+maathunga. Ippo idha **aaru thadava** vegama run pannunga:
+
+```bash
+curl -i -X POST http://127.0.0.1:8000/token -d "username=alice&password=wrong"
+```
+
+Attempts 2–5 `401 Incorrect username or password`. 6-aavadhu (unga
+IP-la irundhu edha login-um, sariyaana password-oda kooda, `bob`-a
+kooda) idhu:
+
+```
+HTTP/1.1 429 Too Many Requests
+x-ratelimit-limit: 5
+x-ratelimit-remaining: 0
+x-ratelimit-reset: 1791196147.93
+retry-after: 60
+
+{"error":"Rate limit exceeded: 5 per 1 minute"}
+```
+
+**Idhaiyum try pannunga:** server-ah restart pannunga (illa `--reload`
+restart panra maadhiri oru file save pannunga), udane thirumba login
+pannalaam. Counters memory-la irukku — adhu dhan mela step 12.
+
+Adutha step: [Everything together](/tanglish/docs/security/secure-app) —
+indha topic-oda ella piece-um serndha oru secure notes API, plus oru
+security checklist.

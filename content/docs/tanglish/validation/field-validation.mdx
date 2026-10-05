@@ -1,0 +1,304 @@
+---
+title: "1. Field validation"
+description: Unga code run aaguradhukku munnadiye thappana input-ah reject pannurathu — Field rules, oru field_validator, mattrum FastAPI-oda automatic 422.
+---
+
+<GithubLink path="example/8/a" />
+
+`POST` body-ku ippo rules irukku: `name` 1–50 characters, blank-a
+irukka koodadhu; `price` 0-ku mela; `quantity` 0 illana adhukku mela.
+Edhavadhu oru rule-ah break pannina, FastAPI `422 Unprocessable
+Content`-oda exact-a enna thappu-nu oru list kudukkum — unga route
+function run-e aagadhu.
+
+| Route | Description |
+|---|---|
+| `GET /items` | Ella rows-um |
+| `GET /items/{item_id}` | Oru row; missing-na `404`, id number illana `422` |
+| `POST /items` | Oru row insert pannum; `201`, illana body rule-ah break pannina `422` |
+
+## Code
+
+**`database.py`** — env vars, `engine`/`SessionLocal`/`Base`, mattrum
+`get_db()` dependency (topic 6-oda same):
+
+```python title="database.py"
+import os
+
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+load_dotenv()
+
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
+MYSQL_USER = os.getenv("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
+
+# Set DATABASE_URL directly to override everything above (e.g. to point
+# at SQLite for a quick local test with no MySQL server at all).
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
+)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+```
+
+**`models.py`** — `validation_items` table, ippo moonu columns-oda:
+
+```python title="models.py"
+from sqlalchemy import Column, Float, Integer, String
+
+from database import Base
+
+
+class ItemModel(Base):
+    __tablename__ = "validation_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(50), nullable=False, unique=True)
+    price = Column(Float, nullable=False)
+    quantity = Column(Integer, nullable=False, default=0)
+```
+
+**`schemas.py`** — request body, validation rules-oda:
+
+```python title="schemas.py"
+from pydantic import BaseModel, Field, field_validator
+
+
+class ItemCreate(BaseModel):
+    # Field(...) adds rules on top of the type. If any rule fails, FastAPI
+    # answers 422 before your route function even runs.
+    name: str = Field(min_length=1, max_length=50)
+    price: float = Field(gt=0, le=1_000_000)
+    quantity: int = Field(default=0, ge=0)
+
+    # A rule Field() can't express: "   " passes min_length=1, but it's
+    # still blank. Raising ValueError here becomes a 422 too.
+    @field_validator("name")
+    @classmethod
+    def name_not_blank(cls, value: str) -> str:
+        value = value.strip()
+        if value == "":
+            raise ValueError("name must not be blank")
+        return value
+```
+
+**`crud.py`** — database-oda pesura plain functions:
+
+```python title="crud.py"
+from sqlalchemy.orm import Session
+
+from models import ItemModel
+from schemas import ItemCreate
+
+
+def get_items(db: Session) -> list[ItemModel]:
+    return db.query(ItemModel).order_by(ItemModel.id).all()
+
+
+def get_item(db: Session, item_id: int) -> ItemModel | None:
+    return db.get(ItemModel, item_id)
+
+
+def create_item(db: Session, item: ItemCreate) -> ItemModel:
+    row = ItemModel(name=item.name, price=item.price, quantity=item.quantity)
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def seed_items(db: Session) -> None:
+    if db.query(ItemModel).count() == 0:
+        db.add_all(
+            [
+                ItemModel(name="Laptop", price=999.99, quantity=5),
+                ItemModel(name="Mouse", price=19.99, quantity=50),
+            ]
+        )
+        db.commit()
+```
+
+**`main.py`** — `FastAPI()` app mattrum adhoda routes:
+
+```python title="main.py"
+from fastapi import Depends, FastAPI, HTTPException, status
+from sqlalchemy.orm import Session
+
+import crud
+from database import Base, SessionLocal, engine, get_db
+from schemas import ItemCreate
+
+Base.metadata.create_all(bind=engine)
+
+with SessionLocal() as db:
+    crud.seed_items(db)
+
+app = FastAPI()
+
+
+def to_dict(row):
+    return {"id": row.id, "name": row.name, "price": row.price, "quantity": row.quantity}
+
+
+@app.get("/items")
+def list_items(db: Session = Depends(get_db)):
+    return [to_dict(row) for row in crud.get_items(db)]
+
+
+# item_id: int is validation too — /items/abc never reaches this function,
+# FastAPI answers 422 on its own.
+@app.get("/items/{item_id}")
+def get_item(item_id: int, db: Session = Depends(get_db)):
+    row = crud.get_item(db, item_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Item not found")
+    return to_dict(row)
+
+
+@app.post("/items", status_code=status.HTTP_201_CREATED)
+def create_item(item: ItemCreate, db: Session = Depends(get_db)):
+    return to_dict(crud.create_item(db, item))
+```
+
+## Line by line
+
+`database.py` topic 6-oda same, `models.py`-ah
+[index page](/tanglish/docs/validation)-la explain pannirukkom. Pudhusa
+irukradhu ellam `schemas.py`-la dhan — `main.py`-ku andha benefit
+free-a kidaikkudhu.
+
+**`schemas.py`:**
+
+1. **`Field(...)` type-ku mela rules add pannudhu.** Type annotation
+   (`str`, `float`, `int`) already thappana kind of value-ah Pydantic
+   reject panna vaikkudhu — `"price": "cheap"` fail aagum. `Field(...)`
+   innum oru step poi, andha type-la *yentha* values accept pannalaam-nu
+   solla vidudhu:
+   - `name: str = Field(min_length=1, max_length=50)` — kuraindhadhu 1,
+     adhigam 50 characters. `min_length`/`max_length` strings-la (mattrum
+     lists-la) work aagum. Andha `50` `String(50)` column-oda match
+     aagudhu, so validation pass aana edhuvum table-la fit aagum-nu
+     guarantee.
+   - `price: float = Field(gt=0, le=1_000_000)` — `gt` na "greater
+     than" (so `0`-e reject aagum), `le` na "less than or equal".
+     `ge` ("greater or equal") mattrum `lt` ("less than") kuda irukku.
+     `1_000_000` na one million-ah readable-a ezhudhura Python style
+     dhan.
+   - `quantity: int = Field(default=0, ge=0)` — zero illana adhukku
+     mela. Idhukku `default` irukradhaala, request-la idhu **optional**:
+     vittuttaa `0` kidaikkum. `name`-ku-um `price`-ku-um default illa,
+     so avanga **required** — onna vittuttaa type `missing`-oda `422`
+     varum.
+2. **`@field_validator("name")` — `Field` express panna mudiyaadha
+   rules-ku.** `"   "` moonu characters long, so `min_length=1`-ah pass
+   pannidum, aana obvious-a adhu innum blank dhan. Validator na neenga
+   enna check venumnaalum ezhudhalaam-nu oru plain method:
+   - `@field_validator("name")` indha method yentha field-ah check
+     pannudhu-nu Pydantic-ku sollum. `@classmethod` Pydantic-ku
+     required — object build aagikittu irukkumbodhe validator run
+     aagudhu, call panna instance innum illa.
+   - Idhu type mattrum `Field` checks-ku **appuram** run aagum, so
+     `value` already 1–50 characters string-nu guarantee.
+   - `value = value.strip()` rendu pakkamum irukra spaces-ah remove
+     pannum.
+   - `raise ValueError("name must not be blank")` — inga raise aagra
+     `ValueError` edhaiyum crash pannadhu; Pydantic adha catch panni
+     `422` list-la innum oru entry-a maathidum, message
+     `"Value error, name must not be blank"`-nu prefix-oda.
+   - `return value` — validator enna **return** pannudho adhu dhan unga
+     route paakkura value. So `"  Desk "` `"Desk"`-a store aagum:
+     validator input-ah check-um pannum, clean-um pannum.
+
+**`crud.py`:**
+
+3. Validation pathi edhuvum inga illa. `create_item` moonu fields-aiyum
+   oru pudhu `ItemModel`-ku copy pannum — adhukku full-a nambalaam,
+   yen-na avanga already ovoru rule-aiyum pass pannitanga. `seed_items`
+   first startup-la oru "Laptop"-um oru "Mouse"-um add pannum.
+
+**`main.py`:**
+
+4. **Validation code edhuvume illa.** Route just `item: ItemCreate`-nu
+   declare pannudhu. Body edhavadhu rule-ah break pannina,
+   `create_item` **call-e aagadhu** — FastAPI thaane `422` answer
+   pannum. Function-kulla, ovoru field-um valid-nu guarantee. Adhu
+   dhan main benefit: unga routes ellam `if price <= 0: ...` checks
+   scatter aagi irukkadhu.
+5. **`status_code=status.HTTP_201_CREATED`** `POST` decorator-la —
+   successful create default `200 OK`-ku pathila `201 Created` answer
+   pannum. `status` module numbers-ku readable names kudukkudhu.
+6. **`to_dict(row)`** — topic 6 maadhiriye innum response-ah kaila
+   build pannudhu. [8/d](/tanglish/docs/validation/response-model) idha
+   `response_model`-ah maathidum.
+7. **Path parameters-um validate aagudhu.** `item_id: int` na
+   `/items/abc`-ku `422` varum (type `int_parsing`, location
+   `["path", "item_id"]`), unga code run aagama — route-ku mela irukra
+   comment idha point out pannudhu.
+
+**`422` response-ah eppadi padikkuradhu:**
+
+8. `detail` list-la ovoru entry-layum irukradhu:
+   - `loc` — problem enga irukku: `["body", "price"]`,
+     `["path", "item_id"]`.
+   - `msg` — human-readable reason.
+   - `type` — machine-readable reason: `greater_than`, `missing`,
+     `string_too_long`, `value_error`, ...
+
+   **Ella** failures-um orey thadava report aagum, first onnu mattum
+   illa, so oru form ovoru bad field-aiyum oru round trip-la highlight
+   pannalaam:
+
+```json
+{
+  "detail": [
+    {"type": "value_error", "loc": ["body", "name"], "msg": "Value error, name must not be blank", "...": "..."},
+    {"type": "greater_than", "loc": ["body", "price"], "msg": "Input should be greater than 0", "...": "..."}
+  ]
+}
+```
+
+**Validation *catch panna mudiyaadhadhu*:**
+
+9. **Duplicates.** Pydantic request-ah mattum dhan paakkum — database-la
+   already enna irukku-nu adhukku theriyaadhu. So "Laptop"-ah rendavadhu
+   thadava post pannina validation pass aagum, `crud.create_item`-ku
+   poi, `unique=True` column-la idichu, database `IntegrityError` raise
+   pannum. Adha yaarum catch pannala, so FastAPI `500 Internal Server
+   Error` answer pannum. Stored data-oda check panradhu route-oda velai
+   — adhu [8/b](/tanglish/docs/validation/status-codes).
+
+## Try it
+
+```bash
+curl -X POST http://127.0.0.1:8000/items -H "Content-Type: application/json" -d "{\"name\": \"Desk\", \"price\": 120, \"quantity\": 2}"
+curl -i -X POST http://127.0.0.1:8000/items -H "Content-Type: application/json" -d "{\"name\": \"   \", \"price\": -5}"  # 422, two errors
+curl -i http://127.0.0.1:8000/items/abc  # 422, int_parsing
+curl -i -X POST http://127.0.0.1:8000/items -H "Content-Type: application/json" -d "{\"name\": \"Laptop\", \"price\": 1}"  # 500, duplicate
+```
+
+**Postman:** Method `POST`, URL `http://127.0.0.1:8000/items`, Body →
+raw → JSON:
+
+```json
+{"name": "Desk", "price": 120, "quantity": 2}
+```
+
+Adutha step: [Status codes](/tanglish/docs/validation/status-codes) —
+andha `500`-ah proper `409`-a maathradhu, ovoru failure-kum sariyaana
+code choose panradhu.

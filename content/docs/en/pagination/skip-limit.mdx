@@ -1,0 +1,315 @@
+---
+title: "1. skip/limit pagination"
+description: Returning the list one page at a time with ?skip= and ?limit=, always ordered first.
+---
+
+<GithubLink path="example/9/a" />
+
+`GET /items` now reads two query parameters, `skip` (how many rows to
+jump over) and `limit` (how many to return), and defaults to the first
+10 rows. The database does the cutting, so no matter how big the table
+grows, one request costs at most `limit` rows.
+
+| Route | Description |
+|---|---|
+| `GET /items?skip=0&limit=10` | One page of rows, ordered by `id`. Both parameters are optional |
+| `GET /items/{item_id}` | One row; `404` if missing |
+
+## The code
+
+**`database.py`** — env vars, `engine`/`SessionLocal`/`Base`, and the
+`get_db()` dependency:
+
+```python title="database.py"
+import os
+
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+load_dotenv()
+
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
+MYSQL_USER = os.getenv("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
+
+# Set DATABASE_URL directly to override everything above (e.g. to point
+# at SQLite for a quick local test with no MySQL server at all).
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
+)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+```
+
+**`models.py`** — the `catalog_items` table:
+
+```python title="models.py"
+from sqlalchemy import Column, DateTime, Float, Integer, String, func
+
+from database import Base
+
+
+# 9/a–9/d all use this exact model, so they can share one table.
+class ItemModel(Base):
+    __tablename__ = "catalog_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(100), nullable=False)
+    category = Column(String(50), nullable=False)
+    price = Column(Float, nullable=False)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+```
+
+**`schemas.py`** — `ItemOut`, the shape of one row in a response:
+
+```python title="schemas.py"
+from datetime import datetime
+
+from pydantic import BaseModel, ConfigDict
+
+
+class ItemOut(BaseModel):
+    # Read attributes off the SQLAlchemy row (see 8/d).
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    category: str
+    price: float
+    created_at: datetime
+```
+
+**`crud.py`** — the paged query, plus the 25-row seed:
+
+```python title="crud.py"
+from sqlalchemy.orm import Session
+
+from models import ItemModel
+
+
+def get_items(db: Session, skip: int, limit: int) -> list[ItemModel]:
+    # ORDER BY first, THEN skip/limit. Without a fixed order the database
+    # may return rows in any order, and pages could overlap or skip rows.
+    return (
+        db.query(ItemModel)
+        .order_by(ItemModel.id)
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
+
+
+def get_item(db: Session, item_id: int) -> ItemModel | None:
+    return db.get(ItemModel, item_id)
+
+
+# 25 rows across 5 categories, so paging and filtering have something to do.
+SEED = [
+    ("Python Crash Course", "books", 29.99),
+    ("Clean Code", "books", 34.5),
+    ("The Pragmatic Programmer", "books", 42.0),
+    ("Dune", "books", 9.99),
+    ("Cooking for Engineers", "books", 18.75),
+    ("Laptop", "electronics", 999.99),
+    ("Mouse", "electronics", 19.99),
+    ("Mechanical Keyboard", "electronics", 89.0),
+    ("USB-C Cable", "electronics", 7.49),
+    ("27in Monitor", "electronics", 249.0),
+    ("Noise-Cancelling Headphones", "electronics", 199.95),
+    ("Building Blocks Set", "toys", 49.99),
+    ("Rubber Duck", "toys", 3.5),
+    ("Remote Control Car", "toys", 64.0),
+    ("Jigsaw Puzzle 1000pc", "toys", 15.0),
+    ("Plush Bear", "toys", 12.25),
+    ("Chef's Knife", "kitchen", 79.0),
+    ("Cast Iron Pan", "kitchen", 45.5),
+    ("Coffee Grinder", "kitchen", 59.99),
+    ("Measuring Cups", "kitchen", 8.99),
+    ("Garden Hose", "garden", 27.0),
+    ("Pruning Shears", "garden", 22.5),
+    ("Tomato Seeds", "garden", 2.99),
+    ("Watering Can", "garden", 14.0),
+    ("Lawn Mower", "garden", 329.0),
+]
+
+
+def seed_items(db: Session) -> None:
+    if db.query(ItemModel).count() == 0:
+        db.add_all(
+            [ItemModel(name=n, category=c, price=p) for n, c, p in SEED]
+        )
+        db.commit()
+```
+
+**`main.py`** — the app; `skip` and `limit` are just function
+arguments:
+
+```python title="main.py"
+from fastapi import Depends, FastAPI, HTTPException
+from sqlalchemy.orm import Session
+
+import crud
+from database import Base, SessionLocal, engine, get_db
+from schemas import ItemOut
+
+Base.metadata.create_all(bind=engine)
+
+with SessionLocal() as db:
+    crud.seed_items(db)
+
+app = FastAPI()
+
+NOT_FOUND = {404: {"description": "Item not found"}}
+
+
+# skip and limit aren't in the path, so FastAPI reads them from the query
+# string: /items?skip=10&limit=5. The defaults make both optional.
+@app.get("/items", response_model=list[ItemOut])
+def list_items(skip: int = 0, limit: int = 10, db: Session = Depends(get_db)):
+    return crud.get_items(db, skip=skip, limit=limit)
+
+
+@app.get("/items/{item_id}", response_model=ItemOut, responses=NOT_FOUND)
+def get_item(item_id: int, db: Session = Depends(get_db)):
+    row = crud.get_item(db, item_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Item not found")
+    return row
+```
+
+## Line by line
+
+`database.py` and `models.py` are the shared pieces explained on the
+[index page](/en/docs/pagination). Below covers `schemas.py`,
+`crud.py` and `main.py`.
+
+**`schemas.py`:**
+
+1. `class ItemOut(BaseModel)` — the same `response_model` idea from
+   [Validation](/en/docs/validation): it lists exactly which fields
+   leave the API (`id`, `name`, `category`, `price`, `created_at`).
+2. `model_config = ConfigDict(from_attributes=True)` — lets Pydantic
+   read those fields straight off a SQLAlchemy row object
+   (`row.name`, `row.price`, ...) instead of needing a dict. That's
+   why `main.py` can return ORM rows directly, with no hand-written
+   `{"id": row.id, ...}` reshaping.
+3. `created_at: datetime` — goes out as an ISO 8601 string like
+   `"2026-10-05T10:15:00"` in the JSON.
+
+**`main.py`:**
+
+4. `def list_items(skip: int = 0, limit: int = 10, db: Session = Depends(get_db))`
+   — query parameters are just function arguments. `/items` has no
+   `{...}` placeholder, so FastAPI can't find `skip` or `limit` in the
+   path and looks for them in the **query string** instead — the part
+   after `?`. The rule is simple: an argument that isn't a path
+   parameter, isn't a Pydantic body model, and isn't a `Depends` is a
+   query parameter.
+5. The `= 0` / `= 10` defaults make both **optional**. Leave them off
+   and you get the first 10 rows; send only `?limit=5` and `skip`
+   still defaults to `0`.
+6. The `int` type is enforced exactly as it is for path parameters.
+   Everything in a URL arrives as text, so FastAPI converts it:
+   `?limit=5` reaches your function as the integer `5`, not the string
+   `"5"`, and `?limit=ten` is a `422` before your code even runs.
+7. `@app.get("/items", response_model=list[ItemOut])` — a list of
+   `ItemOut`, so each ORM row in the returned list is filtered through
+   `ItemOut` on the way out.
+8. `get_item` and `NOT_FOUND` — the same one-row lookup as before:
+   `None` from `crud.get_item` becomes a `404`, and
+   `responses=NOT_FOUND` just documents that `404` in `/docs`.
+9. `Base.metadata.create_all(bind=engine)` then
+   `with SessionLocal() as db: crud.seed_items(db)` — at startup,
+   create the `catalog_items` table if it's missing, then fill it with
+   the 25 seed rows if it's empty. Both are no-ops on every later run.
+
+**`crud.py`:**
+
+10. `get_items(db, skip, limit)` builds the query in four chained
+    steps, and nothing reaches the database until the last one:
+    - `db.query(ItemModel)` — "every row of `catalog_items`".
+    - `.order_by(ItemModel.id)` — sort by the unique `id`.
+    - `.offset(skip)` — jump over the first `skip` rows.
+    - `.limit(limit)` — return at most `limit` rows after that.
+    - `.all()` — actually run it. For `?skip=10&limit=5` that's
+      `SELECT ... ORDER BY id LIMIT 5 OFFSET 10`.
+11. **The database does the cutting.** Only 5 rows ever leave MySQL.
+    Fetching everything and slicing a Python list (`rows[10:15]`)
+    would give the same answer but read the whole table on every
+    request — the exact problem we're trying to fix.
+12. **Always `order_by` before paging.** SQL tables have **no built-in
+    order**. Without `ORDER BY`, the database returns rows in whatever
+    order is cheapest for it right now, and that can change between
+    two requests (after an insert, a delete, or just a different query
+    plan). So "skip 10, take 10" could hand you a row you already saw
+    on page 1 and silently skip another. Sorting by a unique column
+    (`id`) makes every page well-defined: page 2 always starts exactly
+    where page 1 ended.
+13. `SEED` and `seed_items` — 25 `(name, category, price)` tuples,
+    inserted only when `db.query(ItemModel).count() == 0`.
+    `created_at` isn't set here; the database fills it in through
+    `server_default`.
+
+**Why this matters:**
+
+14. **Unbounded lists don't scale.** Before this page, `GET /items`
+    returned every row. With 25 rows nobody notices. With a million,
+    one request loads a million rows into memory, turns them into
+    JSON, and sends megabytes over the network. Do that a few times at
+    once and the server falls over. Pagination makes the cost of a
+    request **fixed** — at most `limit` rows — no matter how big the
+    table grows.
+15. **Past the end is not an error.** `?skip=100` on a 25-row table
+    gives `[]`. The query ran fine; there just weren't any rows there,
+    and an empty list is the honest answer.
+16. **What's still missing.** Nothing stops `?limit=1000000` — it
+    works, and the unbounded list is back. Negative numbers aren't
+    refused either: SQLite quietly ignores `?skip=-1`, while MySQL
+    rejects the SQL and you get a `500`.
+    [Query(...) validation](/en/docs/pagination/query-validation)
+    closes both holes with `ge`/`le` rules.
+
+## Try it
+
+```bash
+curl http://127.0.0.1:8000/items
+curl "http://127.0.0.1:8000/items?skip=10&limit=5"
+curl "http://127.0.0.1:8000/items?skip=100"
+curl -i "http://127.0.0.1:8000/items?limit=ten"  # 422
+curl http://127.0.0.1:8000/items/1
+curl -i http://127.0.0.1:8000/items/999  # 404
+```
+
+1. Rows 1–10 (the defaults).
+2. Rows 11–15.
+3. `[]` — past the end is an empty list, not an error.
+4. `422`, because `limit` must be an integer:
+
+```json
+{"detail": [{"type": "int_parsing", "loc": ["query", "limit"], "msg": "Input should be a valid integer, unable to parse string as an integer", "input": "ten"}]}
+```
+
+Notice `"loc": ["query", "limit"]` — the error tells you the bad value
+came from the query string, not the path or the body.
+
+**Postman:** Method `GET`, URL `http://127.0.0.1:8000/items`, then use
+the **Params** tab to add `skip` and `limit`; Postman builds the
+`?skip=...&limit=...` part of the URL for you.
+
+Next: [Search, filter, sort](/en/docs/pagination/filter-sort) —
+optional filters and a safe way to let the client choose the sort
+column.

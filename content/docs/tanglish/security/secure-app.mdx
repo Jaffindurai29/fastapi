@@ -1,0 +1,1060 @@
+---
+title: "10. Everything together"
+description: Indha topic-oda ella piece-ayum use panra oru secure notes API, oru security checklist-a walk through panniyirukom.
+---
+
+<GithubLink path="example/12/j" />
+
+Munnadi irundha ovoru page-um oru idea-va thaniya kathukuduthuchu. Indha
+app ellathaiyum orey nerathula use pannudhu: hashed passwords, JWT
+login, access **mattrum** refresh tokens (rotation-oda), role checks,
+ownership checks, rate-limit aana login, mattrum boring-aana-aana-mukkiyamaana
+production settings (environment-la irundhu secrets, strict CORS,
+production-la `/docs` illa, security headers). Idhu oru chinna "secure
+notes" API: ovoru user-um avanga notes-ku owner, admins ellarudhaiyum
+paakkalam. [React login UI](/tanglish/docs/security/react)-ku backend-um
+idhu dhan.
+
+File by file pogaama, indha page oru **security checklist**-la item by
+item pogudhu: rule enna, code-la enga irukku, yen irukku. Ovoru item-um
+code-la `# CHECKLIST:` comment-oda mark aagirukku, so `grep CHECKLIST`
+ellathaiyum kandupidikkum.
+
+## Checklist
+
+| # | Item | Code-la enga | Yen |
+|---|---|---|---|
+| 1 | Passwords hash aagum, store aagaadhu | `security.py`, `models.py` | Leak aana database passwords-ah kudukkaadhu |
+| 2 | Generic login error, constant time | `routers/auth.py`, `security.py` (`DUMMY_HASH`) | Endha usernames irukku nu attacker kathukka mudiyaadhu |
+| 3 | Rate-limit aana login | `rate_limit.py`, `routers/auth.py`, `main.py` | Brute-force guessing practical illa |
+| 4 | Short-lived access tokens + refresh tokens | `config.py`, `security.py` | Thirudu pona access token sila nimisham dhan useful |
+| 5 | Token type check aagudhu | `security.py` (`decode_token`) | 7-day refresh token access token-a act panna mudiyaadhu |
+| 6 | Algorithm-ah server fix pannudhu | `security.py` (`algorithms=[ALGORITHM]`) | `"alg": "none"` forgery trick-ah block pannudhu |
+| 7 | Refresh tokens rotate aagum | `models.py`, `routers/auth.py` (`/refresh`) | Thirudu pona refresh token adhigapatcham oru thadava dhan work aagum |
+| 8 | Role database-la irundhu thirumba padikkapadudhu | `dependencies.py` (`get_current_user`) | Demotion-um deactivation-um udane effect aagum |
+| 9 | Role checks `403` return pannum | `dependencies.py` (`require_role`), `routers/users.py` | "Theriyum aana allowed illa" vs "login aagala" vera vera |
+| 10 | Ovoru note route-layum ownership check | `routers/notes.py` (`get_owned_note`) | Login aanadhu "note 3 padikkalam" nu artham illa |
+| 11 | Client owner illa role-ah pick panna mudiyaadhu | `schemas.py`, `crud.py`, `routers/auth.py` | Mass assignment-ah thadukkudhu |
+| 12 | `response_model` `hashed_password`-ah expose pannaadhu | `schemas.py` (`UserOut`) | Hashes-ah rate limit illama offline crack pannalaam |
+| 13 | JWT payload-la secret edhuvum illa | `security.py` (`_create_token`) | JWT signed, encrypted illa: yaar venaalum padikkalam |
+| 14 | Secrets environment-la irundhu varum | `config.py` (`Settings`, `SecretStr`) | Keys git, logs, error messages-la varaadhu |
+| 15 | Production weak secret-ah reject pannum | `config.py` (`check_production_secret`) | Therinja signing key-oda public-a eppovum run aaga koodadhu |
+| 16 | Production-la `/docs` illa | `main.py` | Ovoru route-oda map-ah strangers-ku kudukka vendaam |
+| 17 | CORS settings-la irundhu mattum | `main.py`, `config.py` | Unga frontend-oda origin mattum browser-la irundhu API call pannalam |
+| 18 | Ovoru response-layum security headers | `main.py` (`add_security_headers`) | Browser tricks-oda muzhu classes-ku cheap protection |
+
+Ovoru item-um [code-ku keezha](#checklist-item-by-item) detail-a explain
+aagirukku.
+
+## Files
+
+| File | Responsibility |
+|---|---|
+| `config.py` | `Settings` (pydantic-settings): ella setting-um secret-um, env / `.env`-la irundhu; production-la weak `SECRET_KEY`-ah reject pannum |
+| `database.py` | `engine`, `SessionLocal`, `Base`, `get_db()`, `config.py`-la irundhu URL vachi |
+| `models.py` | `secure_users`, `secure_notes`, `secure_refresh_tokens` tables |
+| `schemas.py` | request bodies mattrum `*Out` response models (enga-um `hashed_password` illa) |
+| `crud.py` | database functions + demo seed data |
+| `security.py` | password hashing (pwdlib/argon2), JWTs create/decode pannurathu |
+| `dependencies.py` | `get_current_user`, `require_role(...)` |
+| `rate_limit.py` | share aagra slowapi `Limiter` |
+| `routers/auth.py` | `/token`, `/refresh`, `/register` |
+| `routers/users.py` | `/users/me`, `/admin/users` |
+| `routers/notes.py` | ownership checks-oda notes CRUD |
+| `main.py` | app-ah create pannudhu: docs switch, CORS, security headers, rate-limit handler, routers |
+
+Routes ippo oru `routers/` folder-la irukku: ovoru file-um oru
+`APIRouter` create panni, adhula routes declare pannum, `main.py`
+`app.include_router(...)` vachi avangala plug pannum. Oru periya
+`main.py`-la irukra adhe routes dhan, subject vaariya group
+pannirukom. `routers/__init__.py` empty; `from routers import auth, notes, users`
+work aaganum nu `routers`-ah oru package aakka mattum dhan adhu.
+
+## Code
+
+**`.env.example`** — development-la ella setting-um optional:
+
+```bash title=".env.example"
+# Copy this file to .env and adjust the values. Every setting below has
+# a working development default baked into config.py, so creating a
+# .env is optional — the app runs with zero setup if you skip it.
+
+MYSQL_HOST=127.0.0.1
+MYSQL_PORT=3306
+MYSQL_USER=root
+MYSQL_PASSWORD=
+MYSQL_DB=fastapi_learn
+
+# Set this to override everything above at once — e.g. point at SQLite
+# for a quick local try with no MySQL server running at all.
+# DATABASE_URL=sqlite:///./test.db
+
+# Signs every JWT. The built-in default is fine for development, but
+# with ENVIRONMENT=production the app REFUSES TO START unless you set a
+# real one (32+ characters). Generate one with:
+#   python -c "import secrets; print(secrets.token_urlsafe(48))"
+# SECRET_KEY=
+
+# "development" (default) or "production". Production also turns off
+# /docs, /redoc and /openapi.json.
+# ENVIRONMENT=development
+
+# Short-lived access tokens, longer-lived refresh tokens.
+# ACCESS_TOKEN_EXPIRE_MINUTES=15
+# REFRESH_TOKEN_EXPIRE_DAYS=7
+
+# Which browser origins may call this API (a JSON list).
+# CORS_ORIGINS=["http://localhost:5173","http://127.0.0.1:5173"]
+
+# How many POST /token attempts one IP gets (slowapi syntax).
+# LOGIN_RATE_LIMIT=5/minute
+```
+
+**`config.py`** — ella settings-um secrets-um oru validated `Settings` object-la:
+
+```python title="config.py"
+from typing import Literal
+
+from pydantic import SecretStr, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Only ever used in development. Production refuses to start with it.
+DEV_SECRET_KEY = "dev-only-secret-key-do-not-use-in-production"
+
+
+class Settings(BaseSettings):
+    # CHECKLIST: secrets come from the environment (or .env), never from
+    # code. Each field is read from the env var of the same name,
+    # case-insensitive: SECRET_KEY -> secret_key, DATABASE_URL -> database_url.
+    # hide_input_in_errors: if validation fails, the error message must
+    # not print the values it was given (one of them is the secret key).
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore", hide_input_in_errors=True)
+
+    environment: Literal["development", "production"] = "development"
+
+    # SecretStr hides the value in repr()/logs: it prints as '**********'.
+    # Call .get_secret_value() at the one place that really needs it.
+    secret_key: SecretStr = SecretStr(DEV_SECRET_KEY)
+
+    # CHECKLIST: short-lived access tokens. A stolen one is useful for
+    # 15 minutes, not forever. The refresh token gets a new one.
+    access_token_expire_minutes: int = 15
+    refresh_token_expire_days: int = 7
+
+    # CHECKLIST: CORS origins are an explicit list from settings.
+    cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
+
+    # CHECKLIST: rate-limited login (see routers/auth.py).
+    login_rate_limit: str = "5/minute"
+
+    mysql_host: str = "127.0.0.1"
+    mysql_port: int = 3306
+    mysql_user: str = "root"
+    mysql_password: SecretStr = SecretStr("")
+    mysql_db: str = "fastapi_learn"
+    # Set DATABASE_URL to override all the mysql_* fields at once.
+    database_url: str | None = None
+
+    @property
+    def sqlalchemy_url(self) -> str:
+        if self.database_url:
+            return self.database_url
+        password = self.mysql_password.get_secret_value()
+        return (
+            f"mysql+pymysql://{self.mysql_user}:{password}"
+            f"@{self.mysql_host}:{self.mysql_port}/{self.mysql_db}"
+        )
+
+    @property
+    def is_production(self) -> bool:
+        return self.environment == "production"
+
+    # CHECKLIST: fail fast. A production server with the well-known dev
+    # key would let anyone forge tokens, so it must not start at all.
+    @model_validator(mode="after")
+    def check_production_secret(self) -> "Settings":
+        if self.is_production:
+            key = self.secret_key.get_secret_value()
+            if key == DEV_SECRET_KEY:
+                raise ValueError("SECRET_KEY must be set in production (the dev default is public)")
+            if len(key) < 32:
+                raise ValueError("SECRET_KEY must be at least 32 characters in production")
+        return self
+
+
+settings = Settings()
+```
+
+**`database.py`** — ippo `os.getenv()`-ku pathila `settings`-la irundhu URL edukkudhu:
+
+```python title="database.py"
+from sqlalchemy import create_engine
+from sqlalchemy.orm import declarative_base, sessionmaker
+
+from config import settings
+
+# Connection details now come from config.py (pydantic-settings) instead
+# of os.getenv() calls here. DATABASE_URL still overrides everything.
+engine = create_engine(settings.sqlalchemy_url, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+```
+
+**`models.py`** — users (`role`-oda), notes (`owner_id`-oda), refresh tokens:
+
+```python title="models.py"
+from sqlalchemy import Boolean, Column, ForeignKey, Integer, String, Text
+
+from database import Base
+
+
+class UserModel(Base):
+    __tablename__ = "secure_users"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    username = Column(String(50), nullable=False, unique=True)
+    # Only ever the argon2 hash, never the password itself.
+    hashed_password = Column(String(255), nullable=False)
+    role = Column(String(20), nullable=False, default="user")
+    is_active = Column(Boolean, nullable=False, default=True)
+
+
+class NoteModel(Base):
+    __tablename__ = "secure_notes"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    title = Column(String(100), nullable=False)
+    body = Column(Text, nullable=False)
+    owner_id = Column(Integer, ForeignKey("secure_users.id"), nullable=False)
+
+
+class RefreshTokenModel(Base):
+    # One row per refresh token ever issued, keyed by its "jti" (a random
+    # id inside the token). This is what makes rotation real: a used or
+    # revoked refresh token is rejected even though its signature and
+    # expiry are still fine.
+    __tablename__ = "secure_refresh_tokens"
+
+    jti = Column(String(64), primary_key=True)
+    user_id = Column(Integer, ForeignKey("secure_users.id"), nullable=False)
+    revoked = Column(Boolean, nullable=False, default=False)
+```
+
+**`schemas.py`** — limits-oda request bodies, secrets illaadha response models:
+
+```python title="schemas.py"
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class UserCreate(BaseModel):
+    username: str = Field(min_length=3, max_length=50, pattern=r"^[a-zA-Z0-9_.-]+$")
+    # max_length stops someone sending a 10 MB "password" to burn CPU
+    # in the hasher.
+    password: str = Field(min_length=8, max_length=128)
+    # No "role" field on purpose: a client must never be able to make
+    # itself an admin by sending {"role": "admin"}. Extra keys are ignored.
+
+
+# CHECKLIST: response_model never exposes hashed_password. It simply
+# isn't listed here, so it can't leave the server even by accident.
+class UserOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    username: str
+    role: str
+    is_active: bool
+
+
+class Token(BaseModel):
+    access_token: str
+    refresh_token: str
+    token_type: str = "bearer"
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
+
+class NoteCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=100)
+    body: str = Field(default="", max_length=2000)
+
+
+class NoteOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    title: str
+    body: str
+    owner_id: int
+```
+
+**`crud.py`** — database functions mattrum demo seed data:
+
+```python title="crud.py"
+from sqlalchemy.orm import Session
+
+from models import NoteModel, RefreshTokenModel, UserModel
+from schemas import NoteCreate, UserCreate
+from security import hash_password
+
+
+# ---- users ----
+
+def get_user_by_username(db: Session, username: str) -> UserModel | None:
+    return db.query(UserModel).filter(UserModel.username == username).first()
+
+
+def get_users(db: Session) -> list[UserModel]:
+    return db.query(UserModel).order_by(UserModel.id).all()
+
+
+def create_user(db: Session, data: UserCreate, role: str = "user") -> UserModel:
+    row = UserModel(username=data.username, hashed_password=hash_password(data.password), role=role)
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+# ---- refresh tokens ----
+
+def save_refresh_token(db: Session, jti: str, user_id: int) -> None:
+    db.add(RefreshTokenModel(jti=jti, user_id=user_id))
+    db.commit()
+
+
+def get_refresh_token(db: Session, jti: str) -> RefreshTokenModel | None:
+    return db.get(RefreshTokenModel, jti)
+
+
+def revoke_refresh_token(db: Session, row: RefreshTokenModel) -> None:
+    row.revoked = True
+    db.commit()
+
+
+# ---- notes ----
+
+def get_notes(db: Session, owner_id: int | None = None) -> list[NoteModel]:
+    query = db.query(NoteModel)
+    if owner_id is not None:
+        query = query.filter(NoteModel.owner_id == owner_id)
+    return query.order_by(NoteModel.id).all()
+
+
+def get_note(db: Session, note_id: int) -> NoteModel | None:
+    return db.get(NoteModel, note_id)
+
+
+def create_note(db: Session, data: NoteCreate, owner_id: int) -> NoteModel:
+    # owner_id comes from the logged-in user, never from the request body.
+    row = NoteModel(**data.model_dump(), owner_id=owner_id)
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def update_note(db: Session, row: NoteModel, data: NoteCreate) -> NoteModel:
+    row.title = data.title
+    row.body = data.body
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def delete_note(db: Session, row: NoteModel) -> None:
+    db.delete(row)
+    db.commit()
+
+
+# ---- demo data ----
+
+def seed(db: Session) -> None:
+    if db.query(UserModel).count() > 0:
+        return
+    alice = UserModel(username="alice", hashed_password=hash_password("alice-password"), role="user")
+    bob = UserModel(username="bob", hashed_password=hash_password("bob-password"), role="user")
+    admin = UserModel(username="admin", hashed_password=hash_password("admin-password"), role="admin")
+    db.add_all([alice, bob, admin])
+    db.flush()  # assigns the ids so the notes below can point at them
+    db.add_all(
+        [
+            NoteModel(title="Alice's shopping list", body="Milk, eggs", owner_id=alice.id),
+            NoteModel(title="Alice's secret", body="Only Alice (and admins) can read this", owner_id=alice.id),
+            NoteModel(title="Bob's todo", body="Fix the bike", owner_id=bob.id),
+        ]
+    )
+    db.commit()
+```
+
+**`security.py`** — hashing, tokens create/decode pannurathu:
+
+```python title="security.py"
+import uuid
+from datetime import datetime, timedelta, timezone
+
+import jwt
+from fastapi import HTTPException, status
+from pwdlib import PasswordHash
+
+from config import settings
+
+ALGORITHM = "HS256"
+
+# Argon2 with sensible defaults (salted, deliberately slow).
+password_hash = PasswordHash.recommended()
+
+# Used when the username doesn't exist, so a failed login takes the same
+# time either way and the response time can't reveal which usernames exist.
+DUMMY_HASH = password_hash.hash("dummy-password-for-timing")
+
+
+def hash_password(password: str) -> str:
+    return password_hash.hash(password)
+
+
+def verify_password(password: str, hashed: str) -> bool:
+    return password_hash.verify(password, hashed)
+
+
+def _create_token(username: str, token_type: str, expires_delta: timedelta, extra: dict | None = None) -> str:
+    payload = {
+        "sub": username,
+        "exp": datetime.now(timezone.utc) + expires_delta,
+        "type": token_type,
+        **(extra or {}),
+    }
+    # Note what is NOT in here: no role, no password, nothing secret.
+    # Anyone holding the token can base64-decode and read the payload.
+    return jwt.encode(payload, settings.secret_key.get_secret_value(), algorithm=ALGORITHM)
+
+
+def create_access_token(username: str) -> str:
+    return _create_token(username, "access", timedelta(minutes=settings.access_token_expire_minutes))
+
+
+def create_refresh_token(username: str) -> tuple[str, str]:
+    """Returns (token, jti). The jti is stored in the database so the
+    token can be rotated/revoked."""
+    jti = uuid.uuid4().hex
+    token = _create_token(
+        username, "refresh", timedelta(days=settings.refresh_token_expire_days), {"jti": jti}
+    )
+    return token, jti
+
+
+def credentials_error(detail: str = "Could not validate credentials") -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail=detail,
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+def decode_token(token: str, expected_type: str) -> dict:
+    """Checks signature + expiry + type. Raises 401 on any problem."""
+    try:
+        # algorithms=[...] is required: never let the token pick its own
+        # algorithm (the classic "alg": "none" attack).
+        payload = jwt.decode(token, settings.secret_key.get_secret_value(), algorithms=[ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        raise credentials_error("Token expired")
+    except jwt.InvalidTokenError:
+        raise credentials_error()
+    # A refresh token must not work as an access token, and vice versa.
+    if payload.get("type") != expected_type or not payload.get("sub"):
+        raise credentials_error()
+    return payload
+```
+
+**`dependencies.py`** — yaar call pannuraanga, avangalukku allowed-a:
+
+```python title="dependencies.py"
+from fastapi import Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
+from sqlalchemy.orm import Session
+
+import crud
+from database import get_db
+from models import UserModel
+from security import credentials_error, decode_token
+
+# Reads "Authorization: Bearer <token>" and powers the Authorize button
+# in /docs. tokenUrl is where /docs sends the username + password.
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+
+def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> UserModel:
+    payload = decode_token(token, expected_type="access")
+    # CHECKLIST: the role is re-read from the database on every request,
+    # never trusted from the token. Demote or deactivate a user and it
+    # takes effect immediately, not when their token expires.
+    user = crud.get_user_by_username(db, payload["sub"])
+    if user is None:
+        raise credentials_error()
+    if not user.is_active:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Inactive user")
+    return user
+
+
+def require_role(role: str):
+    """Dependency factory: Depends(require_role("admin"))."""
+
+    def checker(user: UserModel = Depends(get_current_user)) -> UserModel:
+        if user.role != role:
+            # 403, not 401: we know who you are, you just aren't allowed.
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not enough permissions")
+        return user
+
+    return checker
+```
+
+**`rate_limit.py`** — share aagra oru `Limiter`:
+
+```python title="rate_limit.py"
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+
+# One shared Limiter for the whole app. Requests are counted per client
+# IP address, in memory. With several server processes you'd point it at
+# Redis instead (Limiter(..., storage_uri="redis://...")) so they share
+# one count.
+limiter = Limiter(key_func=get_remote_address)
+```
+
+**`routers/auth.py`** — login, refresh, register:
+
+```python title="routers/auth.py"
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.security import OAuth2PasswordRequestForm
+from sqlalchemy.orm import Session
+
+import crud
+from config import settings
+from database import get_db
+from models import UserModel
+from rate_limit import limiter
+from schemas import RefreshRequest, Token, UserCreate, UserOut
+from security import (
+    DUMMY_HASH,
+    create_access_token,
+    create_refresh_token,
+    credentials_error,
+    decode_token,
+    verify_password,
+)
+
+router = APIRouter(tags=["auth"])
+
+
+def issue_tokens(db: Session, user: UserModel) -> Token:
+    refresh_token, jti = create_refresh_token(user.username)
+    crud.save_refresh_token(db, jti, user.id)
+    return Token(access_token=create_access_token(user.username), refresh_token=refresh_token)
+
+
+# CHECKLIST: rate-limited login. The 6th attempt within a minute from
+# the same IP gets 429 Too Many Requests, which makes guessing passwords
+# by brute force impractical. slowapi needs the `request` argument.
+@router.post("/token", response_model=Token)
+@limiter.limit(settings.login_rate_limit)
+def login(request: Request, form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    user = crud.get_user_by_username(db, form.username)
+    # Hash-check even when the user doesn't exist, so both failures take
+    # the same time.
+    password_ok = verify_password(form.password, user.hashed_password if user else DUMMY_HASH)
+    # CHECKLIST: generic login error. "No such user" vs "wrong password"
+    # would tell an attacker which usernames exist.
+    if user is None or not password_ok or not user.is_active:
+        raise credentials_error("Incorrect username or password")
+    return issue_tokens(db, user)
+
+
+@router.post("/refresh", response_model=Token)
+def refresh(body: RefreshRequest, db: Session = Depends(get_db)):
+    payload = decode_token(body.refresh_token, expected_type="refresh")
+    stored = crud.get_refresh_token(db, payload.get("jti", ""))
+    # Rotation: each refresh token works exactly once. Reusing an old one
+    # (e.g. a stolen copy) fails here.
+    if stored is None or stored.revoked:
+        raise credentials_error("Refresh token is no longer valid")
+    user = crud.get_user_by_username(db, payload["sub"])
+    if user is None or not user.is_active:
+        raise credentials_error()
+    crud.revoke_refresh_token(db, stored)
+    return issue_tokens(db, user)
+
+
+@router.post("/register", response_model=UserOut, status_code=status.HTTP_201_CREATED)
+def register(data: UserCreate, db: Session = Depends(get_db)):
+    if crud.get_user_by_username(db, data.username) is not None:
+        raise HTTPException(status_code=409, detail="Username already taken")
+    # Always "user". Admins are made by an admin, not by signing up.
+    return crud.create_user(db, data, role="user")
+```
+
+**`routers/users.py`** — naan yaar, mattrum admin-only user list:
+
+```python title="routers/users.py"
+from fastapi import APIRouter, Depends
+from sqlalchemy.orm import Session
+
+import crud
+from database import get_db
+from dependencies import get_current_user, require_role
+from models import UserModel
+from schemas import UserOut
+
+router = APIRouter(tags=["users"])
+
+
+@router.get("/users/me", response_model=UserOut)
+def read_me(user: UserModel = Depends(get_current_user)):
+    return user  # the ORM row has hashed_password; UserOut drops it
+
+
+@router.get("/admin/users", response_model=list[UserOut])
+def list_users(db: Session = Depends(get_db), admin: UserModel = Depends(require_role("admin"))):
+    return crud.get_users(db)
+```
+
+**`routers/notes.py`** — notes CRUD, ovoru route-um ownership check pinnadi:
+
+```python title="routers/notes.py"
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+
+import crud
+from database import get_db
+from dependencies import get_current_user
+from models import NoteModel, UserModel
+from schemas import NoteCreate, NoteOut
+
+router = APIRouter(prefix="/notes", tags=["notes"])
+
+NOTE_ERRORS = {403: {"description": "Not your note"}, 404: {"description": "Note not found"}}
+
+
+def get_owned_note(db: Session, note_id: int, user: UserModel) -> NoteModel:
+    """Load a note and check the current user may touch it."""
+    note = crud.get_note(db, note_id)
+    if note is None:
+        raise HTTPException(status_code=404, detail="Note not found")
+    # Ownership check: logged in is not enough, it has to be YOUR note.
+    # Admins may act on any note.
+    if note.owner_id != user.id and user.role != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You don't own this note")
+    return note
+
+
+@router.get("", response_model=list[NoteOut])
+def list_notes(db: Session = Depends(get_db), user: UserModel = Depends(get_current_user)):
+    # Users see their own notes; admins see everyone's.
+    owner_id = None if user.role == "admin" else user.id
+    return crud.get_notes(db, owner_id=owner_id)
+
+
+@router.post("", response_model=NoteOut, status_code=status.HTTP_201_CREATED)
+def create_note(data: NoteCreate, db: Session = Depends(get_db), user: UserModel = Depends(get_current_user)):
+    return crud.create_note(db, data, owner_id=user.id)
+
+
+@router.get("/{note_id}", response_model=NoteOut, responses=NOTE_ERRORS)
+def read_note(note_id: int, db: Session = Depends(get_db), user: UserModel = Depends(get_current_user)):
+    return get_owned_note(db, note_id, user)
+
+
+@router.put("/{note_id}", response_model=NoteOut, responses=NOTE_ERRORS)
+def update_note(
+    note_id: int, data: NoteCreate, db: Session = Depends(get_db), user: UserModel = Depends(get_current_user)
+):
+    return crud.update_note(db, get_owned_note(db, note_id, user), data)
+
+
+@router.delete("/{note_id}", status_code=status.HTTP_204_NO_CONTENT, responses=NOTE_ERRORS)
+def delete_note(note_id: int, db: Session = Depends(get_db), user: UserModel = Depends(get_current_user)):
+    crud.delete_note(db, get_owned_note(db, note_id, user))
+```
+
+**`main.py`** — app-ah build panni ellathaiyum connect pannudhu:
+
+```python title="main.py"
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+
+import crud
+from config import settings
+from database import Base, SessionLocal, engine
+from rate_limit import limiter
+from routers import auth, notes, users
+
+Base.metadata.create_all(bind=engine)
+
+with SessionLocal() as db:
+    crud.seed(db)
+
+# CHECKLIST: no interactive docs in production. /docs is great while
+# building, but in production it hands strangers a map of every route.
+docs_off = settings.is_production
+app = FastAPI(
+    title="Secure notes",
+    docs_url=None if docs_off else "/docs",
+    redoc_url=None if docs_off else "/redoc",
+    openapi_url=None if docs_off else "/openapi.json",
+)
+
+# slowapi looks for the limiter on app.state, and this handler turns a
+# blocked request into a 429 response.
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# CHECKLIST: CORS only from settings. Never allow_origins=["*"] together
+# with allow_credentials=True (browsers reject it, and it would let any
+# site make logged-in requests). We send tokens in the Authorization
+# header, not cookies, so credentials aren't needed at all.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
+    allow_headers=["Authorization", "Content-Type"],
+)
+
+
+# CHECKLIST: security headers on every response.
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    # Don't let the browser guess a different content type than we sent.
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    # Don't allow this API to be framed by another site (clickjacking).
+    response.headers["X-Frame-Options"] = "DENY"
+    # Don't leak our URLs (which might contain ids) to other sites.
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
+
+
+app.include_router(auth.router)
+app.include_router(users.router)
+app.include_router(notes.router)
+```
+
+## Checklist, item by item
+
+### Part 1 — Neenga yaar? (authentication)
+
+1. **Passwords hash aagum, store aagaadhu.** (`security.py`,
+   [Password hashing](/tanglish/docs/security/password-hashing)-la
+   irundha maadhiri)
+   - `secure_users` table-la `hashed_password` column mattum dhan
+     irukku, `crud.create_user` / `crud.seed` eppovum `hash_password()`
+     vazhiya dhan pogum.
+   - Argon2 venumne slow-a irukkum, ovoru hash-ayum salt pannum, so leak
+     aana database passwords-ah kudukkaadhu.
+   - `UserCreate.password`-la `max_length=128`-um irukku, so CPU-ah
+     veenaakka yaarum 10 MB string-ah hasher-ku kudukka mudiyaadhu.
+2. **Generic login error, constant time-la.** (`routers/auth.py`)
+   - **Enna:** missing user, thappaana password, deactivate aana
+     account — moonukkum same `401 Incorrect username or password`.
+   - **Yen:** "No such user"-um "Wrong password"-um rendu vera answers,
+     andha difference endha usernames real nu attacker-ku sollidum.
+   - **Timing:** Argon2 hash check-ku pathu pathu milliseconds aagum, so
+     unknown user-ku seekiram return pannina adhu theriyura alavukku
+     fast-a irukkum.
+     `verify_password(form.password, user.hashed_password if user else DUMMY_HASH)`
+     user illanaalum `DUMMY_HASH`-oda (import-la oru thadava build
+     aagudhu) real hash check run pannum, so rendu paths-um same time
+     edukkum.
+3. **Rate-limit aana login.** (`rate_limit.py`, `routers/auth.py`,
+   `main.py`, [Rate limiting](/tanglish/docs/security/rate-limiting)-la
+   irundha maadhiri)
+   - `Limiter` ippo adhoda sontha `rate_limit.py`-la irukku, yen-na
+     rendu files-ku adhu venum: `routers/auth.py` (decorator) mattrum
+     `main.py` (`app.state.limiter` mattrum `429` handler). Adha
+     `main.py`-la vechaa router `main.py`-ah import pannum, `main.py`
+     router-ah import pannum: circular import.
+   - IP-ku `5/minute`-la, 6-aavadhu try `429 Too Many Requests` vaangum,
+     sariyaana password-oda kooda.
+   - `@limiter.limit` `@router.post`-ku **keezha** irukkanum, function
+     `request: Request` argument edukkanum, yen-na slowapi client IP-ah
+     adhula irundhu padikkum.
+   - Limit `settings.login_rate_limit`-la (`LOGIN_RATE_LIMIT`) irundhu
+     varudhu, so production code change illama tune pannalam. 12/i maadhiri
+     illama, indha limiter `headers_enabled` set pannala, so route-ku
+     `response: Response` parameter venaam.
+4. **Short-lived access tokens, meedhiku refresh tokens.**
+   (`config.py`, `security.py`,
+   [JWT login](/tanglish/docs/security/jwt-login) mattrum
+   [Refresh tokens](/tanglish/docs/security/refresh-tokens)-la irundha
+   maadhiri)
+   - `access_token_expire_minutes: int = 15`,
+     `refresh_token_expire_days: int = 7`.
+   - **Yen:** access token-ah "log out" panna mudiyaadhu: issue
+     aagiduchu-na `exp` varaikkum valid. 15 nimishathula vechaa, onnu
+     leak aanaalum damage-ku oru cap irukkum.
+   - Refresh token jaasthi naal irukkum, aana adhu oray route-ku
+     (`/refresh`) mattum dhan pogum, ovoru request-oda-vum illa.
+5. **Token type check aagudhu.** (`security.py`)
+   - `_create_token` ovoru payload-layum `"type": "access"` illa
+     `"type": "refresh"` podum, `decode_token(token, expected_type)`
+     thappaana type-ah reject pannum (`sub` illaadha token-ayum).
+   - **Yen:** rendu tokens-um same key-la sign aagudhu, so signature
+     mattum vachi rendaiyum pirikka mudiyaadhu. Indha check illana,
+     7-day refresh token 7-day access token-a work aagum, item 4-ku
+     artham-e illama poidum.
+6. **Algorithm-ah server fix pannudhu.** (`security.py`)
+   - `jwt.decode(..., algorithms=[ALGORITHM])`.
+   - **Yen:** JWT-oda header endha algorithm nu solludhu, token
+     attacker kaila irukku. `algorithms=[...]`-na server HS256 mattum
+     dhan accept pannum, so `"alg": "none"` (signature-e illa) nu solra
+     token reject aagum.
+7. **Refresh tokens rotate aagum.** (`models.py`, `routers/auth.py`)
+   - **Problem:** JWT expire aagura varaikkum valid; token-la edhuvum
+     adha "use panni mudikka" mudiyaadhu.
+   - **Fix:** `create_refresh_token` ovoru refresh token-layum oru
+     random `jti` (`uuid.uuid4().hex`) podum, `issue_tokens` adha
+     `secure_refresh_tokens`-la save pannum.
+   - `/refresh` token-ah decode panni, `jti`-ah look up panni, unknown
+     illa already `revoked`-na reject pannum. Illana adha revoked-a mark
+     panni oru **pudhu pair** kudukkum.
+   - **Yen:** yaaravadhu refresh token-ah thirudinaa, adhigapatcham oru
+     use dhan kidaikkum, real user-oda adutha refresh fail aagum — edho
+     thappu nu oru signal.
+   - `/refresh` user-ayum thirumba check pannum: delete aana illa
+     deactivate aana account valid token-oda kooda refresh panna
+     mudiyaadhu.
+
+### Part 2 — Neenga enna pannalam? (authorization)
+
+8. **Role database-la irundhu thirumba padikkapadudhu, token-la irundhu
+   nambala.** (`dependencies.py`)
+   - `get_current_user` access token-ah decode panni, ovoru request-layum
+     `payload["sub"]` vachi user-ah load pannum.
+   - **Yen:** token neenga *yaar* nu mattum solludhu. Adhu
+     `"role": "admin"`-um sonna, yaaraiyavadhu demote pannina avanga
+     token expire aagura varaikkum onnum nadakkaadhu. Request-ku oru
+     chinna query, udane demotion-um udane deactivation-um
+     (`is_active=False` → `403 Inactive user`) kudukkum.
+9. **Role checks `403` return pannum.** (`dependencies.py`,
+   `routers/users.py`, [Roles](/tanglish/docs/security/roles)-la irundha
+   maadhiri)
+   - `require_role("admin")` oru dependency **factory**: adhu oru
+     `checker` function return pannum, FastAPI adha real dependency-a
+     run pannum. `checker` thaane `get_current_user`-ah depend pannudhu,
+     so first authentication, apparam role check.
+   - `/admin/users` `Depends(require_role("admin"))` use pannudhu;
+     `admin` parameter body-la use aagala, check run aaganum nu dhan
+     irukku.
+   - **`401` vs `403`:** `401`-na "neenga yaar nu theriyaadhu". `403`-na
+     "neenga yaar nu nalla theriyum, answer illa." Thirumba login
+     pannina `403` sariyaagaadhu, so frontend login form illa, oru
+     message kaattanum.
+10. **Ovoru note route-layum ownership checks.** (`routers/notes.py`,
+    [Ownership](/tanglish/docs/security/ownership)-la irundha maadhiri)
+    - `get_owned_note` note-ah load pannum (illana `404`), apparam
+      `note.owner_id == user.id` illa user admin illana
+      `403 You don't own this note` raise pannum.
+    - **Yen:** "login aagirukku"-um "note 3 padikkalam"-um onnu illa.
+      Ids guess panna easy (1, 2, 3...), so indha check illana URL-la
+      number-ah maathi Alice Bob-oda notes-ah padikkalam.
+    - GET, PUT, DELETE moonum indha oray function vazhiya pogudhu, so
+      edhuvum check-ah marakka mudiyaadhu. List route filter pannudhu:
+      `owner_id = None if user.role == "admin" else user.id`.
+11. **Client adhoda owner illa role-ah eppovum pick panna mudiyaadhu.**
+    (`schemas.py`, `crud.py`, `routers/auth.py`)
+    - `NoteCreate`-la `owner_id` illa: `crud.create_note` adha login
+      aana user-la irundhu edukkum (`owner_id=user.id`).
+    - `UserCreate`-la `role` illa, `/register` eppovum `role="user"`
+      anuppum. `{"role": "admin"}` anuppina silent-a ignore aagum.
+    - **Yen:** indha thappu-ku per **mass assignment**: client anuppina
+      edhaiyum neraa database row-la copy pannurathu.
+
+### Part 3 — Server-ah vittu enna veliya pogudhu?
+
+12. **`response_model` `hashed_password`-ah eppovum expose pannaadhu.**
+    (`schemas.py`)
+    - `/users/me` hash-oda serthu muzhu ORM row-ah return pannudhu,
+      `response_model=UserOut` adha `id`, `username`, `role`,
+      `is_active`-a filter pannudhu. Hash list-laye illa, so accident-a
+      kooda server-ah vittu veliya pogaadhu.
+    - **Yen:** hash password illa, aana attacker adha vachi rate limit
+      illama full speed-la offline guess pannalam.
+13. **JWT payload-la secret edhuvum illa.** (`security.py`)
+    - Payload-la `sub`, `exp`, `type` (refresh tokens-ku `jti`) mattum
+      dhan. Role illa, password illa.
+    - **Yen:** JWT **signed**, **encrypted** illa. Onna
+      [jwt.io](https://jwt.io)-la paste pannunga, padikkalam. Signature
+      yaarum adha maathala nu mattum dhan prove pannum.
+
+### Part 4 — Configuration mattrum deployment
+
+14. **Secrets environment-la irundhu varum.** (`config.py`)
+    - `Settings(BaseSettings)` ovoru field-ayum same per-oda env var-la
+      irundhu, case-insensitive-a (`SECRET_KEY` → `secret_key`,
+      `CORS_ORIGINS` → `cors_origins`), illa `.env`-la irundhu padikkum.
+      Types-um validate aagum: `mysql_port: int` `"abc"`-ah reject
+      pannum, `cors_origins: list[str]` JSON list-a parse aagum.
+    - `extra="ignore"` `Settings`-ku theriyaadha keys-ah `.env`-la
+      vekka vidum.
+    - `SecretStr` `'**********'`-a print aagum, so key accident-a log-la
+      vara mudiyaadhu, `hide_input_in_errors=True` validation error
+      messages-la irundhum adha thalli vaikkum.
+    - Real value theva padra idathula mattum dhan padikkapadudhu:
+      `security.py`-la `settings.secret_key.get_secret_value()`.
+    - `sqlalchemy_url` MySQL URL-ah build pannum (illa `DATABASE_URL`-ah
+      return pannum), adhanaala dhan `database.py` ippo thaane edha
+      env var-um padikkala.
+15. **Weak secret-oda production start aagave aagaadhu.** (`config.py`)
+    - `check_production_secret` oru `model_validator(mode="after")`:
+      ella field-um load aana appuram run aagum. Production-la dev
+      key-ayum 32 characters-ku kammiyaana edhaiyum reject pannum.
+    - `config.py` import aagumbodhu `settings = Settings()` run aagudhu,
+      so uvicorn start aagi mudikkradhukku munnadiye validator raise
+      pannidum.
+    - **Yen:** dev key indha public repo-la inga print aagirukku. Adhu
+      therinja yaar venaalum `"sub": "admin"` nu solra sontha token-ah
+      sign pannalam. Public key-oda amaidhiya run aagradha vida,
+      startup-la satham pottu crash aagradhu evlovo better.
+16. **Production-la `/docs` illa.** (`main.py`)
+    - `settings.is_production`-na `docs_url`, `redoc_url`,
+      `openapi_url` moonum `None`.
+    - **Yen:** `/openapi.json` ovoru route, parameter, error-oda
+      complete map. `openapi_url`-ah off pannradhu dhan romba mukkiyam:
+      `/docs`-um `/redoc`-um adha dhan load pannum. Idhu defence in
+      depth, poottu illa: eppadi irundhaalum routes mela irukra checks-la
+      protect aagirukku.
+17. **CORS settings-la irundhu mattum.** (`main.py`)
+    - `allow_origins=settings.cors_origins`, so production adhoda real
+      frontend domain-ah `CORS_ORIGINS` vazhiya list pannalam.
+      [React + MySQL](/tanglish/docs/mysql-react)-oda compare pannunga,
+      adhu origins-ah hard-code panni ella method-um header-um allow
+      pannuchu; inga methods-um headers-um exact lists.
+    - `allow_origins=["*"]`-ah `allow_credentials=True`-oda **eppovum**
+      podaadheenga: adhu edha website-um visitor-oda pera-la logged-in
+      requests panna vidum (browsers andha combination-ah refuse-um
+      pannum).
+    - Indha app tokens-ah cookies-la illa, `Authorization` header-la
+      anuppudhu, so credentials theva-e illa: `allow_credentials=False`.
+18. **Ovoru response-layum security headers.** (`main.py`)
+    - `@app.middleware("http")` **ovoru** request-ayum wrap pannum,
+      `401`s, `404`s kooda: route-ah run pannum
+      (`await call_next(request)`), apparam thirumba vandha edhulayum
+      headers add pannum.
+    - `X-Content-Type-Options: nosniff` browser vera content type-ah
+      guess pannradha nirutthum; `X-Frame-Options: DENY` vera sites
+      frame pannradha block pannum (clickjacking);
+      `Referrer-Policy: no-referrer` URLs (ids irukkalaam) vera sites-ku
+      leak aagaama paathukkum.
+    - Real deployment HTTPS-la serve aanadhum `Strict-Transport-Security`-um
+      add pannum (perumbaalum app illa, reverse proxy).
+
+### Indha app-la illa (aana real checklist-la irukku)
+
+- **HTTPS.** HTTP-la tokens-um passwords-um plain text-a pogum.
+  Production-la eppovum app-ah HTTPS pinnadi vachukonga.
+- Sensitive fields-ah rest-la **encrypt pannurathu**:
+  [Encrypt & decrypt fields](/tanglish/docs/security/encryption)
+  paarunga.
+- URLs-la **sequential ids-ah maraikkurathu**:
+  [ID hashing](/tanglish/docs/security/id-hashing) paarunga. Indha app
+  plain ids vachirukku, yen-na ownership check (item 10) dhan real
+  protection; ids-ah maraikkradhu guess pannradha konjam kashtam
+  aakkum, avlo dhan.
+- Onnukku mela server process run pannumbodhu **share aagra rate-limit
+  store** (Redis). `rate_limit.py`-la irukra in-memory count process-ku
+  thani.
+
+## Routes
+
+Seed users (table empty-a irundha mattum):
+
+| Username | Password | Role |
+|---|---|---|
+| `alice` | `alice-password` | user (notes 1, 2 avalodhu) |
+| `bob` | `bob-password` | user (note 3 avanodhu) |
+| `admin` | `admin-password` | admin |
+
+| Route | Auth | Description |
+|---|---|---|
+| `POST /token` | illa | Form body `username` + `password`. `access_token` + `refresh_token` return pannum. `401` "Incorrect username or password"; nimishathula 5 tries-ku appuram `429` |
+| `POST /refresh` | illa | `refresh_token`-oda JSON body. Oru **pudhu pair** return pannum; pazhaya refresh token work aagaadhu. Expired, reuse, illa refresh token illana `401` |
+| `POST /register` | illa | `username`, `password`-oda JSON body. `201` (eppovum role `user`), eduthaachu-na `409`, invalid-na `422` |
+| `GET /users/me` | user | Naan yaar (`id`, `username`, `role`, `is_active`) |
+| `GET /admin/users` | admin | Ella users-um. Non-admins-ku `403` |
+| `GET /notes` | user | Unga notes (admins: ellarudhum) |
+| `POST /notes` | user | `title`, `body`-oda JSON body. `201`; owner eppovum neenga dhan |
+| `GET /notes/{note_id}` | user | Illana `404`, ungaludhu illana `403` (admins pannalam) |
+| `PUT /notes/{note_id}` | user | Title + body replace. Same `404` / `403` |
+| `DELETE /notes/{note_id}` | user | `204`. Same `404` / `403` |
+
+"user" illa "admin" nu mark aana ovoru route-um valid access token
+illana `401` kudukkum.
+
+## Try it
+
+```bash
+cd example/12/j
+uvicorn main:app --reload
+```
+
+Login pannunga (OAuth2 kekkura maadhiri **form** body, JSON illa),
+apparam response-la irukra `access_token`-ah `TOKEN`-ku pathila,
+`refresh_token`-ah `REFRESH`-ku pathila use pannunga:
+
+```bash
+curl -X POST http://127.0.0.1:8000/token -d "username=alice&password=alice-password"
+curl http://127.0.0.1:8000/users/me -H "Authorization: Bearer TOKEN"
+curl http://127.0.0.1:8000/notes -H "Authorization: Bearer TOKEN"
+curl -X POST http://127.0.0.1:8000/notes -H "Authorization: Bearer TOKEN" -H "Content-Type: application/json" -d "{\"title\": \"Groceries\", \"body\": \"Bread\"}"
+curl -X PUT http://127.0.0.1:8000/notes/1 -H "Authorization: Bearer TOKEN" -H "Content-Type: application/json" -d "{\"title\": \"Edited\", \"body\": \"New body\"}"
+curl -X DELETE http://127.0.0.1:8000/notes/1 -H "Authorization: Bearer TOKEN"
+curl -X POST http://127.0.0.1:8000/refresh -H "Content-Type: application/json" -d "{\"refresh_token\": \"REFRESH\"}"
+curl -X POST http://127.0.0.1:8000/register -H "Content-Type: application/json" -d "{\"username\": \"carol\", \"password\": \"carol-password\"}"
+```
+
+`alice`-a try panna vendiyavai:
+
+- `GET /notes/3` → `403` "You don't own this note" (adhu Bob-odhu).
+- `GET /admin/users` → `403` "Not enough permissions". `admin`-a login
+  pannina work aagum.
+- Adhe `/refresh` call-ah rendu thadava run pannunga → rendaavadhu
+  `401` "Refresh token is no longer valid" (rotation).
+- **Refresh** token-ah Bearer token-a `/users/me`-ku anuppunga → `401`.
+- Oru nimishathula 6 thadava thappaana password-oda login pannunga →
+  6-aavadhu answer `429 Too Many Requests`, password sari-a irundhaalum.
+- Edha curl-layum `-i` pottaa security headers theriyum.
+- Oru access token-ah [jwt.io](https://jwt.io)-la paste pannunga:
+  payload (`sub`, `exp`, `type`) yaar venaalum padikkalam.
+
+### Production mode
+
+```bash
+export ENVIRONMENT=production
+uvicorn main:app
+```
+
+...start aaga maattengudhu: `SECRET_KEY must be set in production`.
+Real key-ah generate panni thirumba try pannunga:
+
+```bash
+export SECRET_KEY=$(python -c "import secrets; print(secrets.token_urlsafe(48))")
+uvicorn main:app
+```
+
+Ippo start aagum, `/docs`, `/redoc`, `/openapi.json` moonum `404`
+return pannum.
+
+Adutha step: [React login UI](/tanglish/docs/security/react) — login
+panni, tokens store panni, automatic-a refresh panra oru frontend.

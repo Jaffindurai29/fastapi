@@ -1,0 +1,451 @@
+---
+title: "1. APIRouter"
+description: Routes-ah main.py-la irundhu prefix, tags, include_router-oda oru routers/ package-ku move panradhu, plus oru /health check.
+---
+
+<GithubLink path="example/10/a" />
+
+Ippo varaikkum ovoru route-um `main.py`-la dhan irundhuchu. Inga item
+routes `routers/items.py`-ku pogudhu, oru health check
+`routers/health.py`-ku pogudhu, `main.py` "app-ah create pannu, routers-ah
+plug pannu"-nu surungidudhu. API [Status codes](/tanglish/docs/validation/status-codes)-oda
+same full CRUD dhan, [response_model](/tanglish/docs/validation/response-model)
+maadhiri `ItemOut` rows return pannudhu.
+
+| Route | Description |
+|---|---|
+| `GET /items` | Ella rows-um |
+| `GET /items/{item_id}` | Oru row; illana `404` |
+| `POST /items` | Insert; `201`, name already irundha `409`, body oru rule-ah break pannina `422` |
+| `PATCH /items/{item_id}` | Anuppuna fields-ah mattum maathum; empty illana `null`-na `400`, `404`, `409` |
+| `DELETE /items/{item_id}` | Remove; `204`, illana `404` |
+| `GET /health` | `SELECT 1` run pannum; `{"status": "ok", "database": "ok"}`, database reach aagalana `503` |
+
+## Folder
+
+```text
+10/a/
+├── main.py            # creates the app, include_router(...) — no routes
+├── database.py        # engine, SessionLocal, Base, get_db()
+├── models.py          # ItemModel -> table structured_items
+├── schemas.py         # ItemCreate / ItemPatch / ItemOut
+├── crud.py            # plain database functions, no HTTP
+└── routers/
+    ├── __init__.py    # makes routers/ a package (empty)
+    ├── items.py       # router = APIRouter(prefix="/items", tags=["items"])
+    └── health.py      # GET /health
+```
+
+## Code
+
+**`main.py`** — app-ah build panni routers-ah plug pannudhu; routes
+edhuvum illa:
+
+```python title="main.py"
+from fastapi import FastAPI
+
+import crud
+from database import Base, SessionLocal, engine
+from routers import health, items
+
+Base.metadata.create_all(bind=engine)
+
+with SessionLocal() as db:
+    crud.seed_items(db)
+
+app = FastAPI()
+
+# main.py no longer holds any routes. It builds the app and plugs in
+# each router. Every route in items.router gets the "/items" prefix and
+# the "items" tag that router was created with.
+app.include_router(items.router)
+app.include_router(health.router)
+```
+
+**`routers/__init__.py`** — oru empty file. Adhoda ore velai irukradhu
+dhan, appo dhan Python `routers/`-ah import panna mudiyura oru package-a
+paakkum.
+
+**`routers/items.py`** — ovoru `/items` route-um, oru `APIRouter`-la:
+
+```python title="routers/items.py"
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+
+import crud
+from database import get_db
+from models import ItemModel
+from schemas import ItemCreate, ItemOut, ItemPatch
+
+# prefix: every path below starts with /items, so the decorators only
+#         write the part after it.
+# tags:   groups these routes under an "items" heading in /docs.
+router = APIRouter(prefix="/items", tags=["items"])
+
+NOT_FOUND = {404: {"description": "Item not found"}}
+
+
+def get_item_or_404(db: Session, item_id: int) -> ItemModel:
+    row = crud.get_item(db, item_id)
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Item {item_id} not found")
+    return row
+
+
+def ensure_name_free(db: Session, name: str) -> None:
+    if crud.get_item_by_name(db, name) is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"An item named '{name}' already exists",
+        )
+
+
+# "" + prefix = "/items". (Writing "/" here would give "/items/".)
+@router.get("", response_model=list[ItemOut])
+def list_items(db: Session = Depends(get_db)):
+    return crud.get_items(db)
+
+
+@router.get("/{item_id}", response_model=ItemOut, responses=NOT_FOUND)
+def get_item(item_id: int, db: Session = Depends(get_db)):
+    return get_item_or_404(db, item_id)
+
+
+@router.post("", response_model=ItemOut, status_code=status.HTTP_201_CREATED)
+def create_item(item: ItemCreate, db: Session = Depends(get_db)):
+    ensure_name_free(db, item.name)
+    return crud.create_item(db, item)
+
+
+@router.patch("/{item_id}", response_model=ItemOut, responses=NOT_FOUND)
+def update_item(item_id: int, patch: ItemPatch, db: Session = Depends(get_db)):
+    row = get_item_or_404(db, item_id)
+
+    # exclude_unset=True keeps only the fields the client actually sent.
+    changes = patch.model_dump(exclude_unset=True)
+    if not changes:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Send at least one field to update")
+    if None in changes.values():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Fields cannot be set to null")
+    if "name" in changes and changes["name"] != row.name:
+        ensure_name_free(db, changes["name"])
+
+    return crud.update_item(db, row, changes)
+
+
+@router.delete("/{item_id}", status_code=status.HTTP_204_NO_CONTENT, responses=NOT_FOUND)
+def delete_item(item_id: int, db: Session = Depends(get_db)):
+    row = get_item_or_404(db, item_id)
+    crud.delete_item(db, row)
+```
+
+**`routers/health.py`** — rendavadhu router, oru single `/health` route-oda:
+
+```python title="routers/health.py"
+from fastapi import APIRouter, Depends
+from fastapi.responses import JSONResponse
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
+
+from database import get_db
+
+# No prefix: this router's only route lives at /health.
+router = APIRouter(tags=["health"])
+
+
+@router.get("/health")
+def health(db: Session = Depends(get_db)):
+    try:
+        # The cheapest query there is. If it works, the database is up
+        # and the connection settings are right.
+        db.execute(text("SELECT 1"))
+    except SQLAlchemyError:
+        # 503 Service Unavailable — the app is running, but can't do its job.
+        return JSONResponse(status_code=503, content={"status": "error", "database": "unreachable"})
+    return {"status": "ok", "database": "ok"}
+```
+
+**`database.py`** — topic 6-oda same:
+
+```python title="database.py"
+import os
+
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+load_dotenv()
+
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
+MYSQL_USER = os.getenv("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
+
+# Set DATABASE_URL directly to override everything above (e.g. to point
+# at SQLite for a quick local test with no MySQL server at all).
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    f"mysql+pymysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}",
+)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+```
+
+**`models.py`** — `structured_items` table:
+
+```python title="models.py"
+from sqlalchemy import Column, Float, Integer, String
+
+from database import Base
+
+
+class ItemModel(Base):
+    __tablename__ = "structured_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(50), nullable=False, unique=True)
+    price = Column(Float, nullable=False)
+    quantity = Column(Integer, nullable=False, default=0)
+```
+
+**`schemas.py`** — [Validation & Errors](/tanglish/docs/validation)-la
+irundhu `ItemCreate`, `ItemPatch`, `ItemOut`:
+
+```python title="schemas.py"
+from typing import Optional
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+class ItemCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=50)
+    price: float = Field(gt=0, le=1_000_000)
+    quantity: int = Field(default=0, ge=0)
+
+    @field_validator("name")
+    @classmethod
+    def name_not_blank(cls, value: str) -> str:
+        value = value.strip()
+        if value == "":
+            raise ValueError("name must not be blank")
+        return value
+
+
+# Same rules as ItemCreate, but every field is optional — PATCH only
+# sends what changed.
+class ItemPatch(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=50)
+    price: Optional[float] = Field(default=None, gt=0, le=1_000_000)
+    quantity: Optional[int] = Field(default=None, ge=0)
+
+    @field_validator("name")
+    @classmethod
+    def name_not_blank(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        value = value.strip()
+        if value == "":
+            raise ValueError("name must not be blank")
+        return value
+
+
+# What goes back out. from_attributes lets response_model read a
+# SQLAlchemy row directly (row.name), as in 8/d.
+class ItemOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    price: float
+    quantity: int
+```
+
+**`crud.py`** — plain database functions, HTTP illa:
+
+```python title="crud.py"
+from sqlalchemy.orm import Session
+
+from models import ItemModel
+from schemas import ItemCreate
+
+
+def get_items(db: Session, skip: int = 0, limit: int | None = None) -> list[ItemModel]:
+    query = db.query(ItemModel).order_by(ItemModel.id).offset(skip)
+    if limit is not None:
+        query = query.limit(limit)
+    return query.all()
+
+
+def get_item(db: Session, item_id: int) -> ItemModel | None:
+    return db.get(ItemModel, item_id)
+
+
+def get_item_by_name(db: Session, name: str) -> ItemModel | None:
+    return db.query(ItemModel).filter(ItemModel.name == name).first()
+
+
+def create_item(db: Session, item: ItemCreate) -> ItemModel:
+    row = ItemModel(**item.model_dump())
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def update_item(db: Session, row: ItemModel, changes: dict) -> ItemModel:
+    for field, value in changes.items():
+        setattr(row, field, value)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def delete_item(db: Session, row: ItemModel) -> None:
+    db.delete(row)
+    db.commit()
+
+
+def seed_items(db: Session) -> None:
+    if db.query(ItemModel).count() == 0:
+        db.add_all(
+            [
+                ItemModel(name="Laptop", price=999.99, quantity=5),
+                ItemModel(name="Mouse", price=19.99, quantity=50),
+                ItemModel(name="Keyboard", price=49.5, quantity=20),
+            ]
+        )
+        db.commit()
+```
+
+## Line by line
+
+`database.py`, `models.py`, `schemas.py`, `crud.py` ellam munnadiye
+paathadhu dhan ([topic overview](/tanglish/docs/project-structure)
+paarunga). Indha page-la pudhusu **routes enga irukku** angradhu dhan.
+
+**`routers/__init__.py` — oru package:**
+
+1. **Package-ah aakkura oru empty file.** Adhu irundha, `routers/`-la
+   irundhu Python import pannalaam: `from routers import items`
+   `routers/items.py`-ah load panni, module-ah `items`-a kudukkum.
+
+**`routers/items.py` — `app`-ku pathila oru `APIRouter`:**
+
+2. **`router = APIRouter(prefix="/items", tags=["items"])`.** `APIRouter`
+   oru "mini app": unga-ku already therinja adhe decorators vachi
+   (`@router.get`, `@router.post`, ...) routes-ah collect pannum, aana
+   adha thaniya run panna mudiyaadhu. Oru real `FastAPI()` app-la plug
+   pannina dhan edhavadhu pannum.
+3. **`prefix` — `/items`-ah anju dharam illa, oru dharam ezhudhunga.**
+   Decorator path prefix-oda ottikkum: `""` `/items` aagum,
+   `"/{item_id}"` `/items/{item_id}` aagum. Appuram resource-ah rename
+   panna (`/products`-nu vachukkonga), anju idathula illa, oru line
+   maathina podhum.
+4. **Collection route-ku `"/"` illa, `""` use pannunga.** `"/"`
+   `/items/`-ah (trailing slash-oda) register pannum, appuram `/items`-ku
+   oru request data-ku pathila slash version-ku oru `307` redirect
+   vaangum. `-L` add pannala-na `curl` redirects-ah follow pannadhu, so
+   oru empty `307` answer mattum dhan paappeenga. Empty string idha
+   ellam avoid pannudhu.
+5. **`tags` — `/docs` routes-ah eppadi group pannudhu.** Indha router-la
+   irukra ovoru route-um `items`-nu tag aagudhu, `routers/health.py`-la
+   irukra ovoru route-um `health`-nu. Swagger UI ovoru tag-kum oru
+   collapsible section varaiyum. Tags illana ellam oru "default" list-la
+   vizhum, API-la konjam resources vandha udane adha padikka kashtam.
+6. **Helpers routes-oda serndhu move aachu.** `get_item_or_404` mattrum
+   `ensure_name_free` item routes-la mattum dhan use aagudhu, so avanga
+   `main.py`-la illa, `routers/items.py`-la avangalukku pakkathula
+   irukkanga. GET, PATCH, DELETE ovvonnum innum `get_item_or_404`-ah
+   kai-la call pannanum;
+   [Dependencies](/tanglish/docs/project-structure/dependencies) adha oru
+   dependency-a maathi andha velaiya thookidum.
+7. **`NOT_FOUND = {404: {"description": "Item not found"}}`** — `404`
+   aaga koodiya routes-la `responses=NOT_FOUND`-a pass aagudhu, so
+   `/docs` andha response-aiyum document pannum. Oru dharam define,
+   moonu dharam reuse.
+8. **Routers shared pieces-ah import pannudhu, `main.py`-ah eppovum
+   illa.** `routers/items.py`-oda top `crud`, `get_db`, `ItemModel`,
+   schemas-ah import pannudhu. `main`-ah yaarum import pannradhu illa:
+   `main.py` routers-ah import pannudhu, routers
+   `crud`/`database`/`schemas`-ah import pannudhu. Imports ore direction-la
+   dhan pogudhu, so circular imports illa.
+9. **`PATCH` merge pannum, replace pannadhu.**
+   `model_dump(exclude_unset=True)` client anuppuna fields-ah mattum
+   vachukkum, so `{"price": 899}` `name`-aiyum `quantity`-aiyum thodadhu.
+   Empty body-ku illana `null` values-ku `400`, already irukra name-ku
+   rename pannina `409` — topic 8 maadhiriye.
+
+**`routers/health.py` — prefix illadha oru router:**
+
+10. **`router = APIRouter(tags=["health"])`** — `prefix` illa, so
+    decorator path `"/health"` dhan full path. Router-ku prefix
+    kandippa venumnu illa; related routes-ah thani file-la vachukka
+    oru vazhi-a mattum kooda irukkalaam.
+11. **Health check yen venum?** Load balancer, Docker, illana Kubernetes
+    ovoru konjam seconds-kum "indha app use panra nilaimai-la irukka?"-nu
+    kekka call panradhu idhu dhan. Python run aagudhu-nu mattum `200`
+    answer panradhu podhaadhu.
+12. **`db.execute(text("SELECT 1"))`** — irukradhulaye cheapest query.
+    Adhu work aana, database up-la irukku, connection settings-um
+    correct. `text(...)` oru raw SQL string-ah SQLAlchemy-ku mark
+    pannudhu.
+13. **`except SQLAlchemyError:` `503` return pannudhu.**
+    `503 Service Unavailable`-na "app run aagudhu, aana ippo adhoda
+    velaiya panna mudiyala"-nu artham. `HTTPException` raise pannama
+    nera oru `JSONResponse` return pannudhu, so body success answer-oda
+    same `{"status": ..., "database": ...}` shape-laye irukkum.
+
+**`main.py` — routes edhuvume illa:**
+
+14. **`from routers import health, items`** — `routers` package-la
+    irundhu rendu router modules-ah import pannudhu.
+15. **`app.include_router(items.router)`** — router-la irukra ovoru
+    route-aiyum app-ku copy pannum, vazhila router-oda `prefix`-um
+    `tags`-um apply pannum. Ovoru router-kum oru line; appuram oru pudhu
+    resource add panna `routers/`-la oru pudhu file-um innum oru
+    `include_router` line-um podhum.
+16. **`from routers import items` yen work aagudhu.** `10/a`-kulla irundhu
+    `uvicorn main:app` run pannumbodhu, andha folder dhan current
+    directory, Python imports-ku adha dhan search pannum. So `routers`
+    (folder), `crud`, `database`, `models`, `schemas` ellam top-level
+    names-a kidaikkum. Vera edathula irundhu uvicorn run pannina
+    `ModuleNotFoundError: No module named 'routers'` varum. Adhunaala
+    dhan ovoru "Run" block-um first `cd example/10/a`-nu solludhu.
+
+## Try it
+
+```bash
+curl http://127.0.0.1:8000/items
+curl http://127.0.0.1:8000/items/1
+curl -X POST http://127.0.0.1:8000/items -H "Content-Type: application/json" -d "{\"name\": \"Desk\", \"price\": 120, \"quantity\": 2}"
+curl -X PATCH http://127.0.0.1:8000/items/1 -H "Content-Type: application/json" -d "{\"price\": 899}"
+curl -X DELETE http://127.0.0.1:8000/items/2
+curl http://127.0.0.1:8000/health
+```
+
+[http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs) open pannunga:
+routes ippo rendu headings-ku keezha irukkum, **items** mattrum
+**health**, ovoru tag-kum onnu.
+
+**Postman:** Method `PATCH`, URL `http://127.0.0.1:8000/items/1`, Body →
+raw → JSON:
+
+```json
+{"price": 899}
+```
+
+Adutha step: [Dependencies](/tanglish/docs/project-structure/dependencies)
+— row load panna, pagination padikka, oru API key check panna `Depends`-ah
+vidradhu.

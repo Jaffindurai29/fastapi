@@ -1,0 +1,133 @@
+---
+title: Database Migrations
+description: Startup-la create_all call pannama, Alembic vachi database schema-ah safe-a maathurathu.
+---
+
+<GithubLink path="example/13" />
+
+Ithu varaikkum ella app-um startup-la `Base.metadata.create_all()`-ah
+call pannuchu. Adhu oru thadava mattum dhan work aagum: **missing**
+tables-ah create pannum, aana already irukra table-ah eppovum
+maathadhu. Model-la oru column add pannina `create_all` silent-a
+onnum pannadhu — so code oru column-ah expect pannum, database-la adhu
+irukkadhu, adha select panra first query-ye crash aagum.
+
+Migrations idha fix pannum. [Alembic](https://alembic.sqlalchemy.org/)
+vachi, ovoru schema change-um oru chinna Python file — `upgrade()`
+mattrum `downgrade()`-oda, order-la number panni, git-la commit panni,
+oru command-la apply pannalaam. Database edhellam already run aachu-nu
+nyabagam vachukkum, so ovoru migration-um ovoru machine-layum exact-a
+oru thadava, order-la run aagum.
+
+| Yen migrations | Adhoda artham |
+|---|---|
+| **Versioned** | Database edha run pannirukku-nu store pannum, so ovonnum oru thadava mattum, order-la run aagum. |
+| **Reviewable** | Ovoru change-um git-la code, matha code maadhiri pull request-la padikkalaam. |
+| **Reversible** | Ovoru migration-kum adha undo panra `downgrade()` irukku. |
+
+## `example/13/a`-la irukra files
+
+| File | Responsibility |
+|---|---|
+| `database.py`, `models.py`, `schemas.py`, `crud.py`, `main.py` | App, [MySQL + CRUD](/tanglish/docs/mysql-crud)-la paartha same layers. `main.py`-la `create_all` **illa**. |
+| `alembic.ini` | Alembic-oda config: migrations folder enga irukku, logging. Database URL adhula illa. |
+| `migrations/env.py` | Ovoru Alembic command-kum munnadi run aagum: database-ku connect panni, nammaloda models pathi Alembic-ku sollum. |
+| `migrations/script.py.mako` | Pudhu migration files generate aagura template. |
+| `migrations/versions/` | Migrations-ae, ovoru change-kum oru file. |
+
+Ella Alembic files-um `alembic init migrations`-la irundhu vandhu,
+apparam edit pannadhu. App-ku sontha table `migrated_items` irukku, so
+munnadi topics-oda `items` table-ah touch-e pannadhu.
+
+## Important: database share aagudhu
+
+Indha repo-la ella topic-um same `fastapi_learn` database-ah dhan use
+pannudhu, so adhula already `items`, `crud_react_items`,
+`validation_items`, innum neraya irukku. Idhu Alembic-ku romba
+mukkiyam, rendu vazhila.
+
+**1. `include_name` filter.** `alembic revision --autogenerate` real
+database-ah **nammaloda** models-oda compare panni migration ezhudhum.
+Database-la `items`, `crud_react_items`, ... paakkum, nammaloda
+models-la adhu illa, so adhellam **removed**-nu mudivu pannum —
+filter illama, generate aagura migration-la `op.drop_table("items")`
+maadhiri lines varum. Adha run pannina matha ella topic-oda data-vum
+poidum. `migrations/env.py` adha thadukkum:
+
+```python
+def include_name(name, type_, parent_names):
+    """Only look at tables this app's models define.
+
+    fastapi_learn is shared by every topic (items, crud_react_items, ...).
+    Without this filter, autogenerate sees those tables in the database,
+    doesn't find them in our models, and writes op.drop_table() for each
+    of them. This makes autogenerate ignore every table that isn't ours.
+    """
+    if type_ == "table":
+        return name in target_metadata.tables
+    return True
+```
+
+Database-la kandupidikkura ovoru name-kum Alembic idha call pannum.
+Oru table-ku `False` return pannina, andha table illave illa-nu
+Alembic nadandhukkum, mattrum `target_metadata.tables`-la
+`migrated_items` mattum dhan irukku. So neenga already topics 6, 7
+illa 8-ah `create_all` vachi run pannirundhaalum, andha tables-ah
+thodaadhu. (Test pannadhu: filter-ah remove panni `items` table
+irundha, `alembic check` `Detected removed table 'items'`-nu sollum.
+Filter irundha, `No new upgrade operations detected`.)
+
+**2. Sontha version table.** Alembic oru chinna bookkeeping table-la
+oru row vachirukkum — kadaisiya run panna migration-oda id. Adha
+vachi dhan `upgrade head` edha skip pannanum-nu therinjukkum. Default
+table name `alembic_version`. Indha lesson adhukku pathila
+`alembic_version_13a` use pannudhu:
+
+```python
+VERSION_TABLE = "alembic_version_13a"
+```
+
+so same database-la vera project-oda Alembic indha lesson-oda "naan
+endha migration-la irukken" row-ah eppovum overwrite panna mudiyaadhu
+(confuse-um aagadhu).
+
+## Setup
+
+```bash
+pip install alembic
+```
+
+Matha ellam [MySQL + CRUD-la irukra same database setup](/tanglish/docs/mysql-crud#setup)
+dhan (`sqlalchemy pymysql python-dotenv`, `fastapi_learn` database,
+`MYSQL_*` env vars illa `.env`, illa SQLite-ku `DATABASE_URL`).
+Alembic app-oda **same** env vars / `.env` / `DATABASE_URL`-ah dhan
+read pannum, so migrations eppovum app use panra database-ku dhan
+poogum.
+
+## Indha topic-ah eppadi run pannurathu
+
+Ovoru `alembic` command-ah-um example folder-la irundhu, virtualenv
+active-a irukkumbodhu run pannunga, mattrum app-ah start panna
+**munnadi** migrations-ah run pannunga — app ippo table-ah create
+pannadhu:
+
+```bash
+cd example/13/a
+alembic upgrade head
+uvicorn main:app --reload
+```
+
+Unga shell `alembic: command not found` (Windows-la "not recognized")
+nu sonna, venv-oda scripts folder unga `PATH`-la illa. Adhukku pathila
+Python moola run pannunga — indha pages-la irukra ella command-kum
+work aagum:
+
+```bash
+python -m alembic upgrade head
+```
+
+## Indha topic-la irukra pages
+
+1. [create_all-ku pathila Alembic](/tanglish/docs/migrations/alembic) —
+   kaiyaala ezhudhuna rendu migrations, `upgrade`/`downgrade`/`history`,
+   mattrum adutha change-ku `--autogenerate`.
