@@ -1,0 +1,555 @@
+---
+title: "1. Config, models & data"
+description: Shop-oda naalu tables, data-va hide panna moonu vera vera vazhigal (hashing, encryption, public ids), mattrum seed data.
+---
+
+<GithubLink path="example/14/a" />
+
+Endha route-kum munnadi, shop-ku data venum: settings mattrum secrets,
+naalu tables, request/response shapes, apparam data-va moonu vera vera
+vazhiyila hide panra moonu chinna helpers.
+
+## Hashing vs encryption vs public ids
+
+Shop moonaiyum use pannudhu, idhai mix up panradhu oru classic mistake:
+
+| | Thirumba edukka mudiyuma? | Edhukku | File |
+|---|---|---|---|
+| **Hashing** (Argon2) | Mudiyaadhu | Passwords: check pannalam, eppovum padikka mudiyaadhu | `security.py` |
+| **Encryption** (Fernet) | Mudiyum, key irundha | Phone, address: ship panna padikkanum | `encryption.py` |
+| **Public ids** (Sqids) | Mudiyum, alphabet therinjavanga yaarum | URL-la row count-ah hide panna | `ids.py` |
+
+Password-ah thirumba padikka vendiyadhe illa, check mattum pannanum —
+so hash. Address-ah **thirumba padikkanum** (yaaro parcel ship
+pannanum) — so encrypt. Public ids security-ye illa: `/orders/1`,
+`/orders/2`, ... shop-la evlo orders irukku-nu ellarukkum solladha
+maadhiri mattum pannum. Order-ah private-a vekradhu
+[Orders](/tanglish/docs/shop/orders) page-la irukra ownership check dhan.
+
+## Settings: `config.py` mattrum `.env.example`
+
+Indha thadava moonu secrets, ovvonnukum oru development default — so
+lesson zero setup-la run aagum:
+
+```python title="config.py"
+import os
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# Every secret below has a DEV-ONLY default so the lesson runs with zero
+# setup. These defaults are public (they're in git), so anything they
+# sign or encrypt is readable by anyone with this repo. For anything
+# real, set all three in .env (see .env.example) and never commit them.
+
+# Signs JWTs (12/b).
+SECRET_KEY = os.getenv("SECRET_KEY", "dev-only-secret-change-me-in-production-0123456789")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "15"))
+REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7"))
+
+# Encrypts order phone + address (12/g).
+FERNET_KEY = os.getenv("FERNET_KEY", "Hq1oQZm3T7V4YkX0sKcN8bWfPuR2dJgLaEyC6iMh5tA=")
+
+# Turns database ids into public ids (12/h).
+SQIDS_ALPHABET = os.getenv(
+    "SQIDS_ALPHABET", "kR3vXq8LbN1mZ7cTj0sWfYp4HdG2uEoA9iVnKrQ6tBhS5aCgPxMlUyJeFwDzIO"
+)
+SQIDS_MIN_LENGTH = 8
+
+# Which browser origins may call the API: the Vite dev server of 14/react.
+CORS_ORIGINS = ["http://localhost:5173", "http://127.0.0.1:5173"]
+```
+
+Indha defaults git-la irukku, so public: adhu sign illana encrypt panra
+edhuvum indha repo vechirukra yaar venumnaalum padikkalam. Real shop
+moonaiyum `.env`-la set pannum:
+
+```bash title=".env.example"
+# Copy this file to .env and adjust the values for your local MySQL
+# server. Every setting below already has a working default baked into
+# config.py, so creating a .env is optional — the app runs with zero
+# setup if you skip this file entirely.
+
+MYSQL_HOST=127.0.0.1
+MYSQL_PORT=3306
+MYSQL_USER=root
+MYSQL_PASSWORD=
+MYSQL_DB=fastapi_learn
+
+# Set this to override everything above at once — e.g. point at SQLite
+# for a quick local try with no MySQL server running at all.
+# DATABASE_URL=sqlite:///./shop.db
+
+# Signs every JWT. Generate your own:
+#   python -c "import secrets; print(secrets.token_urlsafe(48))"
+# SECRET_KEY=
+
+# Encrypts the phone and address on every order. Generate your own:
+#   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+# Keep it secret and OUT OF GIT. Lose it and every saved address is
+# unreadable for good. Change it and old orders can't be decrypted.
+# FERNET_KEY=
+
+# a-z, A-Z, 0-9 in your own shuffled order, so your public ids differ
+# from everyone else running this code. Set it once, before launch.
+# SQIDS_ALPHABET=
+
+# Short-lived access tokens, longer-lived refresh tokens.
+# ACCESS_TOKEN_EXPIRE_MINUTES=15
+# REFRESH_TOKEN_EXPIRE_DAYS=7
+```
+
+**`FERNET_KEY` tholanjaa, save aana ella address-um eppovum
+padikka mudiyaadhu.** Maathina, pazhaya orders decrypt aagaadhu.
+Database maadhiri idhaiyum backup pannunga.
+
+## Database connection: `database.py`
+
+```python title="database.py"
+import os
+
+from dotenv import load_dotenv
+from sqlalchemy import URL, create_engine
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+load_dotenv()
+
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
+MYSQL_USER = os.getenv("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
+
+# Set DATABASE_URL directly to override everything above (e.g. to point
+# at SQLite for a quick local test with no MySQL server at all).
+#
+# URL.create instead of an f-string: a password like "p@ss" would turn
+# f"...:{password}@{host}..." into a URL with two "@", and the driver
+# would try to connect to the host "ss@127.0.0.1". URL.create escapes it.
+DATABASE_URL = os.getenv("DATABASE_URL") or URL.create(
+    "mysql+pymysql",
+    username=MYSQL_USER,
+    password=MYSQL_PASSWORD,
+    host=MYSQL_HOST,
+    port=int(MYSQL_PORT),
+    database=MYSQL_DB,
+)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+```
+
+Munnaadi topics-la irundhu oru maatram: f-string-ku badhila
+`URL.create(...)`. f-string-la `p@ss` maadhiri password
+`mysql+pymysql://root:p@ss@127.0.0.1/...` nu build aagum. Rendu `@`
+irukku, so driver `ss@127.0.0.1` nu oru host-ku connect panna try
+pannum. `URL.create` ovoru part-aiyum escape pannum, so endha password-um
+work aagum.
+
+## Tables: `models.py`
+
+```python title="models.py"
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, Numeric, String, Text, func
+from sqlalchemy.orm import relationship
+
+from database import Base
+from encryption import decrypt
+
+
+class UserModel(Base):
+    __tablename__ = "minishop_users"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    username = Column(String(30), nullable=False, unique=True)
+    # Only the HASH is stored. There is no "password" column at all.
+    hashed_password = Column(String(255), nullable=False)
+    # "customer" or "admin". Sign-ups are always customers; only an admin
+    # (or create_admin.py) can promote someone.
+    role = Column(String(20), nullable=False, default="customer")
+
+
+class ProductModel(Base):
+    __tablename__ = "minishop_products"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(100), nullable=False)
+    description = Column(Text, nullable=False, default="")
+    # Numeric, not Float: money must not pick up rounding errors.
+    price = Column(Numeric(10, 2), nullable=False)
+    stock = Column(Integer, nullable=False, default=0)
+    # "Deleting" hides the product instead (soft delete, 11/e), so old
+    # orders that point at it still make sense.
+    is_active = Column(Boolean, nullable=False, default=True)
+
+
+class OrderModel(Base):
+    __tablename__ = "minishop_orders"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("minishop_users.id"), nullable=False)
+    status = Column(String(20), nullable=False, default="pending")
+    total = Column(Numeric(10, 2), nullable=False)
+    # ENCRYPTED, not hashed: we must read the address again to ship the
+    # order. Without FERNET_KEY these columns are unreadable.
+    phone_encrypted = Column(Text, nullable=False)
+    address_encrypted = Column(Text, nullable=False)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+
+    user = relationship(UserModel)
+    items = relationship("OrderItemModel", back_populates="order", cascade="all, delete-orphan")
+
+    # Decrypted on the way out. OrderOut reads these properties, never the
+    # *_encrypted columns.
+    @property
+    def phone(self) -> str:
+        return decrypt(self.phone_encrypted)
+
+    @property
+    def address(self) -> str:
+        return decrypt(self.address_encrypted)
+
+    @property
+    def username(self) -> str:
+        return self.user.username
+
+
+class OrderItemModel(Base):
+    __tablename__ = "minishop_order_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    order_id = Column(Integer, ForeignKey("minishop_orders.id"), nullable=False)
+    product_id = Column(Integer, ForeignKey("minishop_products.id"), nullable=False)
+    quantity = Column(Integer, nullable=False)
+    # Copied from the product when the order is placed, so a later price
+    # change doesn't rewrite what the customer actually paid.
+    unit_price = Column(Numeric(10, 2), nullable=False)
+
+    order = relationship(OrderModel, back_populates="items")
+    product = relationship(ProductModel)
+
+    @property
+    def product_name(self) -> str:
+        return self.product.name
+```
+
+- **`minishop_users.role`** `"customer"` illana `"admin"`, default
+  `"customer"`.
+- **`price` `Numeric(10, 2)`**, eppovum `Float` illa. Floating point-la
+  `0.1 + 0.2` = `0.30000000000000004`, panam "kittathatta correct"-a
+  irukka koodadhu.
+- **`is_active`** "delete"-ah soft delete aakkum: product hide aagum,
+  aana adha point panra pazhaya orders innum work aagum.
+- **`minishop_orders`-ku pala `minishop_order_items`** (one-to-many).
+  `cascade="all, delete-orphan"` items-ah avanga order-oda sendhu save
+  pannum.
+- **`unit_price` oru copy** — order panna nerathula product-oda price.
+  Naalaiku admin price yeathinaalum, nethu order customer actual-a evlo
+  kuduthaanga-nu dhan kaattum.
+- **`phone_encrypted` / `address_encrypted`** ciphertext vechirukku.
+  `phone` mattrum `address` **properties** veliya pogum podhu decrypt
+  pannum. `username`, `product_name`-um properties dhan, so response
+  models avangala columns maadhiri padikkalam.
+
+## Data-va hide panradhu: `security.py`, `encryption.py`, `ids.py`
+
+`security.py`-oda hashing paadhi (JWT paadhi
+[adutha page](/tanglish/docs/shop/auth-roles)-la):
+
+```python
+password_hash = PasswordHash.recommended()  # Argon2
+
+
+def hash_password(password: str) -> str:
+    # A fresh random salt every call: same password, different hash.
+    return password_hash.hash(password)
+
+
+def verify_password(password: str, hashed: str) -> bool:
+    return password_hash.verify(password, hashed)
+```
+
+Encryption:
+
+```python title="encryption.py"
+from cryptography.fernet import Fernet
+
+from config import FERNET_KEY
+
+# Two-way. Used for data we must read again later: the phone and address
+# on an order. Fernet = AES encryption plus a signature, so a tampered or
+# wrong-key value fails loudly instead of decrypting to garbage.
+fernet = Fernet(FERNET_KEY)
+
+
+def encrypt(plaintext: str) -> str:
+    # Like hashing, the same text gives a different result every time.
+    return fernet.encrypt(plaintext.encode()).decode()
+
+
+def decrypt(ciphertext: str) -> str:
+    # Raises cryptography.fernet.InvalidToken if the key is wrong or the
+    # value was tampered with.
+    return fernet.decrypt(ciphertext.encode()).decode()
+```
+
+Public ids:
+
+```python title="ids.py"
+from typing import Annotated
+
+from fastapi import HTTPException
+from pydantic import PlainSerializer
+from sqids import Sqids
+
+from config import SQIDS_ALPHABET, SQIDS_MIN_LENGTH
+
+# Database ids (1, 2, 3...) become short public ids ("Xb3kLq9P") in the
+# API, and back again.
+#
+# Why: /orders/1, /orders/2... tells anyone how many orders the shop has
+# and invites guessing. This is NOT security. What actually protects an
+# order is the ownership check in routers/orders.py.
+sqids = Sqids(alphabet=SQIDS_ALPHABET, min_length=SQIDS_MIN_LENGTH)
+
+
+def encode_id(n: int) -> str:
+    return sqids.encode([n])
+
+
+def decode_id(public_id: str) -> int:
+    """Public id -> database id. Anything we'd never hand out is a 404."""
+    numbers = sqids.decode(public_id)
+    # sqids can decode several strings to the same number. Only accept the
+    # one string encode_id would produce, so every row has ONE valid id.
+    if len(numbers) != 1 or encode_id(numbers[0]) != public_id:
+        raise HTTPException(status_code=404, detail="Not found")
+    return numbers[0]
+
+
+# For response schemas: reads the int from the database row, writes the
+# public string in the JSON.
+PublicId = Annotated[int, PlainSerializer(encode_id, return_type=str)]
+```
+
+Naama eppovum kudukkaadha edhuvum — plain `"1"` kooda — `decode_id`
+`404` raise pannum. Re-encode check mukkiyam: Sqids pala vera vera
+strings-ah same number-a decode pannum. `encode_id` produce panra orey
+string-ah mattum accept pannina, ovoru row-kum **orey oru** valid id
+dhan.
+
+`PublicId` dhan routes-ah clean-a vekra trick. `id: PublicId` nu type
+panna response field database-la irundhu int-ah vechirukkum, Pydantic
+adha JSON-la public string-a ezhudhum. Endha route-um `encode_id`-ah
+thaane call pannaadhu.
+
+## Request mattrum response shapes: `schemas.py`
+
+```python title="schemas.py"
+from datetime import datetime
+from decimal import Decimal
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from ids import PublicId
+
+Role = Literal["customer", "admin"]
+OrderStatus = Literal["pending", "shipped", "delivered", "cancelled"]
+
+
+# ------------------------------------------------------------- auth ----
+
+# No "role" field: whatever the client sends, sign-ups are customers.
+class UserCreate(BaseModel):
+    username: str = Field(min_length=3, max_length=30)
+    password: str = Field(min_length=8, max_length=128)
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+# No password, no hash: response_model drops hashed_password even though
+# the routes return the full row.
+class UserOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: PublicId
+    username: str
+    role: Role
+
+
+class RoleUpdate(BaseModel):
+    role: Role
+
+
+class TokenPair(BaseModel):
+    access_token: str
+    refresh_token: str
+    token_type: str = "bearer"
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
+
+# --------------------------------------------------------- products ----
+
+class ProductCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    description: str = Field(default="", max_length=2000)
+    price: Decimal = Field(gt=0, max_digits=10, decimal_places=2)
+    stock: int = Field(default=0, ge=0)
+
+
+# Every field optional: send only what you want to change. No "stock":
+# stock only moves through PATCH /products/{id}/stock.
+class ProductUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    description: str | None = Field(default=None, max_length=2000)
+    price: Decimal | None = Field(default=None, gt=0, max_digits=10, decimal_places=2)
+    is_active: bool | None = None
+
+
+class StockChange(BaseModel):
+    # +10 = 10 arrived, -3 = 3 broke. Not 0: that would do nothing.
+    change: int = Field(ne=0)
+
+
+class ProductOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: PublicId
+    name: str
+    description: str
+    price: Decimal
+    stock: int
+    is_active: bool
+
+
+# ----------------------------------------------------------- orders ----
+
+class OrderItemIn(BaseModel):
+    product_id: str  # the public id, as GET /products showed it
+    quantity: int = Field(ge=1, le=100)
+
+
+class OrderCreate(BaseModel):
+    items: list[OrderItemIn] = Field(min_length=1)
+    phone: str = Field(min_length=5, max_length=30)
+    address: str = Field(min_length=5, max_length=300)
+
+
+class OrderItemOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    product_id: PublicId
+    product_name: str
+    quantity: int
+    unit_price: Decimal
+
+
+class OrderOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: PublicId
+    username: str
+    status: OrderStatus
+    total: Decimal
+    # Decrypted by OrderModel's properties. In MySQL they're ciphertext.
+    phone: str
+    address: str
+    created_at: datetime
+    items: list[OrderItemOut]
+
+
+class StatusUpdate(BaseModel):
+    status: OrderStatus
+```
+
+- **`UserCreate`-la `role` field illa.** `/register`-ku `"role": "admin"`
+  anuppinaa Pydantic adha ignore pannum: sign-ups eppovum customers
+  (oru test idhai check pannudhu).
+- **`ProductUpdate`-la `stock` field illa.** Stock adhoda sontha route
+  `PATCH /products/{id}/stock` vazhiya mattum dhan maarum — adhu orey
+  nerathula rendu changes vandhaalum safe
+  ([Products & stock](/tanglish/docs/shop/products-stock)).
+- **`OrderItemIn.product_id` oru `str`**: `GET /products`-la customer
+  paatha public id.
+- **`OrderOut`-la `phone`, `address` irukku** — `from_attributes=True`
+  naala model-oda decrypt panra properties-la irundhu padikkum. Endha
+  response model-layum `hashed_password` illana `*_encrypted` columns
+  illa.
+
+## Users mattrum seed data: `crud.py`
+
+```python title="crud.py"
+from decimal import Decimal
+
+from sqlalchemy.orm import Session
+
+from models import ProductModel, UserModel
+from security import hash_password, verify_password
+
+
+def get_user_by_username(db: Session, username: str) -> UserModel | None:
+    return db.query(UserModel).filter(UserModel.username == username).first()
+
+
+def create_user(db: Session, username: str, password: str, role: str = "customer") -> UserModel:
+    # Hash BEFORE it touches the database. The plain password is never
+    # stored, logged, or returned.
+    row = UserModel(username=username, hashed_password=hash_password(password), role=role)
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def authenticate(db: Session, username: str, password: str) -> UserModel | None:
+    user = get_user_by_username(db, username)
+    if user is None or not verify_password(password, user.hashed_password):
+        return None
+    return user
+
+
+def seed(db: Session) -> None:
+    """Demo data so you can try the shop right away. Only runs on empty tables."""
+    if db.query(UserModel).count() == 0:
+        for username, role in (("admin", "admin"), ("alice", "customer"), ("bob", "customer")):
+            db.add(UserModel(
+                username=username,
+                hashed_password=hash_password(f"{username}-password"),
+                role=role,
+            ))
+    if db.query(ProductModel).count() == 0:
+        db.add_all([
+            ProductModel(name="Coffee mug", description="350 ml, dishwasher safe",
+                         price=Decimal("8.50"), stock=20),
+            ProductModel(name="Notebook", description="A5, dotted, 120 pages",
+                         price=Decimal("4.25"), stock=50),
+            ProductModel(name="Desk lamp", description="LED, warm white",
+                         price=Decimal("24.00"), stock=5),
+            ProductModel(name="Sticker pack", description="Last one in stock!",
+                         price=Decimal("2.00"), stock=1),
+        ])
+    db.commit()
+```
+
+`seed()` empty tables-la mattum dhan run aagum, so app-ah restart
+panninaalum duplicates varaadhu. `admin`, `alice`, `bob` (password:
+`<name>-password`) mattrum naalu products create pannum. "Sticker
+pack"-oda stock venumne 1, so [Orders](/tanglish/docs/shop/orders)
+page-la oru order fail aagradha paakalam.

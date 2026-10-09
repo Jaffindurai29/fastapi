@@ -1,0 +1,164 @@
+---
+title: "3. Products & stock"
+description: Admins-ku product CRUD, customers-ku hidden products, soft delete, mattrum locked row-la stock maathradhu.
+---
+
+<GithubLink path="example/14/a" />
+
+Login aana ellarum products paakalam. Admins mattum dhan create, edit,
+hide panna, illana stock maatha mudiyum. Rendu details idha plain CRUD-a
+vida mela kondu pogudhu: customers hidden products-ah paakave
+mudiyaadhu, mattrum stock updates tholaiyaadha maadhiri maarum.
+
+## Code: `routers/products.py`
+
+```python title="routers/products.py"
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+
+from database import get_db
+from dependencies import get_current_user, require_roles
+from ids import decode_id
+from models import ProductModel, UserModel
+from schemas import ProductCreate, ProductOut, ProductUpdate, StockChange
+
+router = APIRouter(prefix="/products", tags=["products"])
+
+admin_only = require_roles("admin")
+
+
+def get_product_or_404(db: Session, product_id: str, user: UserModel) -> ProductModel:
+    product = db.get(ProductModel, decode_id(product_id))
+    # Customers can't see hidden products at all; admins can (to un-hide).
+    if product is None or (not product.is_active and user.role != "admin"):
+        raise HTTPException(status_code=404, detail="Product not found")
+    return product
+
+
+# ---------------------------------------------- any logged-in user ----
+
+@router.get("", response_model=list[ProductOut])
+def list_products(db: Session = Depends(get_db), user: UserModel = Depends(get_current_user)):
+    query = db.query(ProductModel).order_by(ProductModel.name)
+    if user.role != "admin":
+        query = query.filter(ProductModel.is_active.is_(True))
+    return query.all()
+
+
+@router.get("/{product_id}", response_model=ProductOut)
+def get_product(product_id: str, db: Session = Depends(get_db),
+                user: UserModel = Depends(get_current_user)):
+    return get_product_or_404(db, product_id, user)
+
+
+# ---------------------------------------------------------- admin only ----
+
+@router.post("", response_model=ProductOut, status_code=status.HTTP_201_CREATED)
+def create_product(body: ProductCreate, db: Session = Depends(get_db),
+                   user: UserModel = Depends(admin_only)):
+    product = ProductModel(**body.model_dump())
+    db.add(product)
+    db.commit()
+    db.refresh(product)
+    return product
+
+
+@router.patch("/{product_id}", response_model=ProductOut)
+def update_product(product_id: str, body: ProductUpdate, db: Session = Depends(get_db),
+                   user: UserModel = Depends(admin_only)):
+    product = get_product_or_404(db, product_id, user)
+    # exclude_unset: only touch the fields the client actually sent.
+    for field, value in body.model_dump(exclude_unset=True).items():
+        setattr(product, field, value)
+    db.commit()
+    db.refresh(product)
+    return product
+
+
+@router.patch("/{product_id}/stock", response_model=ProductOut,
+              responses={400: {"description": "Stock can't go below 0"}})
+def change_stock(product_id: str, body: StockChange, db: Session = Depends(get_db),
+                 user: UserModel = Depends(admin_only)):
+    product = get_product_or_404(db, product_id, user)
+    # Lock the row so a customer's order can't change stock between our
+    # read and our write.
+    db.refresh(product, with_for_update=True)
+    if product.stock + body.change < 0:
+        raise HTTPException(status_code=400, detail=f"Only {product.stock} in stock")
+    product.stock += body.change
+    db.commit()
+    db.refresh(product)
+    return product
+
+
+@router.delete("/{product_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_product(product_id: str, db: Session = Depends(get_db),
+                   user: UserModel = Depends(admin_only)):
+    product = get_product_or_404(db, product_id, user)
+    # Hide, don't delete: past orders still point at this product.
+    product.is_active = False
+    db.commit()
+```
+
+## Line by line
+
+**`get_product_or_404`** `product_id` edukkura ovoru route-um use
+pannudhu. Moonu velai pannum:
+
+1. `decode_id(product_id)` public id-ah thirumba int aakkum, illana
+   naama kudukkaadha id-na `404` raise pannum.
+2. `db.get(...)` row-ah load pannum.
+3. Hidden product (`is_active = False`) **customers-ku** `404`. Admins-ku
+   innum kidaikkum, so adha thirumba show pannalam.
+
+**`list_products`** customers-ku mattum hidden products-ah filter
+pannum. Orey route, rendu views — `user.role` decide pannum.
+
+**`update_product`** `model_dump(exclude_unset=True)` use pannudhu:
+client actual-a anuppina fields mattum dhan maarum.
+`{"price": "9.99"}` anuppina price maarum, name appadiye irukkum.
+`stock` `ProductUpdate`-la illave illa, so inga maatha mudiyaadhu.
+
+**`delete_product`** delete pannaadhu. `is_active = False` set pannum
+(soft delete). Real `DELETE` eppadiyum fail aagum, yeana
+`minishop_order_items` rows product-ah point pannudhu — work aanaalum,
+pazhaya orders product name-ah izhandhudum. Product-ah thirumba kondu
+vara: `{"is_active": true}`-oda `PATCH /products/{id}`.
+
+## Stock-ku yeen thani route
+
+Stock maathradhu normal `PATCH {"stock": 20}`-a irundha-nu
+yosinga:
+
+| Time | Admin | Customer |
+|---|---|---|
+| 1 | Stock padikkiraanga: **10** | |
+| 2 | | 2 vaangiraanga → stock **8** |
+| 3 | 10 vandhuchu, `stock = 20` anuppuraanga | |
+| 4 | Stock **20**, 18-a irukkanum | |
+
+Customer-oda purchase silent-a azhinjiduchu. `change_stock`-la rendu
+vishayam idha thadukudhu:
+
+1. **Oru change, value illa.** Admin `{"change": 10}` ("10 vandhuchu")
+   anuppuraanga, final number illa. Server adha stock **ippo** evlo
+   irukko adhoda add pannum.
+2. **Oru row lock.** `db.refresh(product, with_for_update=True)` row-ah
+   `SELECT ... FOR UPDATE`-oda thirumba padikkum. Indha product-ah touch
+   panra endha order-um naama commit panra varaikkum wait pannum, so
+   namma check-kum (`0-ku keezha poguma?`) namma write-kum naduvula
+   stock maara mudiyaadhu.
+
+`StockChange.change` `Field(ne=0)`: zero change edhuvum pannaadhu, so
+adhu `422`.
+
+## Try it
+
+`admin`-a:
+
+```bash
+curl -X PATCH http://127.0.0.1:8000/products/PRODUCT_ID/stock -H "Authorization: Bearer TOKEN" -H "Content-Type: application/json" -d "{\"change\": -100}"
+```
+
+→ `400` "Only 20 in stock". Apparam `DELETE` vechu oru product-ah hide
+pannunga, `alice`-a login pannunga, `GET /products/PRODUCT_ID` → `404`.

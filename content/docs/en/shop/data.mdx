@@ -1,0 +1,548 @@
+---
+title: "1. Config, models & data"
+description: The shop's four tables, three different ways of hiding data (hashing, encryption, public ids), and the seed data.
+---
+
+<GithubLink path="example/14/a" />
+
+Before any route, the shop needs its data: settings and secrets, four
+tables, the request and response shapes, and three small helpers that
+each hide data in a different way.
+
+## Hashing vs encryption vs public ids
+
+The shop uses all three, and mixing them up is a classic mistake:
+
+| | Reversible? | Used for | File |
+|---|---|---|---|
+| **Hashing** (Argon2) | No | Passwords: check them, never read them | `security.py` |
+| **Encryption** (Fernet) | Yes, with the key | Phone, address: we must read them to ship | `encryption.py` |
+| **Public ids** (Sqids) | Yes, by anyone who knows the alphabet | Hide row counts in URLs | `ids.py` |
+
+A password is never needed again, only checked, so it's hashed. An
+address **is** needed again (someone has to ship the parcel), so it's
+encrypted. Public ids aren't security at all: they only stop
+`/orders/1`, `/orders/2`, ... from telling everyone how many orders the
+shop has. What keeps an order private is the ownership check on the
+[Orders](/en/docs/shop/orders) page.
+
+## Settings: `config.py` and `.env.example`
+
+Three secrets this time, each with a development default so the lesson
+runs with zero setup:
+
+```python title="config.py"
+import os
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# Every secret below has a DEV-ONLY default so the lesson runs with zero
+# setup. These defaults are public (they're in git), so anything they
+# sign or encrypt is readable by anyone with this repo. For anything
+# real, set all three in .env (see .env.example) and never commit them.
+
+# Signs JWTs (12/b).
+SECRET_KEY = os.getenv("SECRET_KEY", "dev-only-secret-change-me-in-production-0123456789")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "15"))
+REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7"))
+
+# Encrypts order phone + address (12/g).
+FERNET_KEY = os.getenv("FERNET_KEY", "Hq1oQZm3T7V4YkX0sKcN8bWfPuR2dJgLaEyC6iMh5tA=")
+
+# Turns database ids into public ids (12/h).
+SQIDS_ALPHABET = os.getenv(
+    "SQIDS_ALPHABET", "kR3vXq8LbN1mZ7cTj0sWfYp4HdG2uEoA9iVnKrQ6tBhS5aCgPxMlUyJeFwDzIO"
+)
+SQIDS_MIN_LENGTH = 8
+
+# Which browser origins may call the API: the Vite dev server of 14/react.
+CORS_ORIGINS = ["http://localhost:5173", "http://127.0.0.1:5173"]
+```
+
+Those defaults are in git, so they're public: anything they sign or
+encrypt is readable by anyone with this repo. A real shop sets all three
+in `.env`:
+
+```bash title=".env.example"
+# Copy this file to .env and adjust the values for your local MySQL
+# server. Every setting below already has a working default baked into
+# config.py, so creating a .env is optional — the app runs with zero
+# setup if you skip this file entirely.
+
+MYSQL_HOST=127.0.0.1
+MYSQL_PORT=3306
+MYSQL_USER=root
+MYSQL_PASSWORD=
+MYSQL_DB=fastapi_learn
+
+# Set this to override everything above at once — e.g. point at SQLite
+# for a quick local try with no MySQL server running at all.
+# DATABASE_URL=sqlite:///./shop.db
+
+# Signs every JWT. Generate your own:
+#   python -c "import secrets; print(secrets.token_urlsafe(48))"
+# SECRET_KEY=
+
+# Encrypts the phone and address on every order. Generate your own:
+#   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+# Keep it secret and OUT OF GIT. Lose it and every saved address is
+# unreadable for good. Change it and old orders can't be decrypted.
+# FERNET_KEY=
+
+# a-z, A-Z, 0-9 in your own shuffled order, so your public ids differ
+# from everyone else running this code. Set it once, before launch.
+# SQIDS_ALPHABET=
+
+# Short-lived access tokens, longer-lived refresh tokens.
+# ACCESS_TOKEN_EXPIRE_MINUTES=15
+# REFRESH_TOKEN_EXPIRE_DAYS=7
+```
+
+**Lose `FERNET_KEY` and every saved address is gone for good.** Change
+it and old orders can't be decrypted. Back it up like a database.
+
+## The database connection: `database.py`
+
+```python title="database.py"
+import os
+
+from dotenv import load_dotenv
+from sqlalchemy import URL, create_engine
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+load_dotenv()
+
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
+MYSQL_USER = os.getenv("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_DB = os.getenv("MYSQL_DB", "fastapi_learn")
+
+# Set DATABASE_URL directly to override everything above (e.g. to point
+# at SQLite for a quick local test with no MySQL server at all).
+#
+# URL.create instead of an f-string: a password like "p@ss" would turn
+# f"...:{password}@{host}..." into a URL with two "@", and the driver
+# would try to connect to the host "ss@127.0.0.1". URL.create escapes it.
+DATABASE_URL = os.getenv("DATABASE_URL") or URL.create(
+    "mysql+pymysql",
+    username=MYSQL_USER,
+    password=MYSQL_PASSWORD,
+    host=MYSQL_HOST,
+    port=int(MYSQL_PORT),
+    database=MYSQL_DB,
+)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+```
+
+One change from earlier topics: `URL.create(...)` instead of an
+f-string. With an f-string, a password like `p@ss` builds
+`mysql+pymysql://root:p@ss@127.0.0.1/...`. That has two `@`, and the
+driver tries to connect to a host called `ss@127.0.0.1`. `URL.create`
+escapes every part, so any password works.
+
+## The tables: `models.py`
+
+```python title="models.py"
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, Numeric, String, Text, func
+from sqlalchemy.orm import relationship
+
+from database import Base
+from encryption import decrypt
+
+
+class UserModel(Base):
+    __tablename__ = "minishop_users"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    username = Column(String(30), nullable=False, unique=True)
+    # Only the HASH is stored. There is no "password" column at all.
+    hashed_password = Column(String(255), nullable=False)
+    # "customer" or "admin". Sign-ups are always customers; only an admin
+    # (or create_admin.py) can promote someone.
+    role = Column(String(20), nullable=False, default="customer")
+
+
+class ProductModel(Base):
+    __tablename__ = "minishop_products"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(100), nullable=False)
+    description = Column(Text, nullable=False, default="")
+    # Numeric, not Float: money must not pick up rounding errors.
+    price = Column(Numeric(10, 2), nullable=False)
+    stock = Column(Integer, nullable=False, default=0)
+    # "Deleting" hides the product instead (soft delete, 11/e), so old
+    # orders that point at it still make sense.
+    is_active = Column(Boolean, nullable=False, default=True)
+
+
+class OrderModel(Base):
+    __tablename__ = "minishop_orders"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("minishop_users.id"), nullable=False)
+    status = Column(String(20), nullable=False, default="pending")
+    total = Column(Numeric(10, 2), nullable=False)
+    # ENCRYPTED, not hashed: we must read the address again to ship the
+    # order. Without FERNET_KEY these columns are unreadable.
+    phone_encrypted = Column(Text, nullable=False)
+    address_encrypted = Column(Text, nullable=False)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+
+    user = relationship(UserModel)
+    items = relationship("OrderItemModel", back_populates="order", cascade="all, delete-orphan")
+
+    # Decrypted on the way out. OrderOut reads these properties, never the
+    # *_encrypted columns.
+    @property
+    def phone(self) -> str:
+        return decrypt(self.phone_encrypted)
+
+    @property
+    def address(self) -> str:
+        return decrypt(self.address_encrypted)
+
+    @property
+    def username(self) -> str:
+        return self.user.username
+
+
+class OrderItemModel(Base):
+    __tablename__ = "minishop_order_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    order_id = Column(Integer, ForeignKey("minishop_orders.id"), nullable=False)
+    product_id = Column(Integer, ForeignKey("minishop_products.id"), nullable=False)
+    quantity = Column(Integer, nullable=False)
+    # Copied from the product when the order is placed, so a later price
+    # change doesn't rewrite what the customer actually paid.
+    unit_price = Column(Numeric(10, 2), nullable=False)
+
+    order = relationship(OrderModel, back_populates="items")
+    product = relationship(ProductModel)
+
+    @property
+    def product_name(self) -> str:
+        return self.product.name
+```
+
+- **`minishop_users.role`** is `"customer"` or `"admin"`, default
+  `"customer"`.
+- **`price` is `Numeric(10, 2)`**, never `Float`. In floating point,
+  `0.1 + 0.2` is `0.30000000000000004`, and money can't be "almost
+  right".
+- **`is_active`** makes "delete" a soft delete: the product is hidden,
+  but old orders that point at it still work.
+- **`minishop_orders` has many `minishop_order_items`** (one-to-many).
+  `cascade="all, delete-orphan"` saves the items together with their
+  order.
+- **`unit_price` is a copy** of the product's price at the moment of
+  ordering. If the admin raises the price tomorrow, yesterday's order
+  still shows what the customer actually paid.
+- **`phone_encrypted` / `address_encrypted`** hold ciphertext. The
+  `phone` and `address` **properties** decrypt them on the way out.
+  `username` and `product_name` are properties too, so the response
+  models can read them like columns.
+
+## Hiding data: `security.py`, `encryption.py`, `ids.py`
+
+The hashing half of `security.py` (the JWT half is on the
+[next page](/en/docs/shop/auth-roles)):
+
+```python
+password_hash = PasswordHash.recommended()  # Argon2
+
+
+def hash_password(password: str) -> str:
+    # A fresh random salt every call: same password, different hash.
+    return password_hash.hash(password)
+
+
+def verify_password(password: str, hashed: str) -> bool:
+    return password_hash.verify(password, hashed)
+```
+
+Encryption:
+
+```python title="encryption.py"
+from cryptography.fernet import Fernet
+
+from config import FERNET_KEY
+
+# Two-way. Used for data we must read again later: the phone and address
+# on an order. Fernet = AES encryption plus a signature, so a tampered or
+# wrong-key value fails loudly instead of decrypting to garbage.
+fernet = Fernet(FERNET_KEY)
+
+
+def encrypt(plaintext: str) -> str:
+    # Like hashing, the same text gives a different result every time.
+    return fernet.encrypt(plaintext.encode()).decode()
+
+
+def decrypt(ciphertext: str) -> str:
+    # Raises cryptography.fernet.InvalidToken if the key is wrong or the
+    # value was tampered with.
+    return fernet.decrypt(ciphertext.encode()).decode()
+```
+
+Public ids:
+
+```python title="ids.py"
+from typing import Annotated
+
+from fastapi import HTTPException
+from pydantic import PlainSerializer
+from sqids import Sqids
+
+from config import SQIDS_ALPHABET, SQIDS_MIN_LENGTH
+
+# Database ids (1, 2, 3...) become short public ids ("Xb3kLq9P") in the
+# API, and back again.
+#
+# Why: /orders/1, /orders/2... tells anyone how many orders the shop has
+# and invites guessing. This is NOT security. What actually protects an
+# order is the ownership check in routers/orders.py.
+sqids = Sqids(alphabet=SQIDS_ALPHABET, min_length=SQIDS_MIN_LENGTH)
+
+
+def encode_id(n: int) -> str:
+    return sqids.encode([n])
+
+
+def decode_id(public_id: str) -> int:
+    """Public id -> database id. Anything we'd never hand out is a 404."""
+    numbers = sqids.decode(public_id)
+    # sqids can decode several strings to the same number. Only accept the
+    # one string encode_id would produce, so every row has ONE valid id.
+    if len(numbers) != 1 or encode_id(numbers[0]) != public_id:
+        raise HTTPException(status_code=404, detail="Not found")
+    return numbers[0]
+
+
+# For response schemas: reads the int from the database row, writes the
+# public string in the JSON.
+PublicId = Annotated[int, PlainSerializer(encode_id, return_type=str)]
+```
+
+`decode_id` raises `404` for anything we'd never hand out, including a
+plain `"1"`. The re-encode check matters: Sqids can decode several
+different strings to the same number, and only accepting the one string
+`encode_id` produces means every row has exactly **one** valid id.
+
+`PublicId` is the trick that keeps the routes clean. A response field
+typed `id: PublicId` holds the int from the database, and Pydantic writes
+it to JSON as the public string. No route ever calls `encode_id` itself.
+
+## Request and response shapes: `schemas.py`
+
+```python title="schemas.py"
+from datetime import datetime
+from decimal import Decimal
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from ids import PublicId
+
+Role = Literal["customer", "admin"]
+OrderStatus = Literal["pending", "shipped", "delivered", "cancelled"]
+
+
+# ------------------------------------------------------------- auth ----
+
+# No "role" field: whatever the client sends, sign-ups are customers.
+class UserCreate(BaseModel):
+    username: str = Field(min_length=3, max_length=30)
+    password: str = Field(min_length=8, max_length=128)
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+# No password, no hash: response_model drops hashed_password even though
+# the routes return the full row.
+class UserOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: PublicId
+    username: str
+    role: Role
+
+
+class RoleUpdate(BaseModel):
+    role: Role
+
+
+class TokenPair(BaseModel):
+    access_token: str
+    refresh_token: str
+    token_type: str = "bearer"
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
+
+# --------------------------------------------------------- products ----
+
+class ProductCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    description: str = Field(default="", max_length=2000)
+    price: Decimal = Field(gt=0, max_digits=10, decimal_places=2)
+    stock: int = Field(default=0, ge=0)
+
+
+# Every field optional: send only what you want to change. No "stock":
+# stock only moves through PATCH /products/{id}/stock.
+class ProductUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    description: str | None = Field(default=None, max_length=2000)
+    price: Decimal | None = Field(default=None, gt=0, max_digits=10, decimal_places=2)
+    is_active: bool | None = None
+
+
+class StockChange(BaseModel):
+    # +10 = 10 arrived, -3 = 3 broke. Not 0: that would do nothing.
+    change: int = Field(ne=0)
+
+
+class ProductOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: PublicId
+    name: str
+    description: str
+    price: Decimal
+    stock: int
+    is_active: bool
+
+
+# ----------------------------------------------------------- orders ----
+
+class OrderItemIn(BaseModel):
+    product_id: str  # the public id, as GET /products showed it
+    quantity: int = Field(ge=1, le=100)
+
+
+class OrderCreate(BaseModel):
+    items: list[OrderItemIn] = Field(min_length=1)
+    phone: str = Field(min_length=5, max_length=30)
+    address: str = Field(min_length=5, max_length=300)
+
+
+class OrderItemOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    product_id: PublicId
+    product_name: str
+    quantity: int
+    unit_price: Decimal
+
+
+class OrderOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: PublicId
+    username: str
+    status: OrderStatus
+    total: Decimal
+    # Decrypted by OrderModel's properties. In MySQL they're ciphertext.
+    phone: str
+    address: str
+    created_at: datetime
+    items: list[OrderItemOut]
+
+
+class StatusUpdate(BaseModel):
+    status: OrderStatus
+```
+
+- **`UserCreate` has no `role` field.** Send `"role": "admin"` to
+  `/register` and Pydantic simply ignores it: sign-ups are always
+  customers (a test checks this).
+- **`ProductUpdate` has no `stock` field.** Stock only moves through its
+  own route, `PATCH /products/{id}/stock`, which is safe against two
+  changes at once ([Products & stock](/en/docs/shop/products-stock)).
+- **`OrderItemIn.product_id` is a `str`**: the public id the customer
+  saw in `GET /products`.
+- **`OrderOut` has `phone` and `address`**, read from the model's
+  decrypting properties thanks to `from_attributes=True`. No response
+  model ever has `hashed_password` or the `*_encrypted` columns.
+
+## Users and seed data: `crud.py`
+
+```python title="crud.py"
+from decimal import Decimal
+
+from sqlalchemy.orm import Session
+
+from models import ProductModel, UserModel
+from security import hash_password, verify_password
+
+
+def get_user_by_username(db: Session, username: str) -> UserModel | None:
+    return db.query(UserModel).filter(UserModel.username == username).first()
+
+
+def create_user(db: Session, username: str, password: str, role: str = "customer") -> UserModel:
+    # Hash BEFORE it touches the database. The plain password is never
+    # stored, logged, or returned.
+    row = UserModel(username=username, hashed_password=hash_password(password), role=role)
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def authenticate(db: Session, username: str, password: str) -> UserModel | None:
+    user = get_user_by_username(db, username)
+    if user is None or not verify_password(password, user.hashed_password):
+        return None
+    return user
+
+
+def seed(db: Session) -> None:
+    """Demo data so you can try the shop right away. Only runs on empty tables."""
+    if db.query(UserModel).count() == 0:
+        for username, role in (("admin", "admin"), ("alice", "customer"), ("bob", "customer")):
+            db.add(UserModel(
+                username=username,
+                hashed_password=hash_password(f"{username}-password"),
+                role=role,
+            ))
+    if db.query(ProductModel).count() == 0:
+        db.add_all([
+            ProductModel(name="Coffee mug", description="350 ml, dishwasher safe",
+                         price=Decimal("8.50"), stock=20),
+            ProductModel(name="Notebook", description="A5, dotted, 120 pages",
+                         price=Decimal("4.25"), stock=50),
+            ProductModel(name="Desk lamp", description="LED, warm white",
+                         price=Decimal("24.00"), stock=5),
+            ProductModel(name="Sticker pack", description="Last one in stock!",
+                         price=Decimal("2.00"), stock=1),
+        ])
+    db.commit()
+```
+
+`seed()` only runs on empty tables, so restarting the app never adds
+duplicates. It creates `admin`, `alice` and `bob` (password:
+`<name>-password`) and four products. "Sticker pack" has a stock of 1 on
+purpose, so you can see an order fail on the [Orders](/en/docs/shop/orders) page.

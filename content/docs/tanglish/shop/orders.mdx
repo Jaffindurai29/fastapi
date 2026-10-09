@@ -1,0 +1,483 @@
+---
+title: "4. Orders"
+description: Row locks-oda oru transaction-la order place panradhu — illadha stock-ah yaarum vaanga mudiyaadhu; ownership; cancel; status flow; adha prove panra tests.
+---
+
+<GithubLink path="example/14/a" />
+
+Oru order orey nerathula pala tables-ah touch pannum: oru order row,
+item rows create pannum, adhula irukra ovoru product-oda stock-aiyum
+korakkum. Adhu ellam **full-a nadakkanum illana edhuvume
+nadakkakoodadhu**, mattrum rendu customers orey kadaisi item-ah
+eppovum vaanga koodadhu.
+
+## Code: `routers/orders.py`
+
+```python title="routers/orders.py"
+from decimal import Decimal
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+
+from database import get_db
+from dependencies import get_current_user, require_roles
+from ids import decode_id
+from models import OrderItemModel, OrderModel, ProductModel, UserModel
+from schemas import OrderCreate, OrderOut, StatusUpdate
+from encryption import encrypt
+
+router = APIRouter(prefix="/orders", tags=["orders"])
+
+# Which status may follow which. Anything else is refused.
+NEXT_STATUS = {
+    "pending": {"shipped", "cancelled"},
+    "shipped": {"delivered"},
+    "delivered": set(),
+    "cancelled": set(),
+}
+
+
+def get_order_or_404(db: Session, order_id: str, user: UserModel) -> OrderModel:
+    order = db.get(OrderModel, decode_id(order_id))
+    # Someone else's order gets 404, not 403: we don't even admit it exists.
+    # THIS check is what protects orders; the hashed id only hides the count.
+    if order is None or (order.user_id != user.id and user.role != "admin"):
+        raise HTTPException(status_code=404, detail="Order not found")
+    return order
+
+
+def lock_products(db: Session, product_ids) -> dict[int, ProductModel]:
+    # SELECT ... FOR UPDATE: other requests touching these rows wait until
+    # we commit. Two people buying the last item can't both succeed.
+    # Sorted by id so two orders always lock in the same order (no deadlock).
+    rows = (
+        db.query(ProductModel)
+        .filter(ProductModel.id.in_(product_ids))
+        .order_by(ProductModel.id)
+        .with_for_update()
+        .all()
+    )
+    return {p.id: p for p in rows}
+
+
+def restore_stock(db: Session, order: OrderModel) -> None:
+    products = lock_products(db, [item.product_id for item in order.items])
+    for item in order.items:
+        products[item.product_id].stock += item.quantity
+
+
+# ------------------------------------------------------------ customer ----
+
+@router.post("", response_model=OrderOut, status_code=status.HTTP_201_CREATED,
+             responses={404: {"description": "Product not found"},
+                        409: {"description": "Not enough stock"}})
+def place_order(body: OrderCreate, db: Session = Depends(get_db),
+                user: UserModel = Depends(require_roles("customer"))):
+    # Same product listed twice? Add the quantities together.
+    wanted: dict[int, int] = {}
+    for item in body.items:
+        pid = decode_id(item.product_id)
+        wanted[pid] = wanted.get(pid, 0) + item.quantity
+
+    products = lock_products(db, wanted)
+
+    # Check EVERYTHING before changing anything: all items or none.
+    for pid, qty in wanted.items():
+        product = products.get(pid)
+        if product is None or not product.is_active:
+            raise HTTPException(status_code=404, detail="Product not found")
+        if product.stock < qty:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Only {product.stock} of {product.name} left",
+            )
+
+    order = OrderModel(
+        user_id=user.id,
+        status="pending",
+        total=Decimal("0"),
+        phone_encrypted=encrypt(body.phone),
+        address_encrypted=encrypt(body.address),
+    )
+    for pid, qty in wanted.items():
+        product = products[pid]
+        product.stock -= qty
+        order.items.append(OrderItemModel(product_id=pid, quantity=qty, unit_price=product.price))
+        order.total += product.price * qty
+
+    db.add(order)
+    db.commit()  # stock change and order are saved together, or not at all
+    db.refresh(order)
+    return order
+
+
+@router.get("/mine", response_model=list[OrderOut])
+def my_orders(db: Session = Depends(get_db), user: UserModel = Depends(get_current_user)):
+    return (
+        db.query(OrderModel)
+        .filter(OrderModel.user_id == user.id)
+        .order_by(OrderModel.id.desc())
+        .all()
+    )
+
+
+@router.get("/{order_id}", response_model=OrderOut)
+def get_order(order_id: str, db: Session = Depends(get_db),
+              user: UserModel = Depends(get_current_user)):
+    return get_order_or_404(db, order_id, user)
+
+
+@router.post("/{order_id}/cancel", response_model=OrderOut,
+             responses={400: {"description": "Only pending orders can be cancelled"}})
+def cancel_order(order_id: str, db: Session = Depends(get_db),
+                 user: UserModel = Depends(get_current_user)):
+    order = get_order_or_404(db, order_id, user)
+    if order.status != "pending":
+        raise HTTPException(status_code=400, detail="Only pending orders can be cancelled")
+    order.status = "cancelled"
+    restore_stock(db, order)
+    db.commit()
+    db.refresh(order)
+    return order
+
+
+# ---------------------------------------------------------- admin only ----
+
+@router.get("", response_model=list[OrderOut])
+def all_orders(db: Session = Depends(get_db), user: UserModel = Depends(require_roles("admin"))):
+    return db.query(OrderModel).order_by(OrderModel.id.desc()).all()
+
+
+@router.patch("/{order_id}/status", response_model=OrderOut,
+              responses={400: {"description": "Status change not allowed"}})
+def update_status(order_id: str, body: StatusUpdate, db: Session = Depends(get_db),
+                  user: UserModel = Depends(require_roles("admin"))):
+    order = get_order_or_404(db, order_id, user)
+    if body.status not in NEXT_STATUS[order.status]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Can't go from {order.status} to {body.status}",
+        )
+    if body.status == "cancelled":
+        restore_stock(db, order)
+    order.status = body.status
+    db.commit()
+    db.refresh(order)
+    return order
+```
+
+## Order place panradhu, step by step
+
+**1. Duplicate lines-ah merge pannudhu.** Cart-la same product rendu
+thadava irundha, `wanted` quantities-ah sekkum. Illana stock check
+ovoru line-aiyum thaniya paakkum — 2-oda orey line fail aagra edathula,
+1-oda rendu lines pass aagidum.
+
+**2. Products-ah lock pannudhu.** `lock_products` orey query run
+pannum:
+
+```sql
+SELECT * FROM minishop_products WHERE id IN (...) ORDER BY id FOR UPDATE
+```
+
+`FOR UPDATE` andha rows-ah namma `commit` varaikkum lock pannum. Idhu
+enna thadukudhu-nu paarunga:
+
+| Time | Alice | Bob |
+|---|---|---|
+| 1 | Sticker pack padikkiraanga: stock **1** | |
+| 2 | | Sticker pack padikkiraanga: stock **1** |
+| 3 | 1 ≥ 1, OK → stock 0 | |
+| 4 | | 1 ≥ 1, OK → stock 0 |
+| 5 | **Rendu perum** kadaisi sticker pack vaangitaanga | |
+
+Lock irundha, step 2-la Bob-oda read Alice commit panra varaikkum
+**wait** pannum, apparam stock 0 paathu `409` "Only 0 of Sticker pack
+left" kidaikkum.
+
+`ORDER BY id`-um mukkiyam. Alice-oda order mug-apparam-lamp lock
+panni, Bob-oda order lamp-apparam-mug lock pannina, rendu perum oru
+lock vechukittu innonnukaaga eppovum wait pannuvaanga: adhu dhan
+**deadlock**. Eppovum same order-la lock pannina adhu nadakkave
+nadakkaadhu.
+
+**3. Edhaiyum maathradhukku munnadi ellathaiyum check pannudhu.**
+Mudhal loop check mattum pannum: ovoru product-um irukka, visible-a,
+podhumaana stock irukka? Edhavadhu problem-na exception raise aagum.
+Innum edhuvum maaral, `db.commit()` reach aagave aagaadhu, so edhuvum
+save aagaadhu ([Transactions](/tanglish/docs/relationships/transactions)
+maadhiri).
+
+**4. Order-ah build pannudhu.** Phone mattrum address database pakkam
+pogradhukku munnadiye encrypt aagum. Ovoru item `product.price`-ah
+`unit_price`-la copy pannum, stock korayum, total database prices-la
+irundhu **server-la** calculate aagum. Frontend cart total oru preview
+mattum dhan: request-ah edit panra customer evlo pay pannanum-nu maatha
+mudiyaadhu.
+
+**5. Orey commit.** Order, adhoda items, ovoru stock change-um orey
+transaction-la save aagum.
+
+## Ownership: `404`, `403` illa
+
+```python
+if order is None or (order.user_id != user.id and user.role != "admin"):
+    raise HTTPException(status_code=404, detail="Order not found")
+```
+
+Customers login aagirukaanga, so `get_current_user` avangala ulla
+vidum. Aana login aagiruka-na "order `Xb3kLq9P`-ah padikkalam"-nu artham
+illa. Indha check dhan adha decide pannum —
+[Authorization by ownership](/tanglish/docs/security/ownership)
+maadhiri. Bob Alice-oda order-ah kettaa, illadha order-ku kidaikkra
+**same** `404` dhan kidaikkum — so adhu irukkave irukku-nu kooda
+theriyaadhu.
+
+Public ids security illa-nu solradhu idhanaala dhan: Bob eppadiyo oru
+valid id-ah guess pannaalum, indha check avara thadukkum.
+
+## Cancel mattrum status flow
+
+`NEXT_STATUS` dhan full state machine:
+
+```
+pending ──→ shipped ──→ delivered
+   │
+   └──→ cancelled
+```
+
+- Oru **customer** thannoda order-ah `pending`-la irukra varaikkum
+  cancel pannalam.
+- Oru **admin** endha order-aiyum oru arrow-la oru step move pannalam.
+  Vera edhuvum, `pending → delivered` maadhiri, `400`.
+
+Cancel panra rendu vazhiyum `restore_stock`-ah call pannum — adhu
+products-ah thirumba lock panni quantities-ah thirumba vekkum.
+
+## Tests
+
+Tests FastAPI-oda `TestClient` mattrum oru throwaway SQLite database
+use pannudhu, so unga MySQL data-va eppovum touch pannaadhu:
+
+```python title="tests/conftest.py"
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+import pytest
+
+# Run against a throwaway SQLite file, never your MySQL data. Must be set
+# BEFORE main/database are imported. Set TEST_DATABASE_URL to run against
+# an EMPTY MySQL database instead (SQLite ignores the row locks).
+_db_file = Path(tempfile.mkdtemp()) / "test.db"
+os.environ["DATABASE_URL"] = os.getenv("TEST_DATABASE_URL", f"sqlite:///{_db_file}")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from fastapi.testclient import TestClient  # noqa: E402
+
+import crud  # noqa: E402
+from database import SessionLocal  # noqa: E402
+from main import app  # noqa: E402
+
+
+@pytest.fixture(scope="session")
+def client():
+    return TestClient(app)
+
+
+def _login(client, username):
+    res = client.post("/login", json={"username": username, "password": "password123"})
+    assert res.status_code == 200
+    return {"Authorization": f"Bearer {res.json()['access_token']}"}
+
+
+@pytest.fixture(scope="session")
+def admin(client):
+    with SessionLocal() as db:
+        crud.create_user(db, "boss", "password123", role="admin")
+    return _login(client, "boss")
+
+
+@pytest.fixture(scope="session")
+def make_customer(client):
+    def make(username):
+        assert client.post("/register", json={"username": username, "password": "password123"}).status_code == 201
+        return _login(client, username)
+
+    return make
+```
+
+Indha pages-la irukra ovoru rule-kum oru test:
+
+```python title="tests/test_shop.py"
+from sqlalchemy import text
+
+from database import SessionLocal
+
+ORDER_INFO = {"phone": "0300-1234567", "address": "12 Mall Road, Lahore"}
+
+
+def new_product(client, admin, stock=5, price="10.50"):
+    res = client.post("/products", headers=admin,
+                      json={"name": "Mug", "price": price, "stock": stock})
+    assert res.status_code == 201
+    return res.json()
+
+
+# ----------------------------------------------------------- auth ----
+
+def test_register_is_always_customer(client):
+    res = client.post("/register", json={"username": "sneaky", "password": "password123",
+                                         "role": "admin"})
+    assert res.status_code == 201
+    assert res.json()["role"] == "customer"
+
+
+def test_no_token_is_401(client):
+    assert client.get("/products").status_code == 401
+    assert client.get("/me").status_code == 401
+
+
+# ---------------------------------------------------------- roles ----
+
+def test_customer_gets_403_on_admin_routes(client, make_customer):
+    cust = make_customer("cora")
+    assert client.post("/products", headers=cust, json={"name": "x", "price": "1"}).status_code == 403
+    assert client.get("/orders", headers=cust).status_code == 403
+    assert client.get("/users", headers=cust).status_code == 403
+
+
+def test_admin_cannot_change_own_role(client, admin):
+    me = client.get("/me", headers=admin).json()
+    assert client.patch(f"/users/{me['id']}/role", headers=admin,
+                        json={"role": "customer"}).status_code == 400
+
+
+def test_promote_takes_effect_immediately(client, admin, make_customer):
+    dan = make_customer("dan")
+    assert client.get("/users", headers=dan).status_code == 403
+    dan_id = client.get("/me", headers=dan).json()["id"]
+    assert client.patch(f"/users/{dan_id}/role", headers=admin, json={"role": "admin"}).status_code == 200
+    # Same old token, which still says "customer": the DB role wins.
+    assert client.get("/users", headers=dan).status_code == 200
+
+
+# -------------------------------------------------------- hashed ids ----
+
+def test_ids_are_hashed(client, admin):
+    product = new_product(client, admin)
+    assert isinstance(product["id"], str) and not product["id"].isdigit()
+    assert client.get(f"/products/{product['id']}", headers=admin).status_code == 200
+    assert client.get("/products/1", headers=admin).status_code == 404
+    assert client.get("/products/notreal", headers=admin).status_code == 404
+
+
+# ---------------------------------------------------- products/stock ----
+
+def test_stock_cannot_go_negative(client, admin):
+    product = new_product(client, admin, stock=2)
+    url = f"/products/{product['id']}/stock"
+    assert client.patch(url, headers=admin, json={"change": -3}).status_code == 400
+    assert client.patch(url, headers=admin, json={"change": 8}).json()["stock"] == 10
+
+
+def test_deleted_product_is_hidden_from_customers(client, admin, make_customer):
+    cust = make_customer("hana")
+    product = new_product(client, admin)
+    assert client.delete(f"/products/{product['id']}", headers=admin).status_code == 204
+    assert client.get(f"/products/{product['id']}", headers=cust).status_code == 404
+    assert product["id"] not in [p["id"] for p in client.get("/products", headers=cust).json()]
+    # Admin still sees it, so it can be brought back.
+    assert client.get(f"/products/{product['id']}", headers=admin).json()["is_active"] is False
+
+
+# ------------------------------------------------------------ orders ----
+
+def test_order_reduces_stock_and_cancel_restores(client, admin, make_customer):
+    cust = make_customer("eve")
+    product = new_product(client, admin, stock=5, price="10.50")
+    res = client.post("/orders", headers=cust,
+                      json={"items": [{"product_id": product["id"], "quantity": 2}], **ORDER_INFO})
+    assert res.status_code == 201
+    order = res.json()
+    assert order["total"] == "21.00"
+    assert client.get(f"/products/{product['id']}", headers=cust).json()["stock"] == 3
+
+    assert client.post(f"/orders/{order['id']}/cancel", headers=cust).json()["status"] == "cancelled"
+    assert client.get(f"/products/{product['id']}", headers=cust).json()["stock"] == 5
+
+
+def test_cannot_oversell(client, admin, make_customer):
+    cust = make_customer("finn")
+    product = new_product(client, admin, stock=1)
+    res = client.post("/orders", headers=cust,
+                      json={"items": [{"product_id": product["id"], "quantity": 2}], **ORDER_INFO})
+    assert res.status_code == 409
+    # Nothing changed: the failed order took no stock.
+    assert client.get(f"/products/{product['id']}", headers=cust).json()["stock"] == 1
+
+
+def test_customer_cannot_see_others_orders(client, admin, make_customer):
+    gus, ivy = make_customer("gus"), make_customer("ivy")
+    product = new_product(client, admin)
+    order = client.post("/orders", headers=gus,
+                        json={"items": [{"product_id": product["id"], "quantity": 1}], **ORDER_INFO}).json()
+    assert client.get(f"/orders/{order['id']}", headers=ivy).status_code == 404
+    assert client.post(f"/orders/{order['id']}/cancel", headers=ivy).status_code == 404
+    assert order["id"] not in [o["id"] for o in client.get("/orders/mine", headers=ivy).json()]
+    assert client.get(f"/orders/{order['id']}", headers=admin).status_code == 200
+
+
+def test_status_flow(client, admin, make_customer):
+    cust = make_customer("joe")
+    product = new_product(client, admin)
+    order = client.post("/orders", headers=cust,
+                        json={"items": [{"product_id": product["id"], "quantity": 1}], **ORDER_INFO}).json()
+    url = f"/orders/{order['id']}/status"
+    assert client.patch(url, headers=admin, json={"status": "delivered"}).status_code == 400
+    assert client.patch(url, headers=admin, json={"status": "shipped"}).status_code == 200
+    # Shipped orders can't be cancelled by the customer any more.
+    assert client.post(f"/orders/{order['id']}/cancel", headers=cust).status_code == 400
+
+
+def test_address_is_encrypted_in_database(client, admin, make_customer):
+    cust = make_customer("kim")
+    product = new_product(client, admin)
+    order = client.post("/orders", headers=cust,
+                        json={"items": [{"product_id": product["id"], "quantity": 1}], **ORDER_INFO}).json()
+    # The API decrypts it for the owner...
+    assert order["address"] == ORDER_INFO["address"]
+    # ...but the database only ever holds ciphertext.
+    with SessionLocal() as db:
+        stored = db.execute(text("SELECT address_encrypted, phone_encrypted FROM minishop_orders")).all()
+    for address, phone in stored:
+        assert ORDER_INFO["address"] not in address
+        assert ORDER_INFO["phone"] not in phone
+
+
+# ------------------------------------------------------------- seed ----
+
+def test_seed_users_can_log_in(client):
+    for username, role in (("admin", "admin"), ("alice", "customer")):
+        res = client.post("/login", json={"username": username, "password": f"{username}-password"})
+        assert res.status_code == 200
+        me = client.get("/me", headers={"Authorization": f"Bearer {res.json()['access_token']}"})
+        assert me.json()["role"] == role
+```
+
+Run pannunga:
+
+```bash
+pip install pytest httpx
+cd example/14/a
+pytest tests
+```
+
+SQLite `FOR UPDATE`-ah ignore pannum, so indha runs locks-ah actual-a
+test pannaadhu. MySQL-la test panna, oru **empty** database create panni
+`TEST_DATABASE_URL`-ah adhu pakkam point pannunga:
+
+```bash
+TEST_DATABASE_URL="mysql+pymysql://root:your-password@127.0.0.1:3306/shop_test" pytest tests
+```

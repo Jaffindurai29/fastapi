@@ -1,0 +1,384 @@
+---
+title: "2. Login & roles"
+description: Frontend-ku role-ah carry panra tokens, adha eppovum nambaadha backend, 401 vs 403-ku require_roles, mudhal admin-ah eppadi create panradhu.
+---
+
+<GithubLink path="example/14/a" />
+
+Login [JWT login](/tanglish/docs/security/jwt-login) mattrum
+[Refresh tokens](/tanglish/docs/security/refresh-tokens) maadhiri dhan
+work aagudhu — JSON bodies-oda, so React direct-a call pannalam.
+Interesting part roles dhan: token role-ah **carry** pannum, aana
+backend adha eppovum **nambaadhu**.
+
+## Tokens: `security.py`
+
+```python title="security.py"
+from datetime import datetime, timedelta, timezone
+
+import jwt
+from pwdlib import PasswordHash
+
+from config import ACCESS_TOKEN_EXPIRE_MINUTES, ALGORITHM, REFRESH_TOKEN_EXPIRE_DAYS, SECRET_KEY
+
+# ------------------------------------------------------------ HASHING ----
+# One-way. Used for passwords: we can CHECK a password, never read it back.
+# (Two-way encryption for phone/address lives in encryption.py.)
+
+password_hash = PasswordHash.recommended()  # Argon2
+
+
+def hash_password(password: str) -> str:
+    # A fresh random salt every call: same password, different hash.
+    return password_hash.hash(password)
+
+
+def verify_password(password: str, hashed: str) -> bool:
+    return password_hash.verify(password, hashed)
+
+
+# ---------------------------------------------------------------- JWT ----
+
+def _create_token(username: str, token_type: str, expires: timedelta, **extra) -> str:
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub": username,     # who the token is about
+        "type": token_type,  # "access" or "refresh", so one can't pose as the other
+        "iat": now,          # issued at
+        "exp": now + expires,  # PyJWT rejects the token after this moment
+        **extra,
+    }
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def create_access_token(username: str, role: str) -> str:
+    # The role is in the token only so the FRONTEND can pick a menu.
+    # The backend never trusts it: dependencies.py reads the role from
+    # the database on every request.
+    return _create_token(
+        username, "access", timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES), role=role
+    )
+
+
+def create_refresh_token(username: str) -> str:
+    return _create_token(username, "refresh", timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS))
+
+
+def decode_token(token: str, expected_type: str) -> str | None:
+    """The username, or None if the token is expired, tampered with, or the wrong type."""
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except jwt.InvalidTokenError:  # covers ExpiredSignatureError too
+        return None
+    if payload.get("type") != expected_type:
+        return None
+    return payload.get("sub")
+```
+
+Access token-oda payload ippadi irukkum (unga token-ah
+[jwt.io](https://jwt.io)-la paste panni paarunga):
+
+```json
+{ "sub": "alice", "type": "access", "iat": 1760000000, "exp": 1760000900, "role": "customer" }
+```
+
+Role inga irukradhu **frontend extra request illaama menu choose
+panradhukku mattum dhan**. JWT sign aagirukku, encrypt aagala: yaar
+venumnaalum payload-ah padikkalam, so adhula endha secret-um podaadheenga.
+Backend indha `role`-ah full-a ignore pannum — adutha file adha
+kaattum.
+
+## 401 vs 403: `dependencies.py`
+
+```python title="dependencies.py"
+from fastapi import Depends, HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy.orm import Session
+
+import crud
+from database import get_db
+from models import UserModel
+from security import decode_token
+
+# Reads "Authorization: Bearer <token>". auto_error=False so a missing
+# header gets OUR 401 below, not FastAPI's default 403.
+bearer = HTTPBearer(auto_error=False)
+
+
+def get_current_user(
+    creds: HTTPAuthorizationCredentials | None = Depends(bearer),
+    db: Session = Depends(get_db),
+) -> UserModel:
+    """401 = "who are you?" No token, or a bad/expired one."""
+    username = decode_token(creds.credentials, expected_type="access") if creds else None
+    user = crud.get_user_by_username(db, username) if username else None
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Access token invalid or expired",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return user
+
+
+def require_roles(*roles: str):
+    """403 = "I know who you are, and you're not allowed."
+
+    Usage:  user = Depends(require_roles("admin"))
+    """
+
+    def checker(user: UserModel = Depends(get_current_user)) -> UserModel:
+        # user.role comes from the DATABASE, not from the token, so a
+        # demoted admin loses access on their very next request.
+        if user.role not in roles:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed")
+        return user
+
+    return checker
+```
+
+Rendu dependencies, rendu kelvigal:
+
+| Dependency | Kelvi | Fail aana |
+|---|---|---|
+| `get_current_user` | *Neenga yaaru?* Real user-oda valid access token-ah? | `401` |
+| `require_roles("admin")` | *Neenga enna pannalam?* Andha user-oda role inga allowed-ah? | `403` |
+
+**Role database row-la irundhu varudhu, token-la irundhu illa.** Oru
+admin yaaraiyaavadhu demote pannina, avanga token 15 nimisham varaikkum
+`"role": "admin"` nu dhan sollum — aana `user.role` ovoru request-layum
+fresh-a padikkapadudhu, so udane access pogum. Edhir pakkamum same:
+`test_promote_takes_effect_immediately` test oru customer-ah promote
+panni, avanga **pazhaya** token udane admin routes-la work aagradha
+kaattum.
+
+`HTTPBearer(auto_error=False)` chinna detail, aana periya effect.
+Adhu illana, `Authorization` header illadha request-ku FastAPI-oda
+built-in `403` varum — "not logged in"-ku badhila "not allowed"-nu
+artham aagidum. Idhu irundha, missing header namma code-ku vandhu
+correct-aana `401` kidaikkum.
+
+## Auth routes: `routers/auth.py`
+
+```python title="routers/auth.py"
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+
+import crud
+from database import get_db
+from dependencies import get_current_user
+from schemas import LoginRequest, RefreshRequest, TokenPair, UserCreate, UserOut
+from security import create_access_token, create_refresh_token, decode_token
+
+router = APIRouter(tags=["auth"])
+
+
+@router.post("/register", response_model=UserOut, status_code=status.HTTP_201_CREATED,
+             responses={409: {"description": "Username already taken"}})
+def register(user: UserCreate, db: Session = Depends(get_db)):
+    if crud.get_user_by_username(db, user.username) is not None:
+        raise HTTPException(status_code=409, detail="Username already taken")
+    # No "role" field in UserCreate on purpose: nobody can sign up as admin.
+    return crud.create_user(db, user.username, user.password)
+
+
+@router.post("/login", response_model=TokenPair,
+             responses={401: {"description": "Incorrect username or password"}})
+def login(body: LoginRequest, db: Session = Depends(get_db)):
+    user = crud.authenticate(db, body.username, body.password)
+    if user is None:
+        # Same message for "no such user" and "wrong password", so an
+        # attacker can't use this route to discover which usernames exist.
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    # The password is checked once, here. From now on the client proves
+    # who it is with the access token instead.
+    return TokenPair(
+        access_token=create_access_token(user.username, user.role),
+        refresh_token=create_refresh_token(user.username),
+    )
+
+
+@router.post("/refresh", response_model=TokenPair,
+             responses={401: {"description": "Refresh token invalid or expired"}})
+def refresh(body: RefreshRequest, db: Session = Depends(get_db)):
+    username = decode_token(body.refresh_token, expected_type="refresh")
+    user = crud.get_user_by_username(db, username) if username else None
+    if user is None:
+        # Refresh token is dead (or the user was deleted): log in again.
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh token invalid or expired",
+        )
+    # The new access token carries the CURRENT role, so a promotion shows
+    # up in the frontend's menu after the next refresh.
+    return TokenPair(
+        access_token=create_access_token(user.username, user.role),
+        refresh_token=body.refresh_token,
+    )
+
+
+@router.get("/me", response_model=UserOut,
+            responses={401: {"description": "Access token invalid or expired"}})
+def me(user=Depends(get_current_user)):
+    return user
+```
+
+- **`/register`** oru customer-ah create pannum. Role pass panna
+  vazhiye illa.
+- **`/login`** "user illa" mattrum "thappu password" rendukkum same
+  `401` message tharum — so endha usernames irukku-nu kandupidikka
+  idha use panna mudiyaadhu.
+- **`/refresh`** user-ah thirumba load pannum, so pudhu access token
+  **current** role-ah carry pannum. Promotion-ku apparam, frontend menu
+  adutha refresh-la (illana `/me` call panra adutha page load-la)
+  maarum.
+
+## Admin-only routers: `routers/users.py`
+
+```python title="routers/users.py"
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+
+from database import get_db
+from dependencies import require_roles
+from ids import decode_id
+from models import UserModel
+from schemas import RoleUpdate, UserOut
+
+# Every route in this file is admin-only, so the check goes on the router.
+router = APIRouter(prefix="/users", tags=["users"], dependencies=[Depends(require_roles("admin"))])
+
+
+@router.get("", response_model=list[UserOut])
+def list_users(db: Session = Depends(get_db)):
+    return db.query(UserModel).order_by(UserModel.id).all()
+
+
+@router.patch("/{user_id}/role", response_model=UserOut,
+              responses={400: {"description": "You can't change your own role"}})
+def change_role(user_id: str, body: RoleUpdate, db: Session = Depends(get_db),
+                admin: UserModel = Depends(require_roles("admin"))):
+    user = db.get(UserModel, decode_id(user_id))
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    # Stops the last admin from locking everyone out by demoting themselves.
+    if user.id == admin.id:
+        raise HTTPException(status_code=400, detail="You can't change your own role")
+    user.role = body.role
+    db.commit()
+    db.refresh(user)
+    return user
+```
+
+`require_roles`-ah moonu vazhiyila apply pannalam, shop moonaiyum use
+pannudhu:
+
+| Enga | Example | Eppo use pannanum |
+|---|---|---|
+| Oru route-la | `POST /orders`-la `Depends(require_roles("customer"))` | Pakkathu routes-la irundhu oru route mattum vera maadhiri |
+| Oru variable-a | `routers/products.py`-la `admin_only = require_roles("admin")` | File-la pala routes, aana ellame illa |
+| Router mela | Inga `APIRouter(..., dependencies=[...])` | File-la **ella** routes-um |
+
+Ellame admin-only file-ku router version dhan romba safe: apparam add
+panra pudhu route check-ah marakka mudiyaadhu.
+
+`change_role` **unga sontha** role-ah maatha vidaadhu. Illana orey
+admin thannai thaane demote panniduvaanga, apparam yaaraiyum thirumba
+promote panna yaarume irukka maattaanga.
+
+## Mudhal admin: `create_admin.py`
+
+Kaththukka seed data `admin`-ah tharum. Real shop empty database-oda
+start aagum, API yaaraiyum admin aakkaadhu, so mudhal admin command
+line-la dhan create aaganum:
+
+```python title="create_admin.py"
+"""Make a user an admin.
+
+    python create_admin.py <username>
+
+If the user exists, they're promoted. If not, you're asked for a password
+and the account is created as an admin. The API never lets anyone sign
+up as admin, so on a real shop (no seed data) this is how you get the
+first one.
+"""
+import sys
+from getpass import getpass
+
+import crud
+import main  # noqa: F401  (creates the tables first)
+from database import SessionLocal
+
+
+def run(username: str) -> None:
+    with SessionLocal() as db:
+        user = crud.get_user_by_username(db, username)
+        if user is not None:
+            user.role = "admin"
+            db.commit()
+            print(f'"{username}" is now an admin.')
+            return
+
+        password = getpass(f'New password for "{username}" (min 8 chars): ')
+        if len(password) < 8:
+            sys.exit("Password too short.")
+        crud.create_user(db, username, password, role="admin")
+        print(f'Admin "{username}" created.')
+
+
+if __name__ == "__main__":
+    if len(sys.argv) != 2:
+        sys.exit("Usage: python create_admin.py <username>")
+    run(sys.argv[1])
+```
+
+```bash
+python create_admin.py carol
+```
+
+`getpass` password-ah screen-la kaattaama padikkum. Script mudhal-la
+`main`-ah import pannum, so brand-new database-layum tables irukkum.
+
+## Ellathaiyum sekkradhu: `main.py`
+
+```python title="main.py"
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+import crud
+import models  # noqa: F401  (registers every table with Base before create_all)
+from config import CORS_ORIGINS
+from database import Base, SessionLocal, engine
+from routers import auth, orders, products, users
+
+# Four new minishop_* tables, so create_all is enough here. Changing a table
+# that already exists would need a migration (topic 13).
+Base.metadata.create_all(bind=engine)
+
+with SessionLocal() as db:
+    crud.seed(db)
+
+app = FastAPI(title="Mini shop")
+
+# Only the 14/react dev server may call this API from a browser. Tokens
+# travel in the Authorization header, not cookies, so no credentials.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ORIGINS,
+    allow_methods=["GET", "POST", "PATCH", "DELETE"],
+    allow_headers=["Authorization", "Content-Type"],
+)
+
+app.include_router(auth.router)
+app.include_router(products.router)
+app.include_router(orders.router)
+app.include_router(users.router)
+```
+
+Naalu tables-um pudhusu, so inga `create_all` podhum. Apparam
+irukra table-la oru column add pannina, `create_all` adha pannaadhu:
+adhukku dhan [Database Migrations](/tanglish/docs/migrations).

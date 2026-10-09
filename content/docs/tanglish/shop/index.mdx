@@ -1,0 +1,173 @@
+---
+title: Shop Project
+description: Oru capstone project — products, stock, orders, admin mattrum customer roles, role-protected routes-oda oru React frontend-um irukra oru chinna online shop.
+---
+
+<GithubLink path="example/14/a" label="Backend on GitHub" />{" "}
+<GithubLink path="example/14/react" label="Frontend on GitHub" />
+
+[Relationships](/tanglish/docs/relationships) mattrum
+[Security](/tanglish/docs/security) ovoru page-layum oru idea mattum
+kaththukuduthuchu. Indha topic, adhu ellathaiyum orey nerathula use
+panra oru real app build pannum: oru chinna online shop. Customers
+products paappanga, cart fill pannuvanga, order place pannuvanga.
+Admins products, stock, orders, users ellathaiyum manage pannuvanga.
+Ovoru rule-um API dhan enforce pannum; React frontend ovoru role-kum
+avangaluku allowed-aana pages-ah mattum kaattum.
+
+## Yaaru enna pannalam
+
+| | Customer | Admin |
+|---|:-:|:-:|
+| Products paakradhu | ✅ | ✅ (hidden products-um theriyum) |
+| Order place panradhu, **sontha** orders paakradhu, cancel panradhu | ✅ | — |
+| Products add / edit / hide panradhu, stock maathradhu | — | ✅ |
+| **Ella** orders-um paakradhu, order status maathradhu | — | ✅ |
+| Users list, roles maathradhu | — | ✅ |
+
+Sign up panra ellarum eppovum customer dhan. Mudhal admin seed data-la
+irundhu illana oru chinna `create_admin.py` script-la irundhu varum —
+API-la irundhu eppovum illa.
+
+## Ovoru idea-um, adhu enga irundhu vandhuchu
+
+| Idea | Kaththukitta page | Inga edhukku use aagudhu |
+|---|---|---|
+| Password hashing (Argon2) | [Password hashing](/tanglish/docs/security/password-hashing) | Passwords |
+| JWT access + refresh tokens | [JWT login](/tanglish/docs/security/jwt-login), [Refresh tokens](/tanglish/docs/security/refresh-tokens) | Login-la irukradhu |
+| Roles, `401` vs `403` | [Authorization by role](/tanglish/docs/security/roles) | Customer vs admin routes |
+| Ownership | [Authorization by ownership](/tanglish/docs/security/ownership) | "Unga sontha orders mattum" |
+| Encryption (Fernet) | [Encrypt/decrypt fields](/tanglish/docs/security/encryption) | Order-la irukra phone, address |
+| Public ids (Sqids) | [ID hashing](/tanglish/docs/security/id-hashing) | `/orders/1`-ku badhila `/orders/Xb3kLq9P` |
+| One-to-many, nested responses | [One-to-many](/tanglish/docs/relationships/one-to-many), [Nested responses](/tanglish/docs/relationships/nested-responses) | Orders mattrum avanga items |
+| Transactions | [Transactions](/tanglish/docs/relationships/transactions) | Order full-a save aagum, illana edhuvume aagaadhu |
+| Soft delete | [Soft delete](/tanglish/docs/relationships/soft-delete) | Hidden products; pazhaya orders innum work aagum |
+| Axios interceptors | [React login UI](/tanglish/docs/security/react) | Token automatic-a refresh aagum |
+
+Indha topic-la pudhusu: **row locks** (`SELECT ... FOR UPDATE`) — rendu
+customers kadaisi item-ah orey nerathula vaanga mudiyaadhu. Apparam
+React Router vechu React-la **role-protected routes**.
+
+## Files
+
+**Backend, `example/14/a`:**
+
+| File | Velai |
+|---|---|
+| `config.py` | env / `.env`-la irundhu secrets mattrum settings, dev-only defaults-oda |
+| `database.py` | `engine`, `SessionLocal`, `Base`, `get_db()` |
+| `models.py` | `minishop_users`, `minishop_products`, `minishop_orders`, `minishop_order_items` |
+| `schemas.py` | request bodies mattrum `*Out` response models |
+| `security.py` | password hashing, JWT create/decode |
+| `encryption.py` | Fernet `encrypt()` / `decrypt()` |
+| `ids.py` | Sqids vechu public ids |
+| `crud.py` | user functions + demo seed data |
+| `dependencies.py` | `get_current_user` (`401`), `require_roles(...)` (`403`) |
+| `routers/auth.py` | `/register`, `/login`, `/refresh`, `/me` |
+| `routers/products.py` | product list/detail, admin CRUD, stock maathradhu |
+| `routers/orders.py` | orders place / list / cancel; admin status maathradhu |
+| `routers/users.py` | admin: users list, roles maathradhu |
+| `main.py` | tables create, seed, CORS, routers include |
+| `create_admin.py` | command line-la irundhu oru admin-ah promote illana create pannum |
+| `tests/` | 14 pytest tests, ovoru rule-kum onnu |
+
+**Frontend, `example/14/react`:**
+
+```
+react/src/
+├── api.js                      # axios instance, token storage, refresh interceptor
+├── auth.jsx                    # AuthProvider: who is logged in, login(), logout()
+├── App.jsx                     # every route, and which role may open it
+├── components/ProtectedRoute.jsx  # logged out → /login, wrong role → /forbidden
+├── components/Layout.jsx       # navbar with only your role's links
+├── components/OrderCard.jsx    # one order (customers and admins)
+└── pages/                      # login, shop, my orders, 3 admin pages, 403 page
+```
+
+## Setup
+
+```bash
+pip install fastapi "uvicorn[standard]" sqlalchemy pymysql python-dotenv "pwdlib[argon2]" pyjwt cryptography sqids
+```
+
+Database [MySQL + CRUD-la irukra maadhiri same](/tanglish/docs/mysql-crud#setup):
+`fastapi_learn` database, `MYSQL_*` env vars illana oru `.env`, illana
+SQLite-ku `DATABASE_URL`. Shop-ku sontha `minishop_*` tables irukku, so
+vera topics-oda data-va touch pannaadhu. `.env.example`-la irukra ovoru
+secret-kum oru development default irukku, so zero setup-la run aagum.
+
+## Indha topic-ah eppadi run pannurathu
+
+1. **Backend:**
+
+   ```bash
+   cd example/14/a
+   uvicorn main:app --reload
+   ```
+
+   Mudhal run tables-ah create panni seed pannum:
+
+   | Username | Password | Role |
+   |---|---|---|
+   | `admin` | `admin-password` | admin |
+   | `alice` | `alice-password` | customer |
+   | `bob` | `bob-password` | customer |
+
+   ...kooda naalu products. "Sticker pack"-oda stock **1** dhan, so
+   adhukku rendaavadhu order fail aagradha neenga paakalam.
+
+2. **Unga sontha admin (optional):**
+
+   ```bash
+   python create_admin.py carol
+   ```
+
+   `carol` irundha promote pannum; illana password kettu admin-a create
+   pannum. Seed data illadha real shop-la, mudhal admin ippadi dhan
+   varuvaanga.
+
+3. **Frontend**, rendaavadhu terminal-la:
+
+   ```bash
+   cd example/14/react
+   npm install
+   npm run dev
+   ```
+
+   [http://localhost:5173](http://localhost:5173) open pannunga.
+
+## Ella routes-um
+
+| Route | Yaaru | Description |
+|---|---|---|
+| `POST /register` | yaar venumnaalum | `201`, eppovum role `customer`. Already irundha `409` |
+| `POST /login` | yaar venumnaalum | `access_token` + `refresh_token` tharum. Illana `401` |
+| `POST /refresh` | yaar venumnaalum | Pudhu access token tharum |
+| `GET /me` | login aanavanga | Unga public id, username, role |
+| `GET /products` | login aanavanga | Customers: visible products. Admins: ellame |
+| `GET /products/{id}` | login aanavanga | Hidden product (customers-ku) illana theriyaadha id-na `404` |
+| `POST /products` | admin | Product create. `201` |
+| `PATCH /products/{id}` | admin | `name`, `description`, `price`, `is_active` maathalam |
+| `PATCH /products/{id}/stock` | admin | `{"change": 10}` illana `{"change": -3}`. 0-ku keezha pona `400` |
+| `DELETE /products/{id}` | admin | Product-ah hide pannum. `204` |
+| `POST /orders` | customer | Order place. `201`, illana `409` "Only 1 of ... left" |
+| `GET /orders/mine` | login aanavanga | Unga orders, pudhusu mudhal-la |
+| `GET /orders/{id}` | login aanavanga | Unga order illana `404` (admins ellathaiyum paakalam) |
+| `POST /orders/{id}/cancel` | login aanavanga | `pending`-la irukra varaikkum mattum. Stock thirumbi varum |
+| `GET /orders` | admin | Ella orders, phone mattrum address decrypt aagi |
+| `PATCH /orders/{id}/status` | admin | `pending → shipped → delivered`, illana `pending → cancelled` |
+| `GET /users` | admin | Ella users |
+| `PATCH /users/{id}/role` | admin | Role maathum. Unga sontha account-na `400` |
+
+## Indha topic-la irukra pages
+
+1. [Config, models & data](/tanglish/docs/shop/data) — naalu tables,
+   hashing vs encryption vs public ids, seed data.
+2. [Login & roles](/tanglish/docs/shop/auth-roles) — role-oda tokens,
+   `require_roles`, admin-only routers, `create_admin.py`.
+3. [Products & stock](/tanglish/docs/shop/products-stock) — admin CRUD,
+   soft delete, locked row-la stock maathradhu.
+4. [Orders](/tanglish/docs/shop/orders) — row locks-oda oru
+   transaction, overselling illa, ownership, status flow, tests.
+5. [React with protected routes](/tanglish/docs/shop/react) — React
+   Router, role-ku `ProtectedRoute`, role-ku oru navbar.

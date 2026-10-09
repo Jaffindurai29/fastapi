@@ -1,0 +1,170 @@
+---
+title: Shop Project
+description: A capstone project — a small online shop with products, stock, orders, admin and customer roles, and a React frontend with role-protected routes.
+---
+
+<GithubLink path="example/14/a" label="Backend on GitHub" />{" "}
+<GithubLink path="example/14/react" label="Frontend on GitHub" />
+
+[Relationships](/en/docs/relationships) and [Security](/en/docs/security)
+taught one idea per page. This topic builds one real app that needs all
+of them at the same time: a small online shop. Customers browse
+products, fill a cart and place orders. Admins manage products, stock,
+orders and users. Every rule is enforced by the API, and the React
+frontend only shows each role the pages it may use.
+
+## Who can do what
+
+| | Customer | Admin |
+|---|:-:|:-:|
+| Browse products | ✅ | ✅ (also sees hidden ones) |
+| Place an order, see and cancel **own** orders | ✅ | — |
+| Add / edit / hide products, change stock | — | ✅ |
+| See **all** orders, change order status | — | ✅ |
+| List users, change roles | — | ✅ |
+
+Sign-ups are always customers. The first admin comes from seed data or
+from a small `create_admin.py` script, never from the API.
+
+## Every idea, and where it came from
+
+| Idea | Learned in | Used here for |
+|---|---|---|
+| Password hashing (Argon2) | [Password hashing](/en/docs/security/password-hashing) | Passwords |
+| JWT access + refresh tokens | [JWT login](/en/docs/security/jwt-login), [Refresh tokens](/en/docs/security/refresh-tokens) | Staying logged in |
+| Roles, `401` vs `403` | [Authorization by role](/en/docs/security/roles) | Customer vs admin routes |
+| Ownership | [Authorization by ownership](/en/docs/security/ownership) | "Only your own orders" |
+| Encryption (Fernet) | [Encrypt/decrypt fields](/en/docs/security/encryption) | Phone and address on an order |
+| Public ids (Sqids) | [ID hashing](/en/docs/security/id-hashing) | `/orders/Xb3kLq9P` instead of `/orders/1` |
+| One-to-many, nested responses | [One-to-many](/en/docs/relationships/one-to-many), [Nested responses](/en/docs/relationships/nested-responses) | Orders and their items |
+| Transactions | [Transactions](/en/docs/relationships/transactions) | An order is saved completely or not at all |
+| Soft delete | [Soft delete](/en/docs/relationships/soft-delete) | Hidden products, old orders still work |
+| Axios interceptors | [React login UI](/en/docs/security/react) | Automatic token refresh |
+
+New in this topic: **row locks** (`SELECT ... FOR UPDATE`) so two
+customers can't both buy the last item, and **role-protected routes**
+in React with React Router.
+
+## The files
+
+**Backend, `example/14/a`:**
+
+| File | Responsibility |
+|---|---|
+| `config.py` | secrets and settings from env / `.env`, with dev-only defaults |
+| `database.py` | `engine`, `SessionLocal`, `Base`, `get_db()` |
+| `models.py` | `minishop_users`, `minishop_products`, `minishop_orders`, `minishop_order_items` |
+| `schemas.py` | request bodies and `*Out` response models |
+| `security.py` | password hashing, creating and decoding JWTs |
+| `encryption.py` | Fernet `encrypt()` / `decrypt()` |
+| `ids.py` | public ids with Sqids |
+| `crud.py` | user functions + demo seed data |
+| `dependencies.py` | `get_current_user` (`401`), `require_roles(...)` (`403`) |
+| `routers/auth.py` | `/register`, `/login`, `/refresh`, `/me` |
+| `routers/products.py` | product list/detail, admin CRUD, stock changes |
+| `routers/orders.py` | place, list, cancel orders; admin status changes |
+| `routers/users.py` | admin: list users, change roles |
+| `main.py` | creates tables, seeds, CORS, includes the routers |
+| `create_admin.py` | promote or create an admin from the command line |
+| `tests/` | 14 pytest tests, one per rule |
+
+**Frontend, `example/14/react`:**
+
+```
+react/src/
+├── api.js                      # axios instance, token storage, refresh interceptor
+├── auth.jsx                    # AuthProvider: who is logged in, login(), logout()
+├── App.jsx                     # every route, and which role may open it
+├── components/ProtectedRoute.jsx  # logged out → /login, wrong role → /forbidden
+├── components/Layout.jsx       # navbar with only your role's links
+├── components/OrderCard.jsx    # one order (customers and admins)
+└── pages/                      # login, shop, my orders, 3 admin pages, 403 page
+```
+
+## Setup
+
+```bash
+pip install fastapi "uvicorn[standard]" sqlalchemy pymysql python-dotenv "pwdlib[argon2]" pyjwt cryptography sqids
+```
+
+The database is the [same as MySQL + CRUD](/en/docs/mysql-crud#setup):
+the `fastapi_learn` database, the `MYSQL_*` env vars or a `.env`, or
+`DATABASE_URL` for SQLite. The shop uses its own `minishop_*` tables, so it
+never touches other topics' data. Every secret in `.env.example` has a
+development default, so it runs with zero setup.
+
+## Running this topic
+
+1. **Backend:**
+
+   ```bash
+   cd example/14/a
+   uvicorn main:app --reload
+   ```
+
+   The first run creates the tables and seeds them:
+
+   | Username | Password | Role |
+   |---|---|---|
+   | `admin` | `admin-password` | admin |
+   | `alice` | `alice-password` | customer |
+   | `bob` | `bob-password` | customer |
+
+   ...plus four products. "Sticker pack" has a stock of **1**, so you
+   can watch the second order for it fail.
+
+2. **Your own admin (optional):**
+
+   ```bash
+   python create_admin.py carol
+   ```
+
+   Promotes `carol` if she exists, or asks for a password and creates
+   her as an admin. On a real shop with no seed data, this is how the
+   first admin is made.
+
+3. **Frontend**, in a second terminal:
+
+   ```bash
+   cd example/14/react
+   npm install
+   npm run dev
+   ```
+
+   Open [http://localhost:5173](http://localhost:5173).
+
+## All routes
+
+| Route | Who | Description |
+|---|---|---|
+| `POST /register` | anyone | `201`, always role `customer`. `409` if taken |
+| `POST /login` | anyone | Returns `access_token` + `refresh_token`. `401` otherwise |
+| `POST /refresh` | anyone | Returns a new access token |
+| `GET /me` | logged in | Your public id, username, role |
+| `GET /products` | logged in | Customers: visible products. Admins: all |
+| `GET /products/{id}` | logged in | `404` for a hidden product (customers) or an unknown id |
+| `POST /products` | admin | Create a product. `201` |
+| `PATCH /products/{id}` | admin | Change `name`, `description`, `price`, `is_active` |
+| `PATCH /products/{id}/stock` | admin | `{"change": 10}` or `{"change": -3}`. `400` below 0 |
+| `DELETE /products/{id}` | admin | Hides the product. `204` |
+| `POST /orders` | customer | Place an order. `201`, or `409` "Only 1 of ... left" |
+| `GET /orders/mine` | logged in | Your orders, newest first |
+| `GET /orders/{id}` | logged in | `404` if it isn't yours (admins see all) |
+| `POST /orders/{id}/cancel` | logged in | Only while `pending`. Stock goes back |
+| `GET /orders` | admin | Every order, phone and address decrypted |
+| `PATCH /orders/{id}/status` | admin | `pending → shipped → delivered`, or `pending → cancelled` |
+| `GET /users` | admin | Every user |
+| `PATCH /users/{id}/role` | admin | Change a role. `400` for your own account |
+
+## Pages in this topic
+
+1. [Config, models & data](/en/docs/shop/data) — the four tables,
+   hashing vs encryption vs public ids, seed data.
+2. [Login & roles](/en/docs/shop/auth-roles) — tokens with a role,
+   `require_roles`, admin-only routers, `create_admin.py`.
+3. [Products & stock](/en/docs/shop/products-stock) — admin CRUD, soft
+   delete, stock changes on a locked row.
+4. [Orders](/en/docs/shop/orders) — one transaction with row locks,
+   no overselling, ownership, the status flow, and the tests.
+5. [React with protected routes](/en/docs/shop/react) — React Router,
+   `ProtectedRoute` by role, a navbar per role.

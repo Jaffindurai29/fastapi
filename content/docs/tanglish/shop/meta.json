@@ -1,0 +1,4 @@
+{
+  "title": "Shop Project",
+  "pages": ["index", "data", "auth-roles", "products-stock", "orders", "react"]
+}

@@ -1,0 +1,162 @@
+---
+title: "3. Products & stock"
+description: Product CRUD for admins, hidden products for customers, soft delete, and stock changes on a locked row.
+---
+
+<GithubLink path="example/14/a" />
+
+Everyone who is logged in can browse products. Only admins can create,
+edit, hide them or change their stock. Two details make this more than
+plain CRUD: customers can't even see hidden products, and stock is
+changed in a way that can't lose updates.
+
+## The code: `routers/products.py`
+
+```python title="routers/products.py"
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+
+from database import get_db
+from dependencies import get_current_user, require_roles
+from ids import decode_id
+from models import ProductModel, UserModel
+from schemas import ProductCreate, ProductOut, ProductUpdate, StockChange
+
+router = APIRouter(prefix="/products", tags=["products"])
+
+admin_only = require_roles("admin")
+
+
+def get_product_or_404(db: Session, product_id: str, user: UserModel) -> ProductModel:
+    product = db.get(ProductModel, decode_id(product_id))
+    # Customers can't see hidden products at all; admins can (to un-hide).
+    if product is None or (not product.is_active and user.role != "admin"):
+        raise HTTPException(status_code=404, detail="Product not found")
+    return product
+
+
+# ---------------------------------------------- any logged-in user ----
+
+@router.get("", response_model=list[ProductOut])
+def list_products(db: Session = Depends(get_db), user: UserModel = Depends(get_current_user)):
+    query = db.query(ProductModel).order_by(ProductModel.name)
+    if user.role != "admin":
+        query = query.filter(ProductModel.is_active.is_(True))
+    return query.all()
+
+
+@router.get("/{product_id}", response_model=ProductOut)
+def get_product(product_id: str, db: Session = Depends(get_db),
+                user: UserModel = Depends(get_current_user)):
+    return get_product_or_404(db, product_id, user)
+
+
+# ---------------------------------------------------------- admin only ----
+
+@router.post("", response_model=ProductOut, status_code=status.HTTP_201_CREATED)
+def create_product(body: ProductCreate, db: Session = Depends(get_db),
+                   user: UserModel = Depends(admin_only)):
+    product = ProductModel(**body.model_dump())
+    db.add(product)
+    db.commit()
+    db.refresh(product)
+    return product
+
+
+@router.patch("/{product_id}", response_model=ProductOut)
+def update_product(product_id: str, body: ProductUpdate, db: Session = Depends(get_db),
+                   user: UserModel = Depends(admin_only)):
+    product = get_product_or_404(db, product_id, user)
+    # exclude_unset: only touch the fields the client actually sent.
+    for field, value in body.model_dump(exclude_unset=True).items():
+        setattr(product, field, value)
+    db.commit()
+    db.refresh(product)
+    return product
+
+
+@router.patch("/{product_id}/stock", response_model=ProductOut,
+              responses={400: {"description": "Stock can't go below 0"}})
+def change_stock(product_id: str, body: StockChange, db: Session = Depends(get_db),
+                 user: UserModel = Depends(admin_only)):
+    product = get_product_or_404(db, product_id, user)
+    # Lock the row so a customer's order can't change stock between our
+    # read and our write.
+    db.refresh(product, with_for_update=True)
+    if product.stock + body.change < 0:
+        raise HTTPException(status_code=400, detail=f"Only {product.stock} in stock")
+    product.stock += body.change
+    db.commit()
+    db.refresh(product)
+    return product
+
+
+@router.delete("/{product_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_product(product_id: str, db: Session = Depends(get_db),
+                   user: UserModel = Depends(admin_only)):
+    product = get_product_or_404(db, product_id, user)
+    # Hide, don't delete: past orders still point at this product.
+    product.is_active = False
+    db.commit()
+```
+
+## Line by line
+
+**`get_product_or_404`** is used by every route that takes a
+`product_id`. It does three jobs:
+
+1. `decode_id(product_id)` turns the public id back into an int, or
+   raises `404` for an id we never handed out.
+2. `db.get(...)` loads the row.
+3. A hidden product (`is_active = False`) is a `404` **for customers**.
+   Admins still get it, so they can show it again.
+
+**`list_products`** filters out hidden products for customers only. One
+route, two views, decided by `user.role`.
+
+**`update_product`** uses `model_dump(exclude_unset=True)`: only the
+fields the client actually sent are changed. Sending `{"price": "9.99"}`
+changes the price and leaves the name alone. `stock` isn't in
+`ProductUpdate` at all, so it can't be changed here.
+
+**`delete_product`** doesn't delete. It sets `is_active = False` (soft
+delete). A real `DELETE` would fail anyway, because `minishop_order_items`
+rows point at the product, and even if it worked, old orders would lose
+their product name. To bring a product back:
+`PATCH /products/{id}` with `{"is_active": true}`.
+
+## Why stock has its own route
+
+Imagine stock changes were a normal `PATCH {"stock": 20}`:
+
+| Time | Admin | Customer |
+|---|---|---|
+| 1 | Reads stock: **10** | |
+| 2 | | Buys 2 → stock **8** |
+| 3 | 10 arrived, sends `stock = 20` | |
+| 4 | Stock is **20**, should be 18 | |
+
+The customer's purchase was silently erased. Two things in
+`change_stock` prevent this:
+
+1. **A change, not a value.** The admin sends `{"change": 10}` ("10
+   arrived"), not the final number. The server adds it to whatever the
+   stock is **now**.
+2. **A row lock.** `db.refresh(product, with_for_update=True)` re-reads
+   the row with `SELECT ... FOR UPDATE`. Any order touching this product
+   waits until we commit, so nothing can change the stock between our
+   check (`would it go below 0?`) and our write.
+
+`StockChange.change` is `Field(ne=0)`: a change of zero would do
+nothing, so it's a `422`.
+
+## Try it
+
+As `admin`:
+
+```bash
+curl -X PATCH http://127.0.0.1:8000/products/PRODUCT_ID/stock -H "Authorization: Bearer TOKEN" -H "Content-Type: application/json" -d "{\"change\": -100}"
+```
+
+→ `400` "Only 20 in stock". Then hide a product with `DELETE`, log in
+as `alice`, and `GET /products/PRODUCT_ID` → `404`.

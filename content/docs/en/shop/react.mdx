@@ -1,0 +1,1137 @@
+---
+title: "5. React with protected routes"
+description: A React shop frontend with React Router, routes protected by role, a navbar per role, and automatic token refresh.
+---
+
+<GithubLink path="example/14/a" label="Backend on GitHub" />{" "}
+<GithubLink path="example/14/react" label="Frontend on GitHub" />
+
+The [React login UI](/en/docs/security/react) was one screen. A shop has
+many pages, each with its own URL, and which ones you may open depends
+on your role. This page adds [React Router](https://reactrouter.com/)
+and one component, `ProtectedRoute`, that guards pages by role.
+
+```
+react/src/
+├── api.js                         # axios instance, token storage, refresh interceptor
+├── auth.jsx                       # AuthProvider: who is logged in, login(), logout()
+├── App.jsx                        # every route, and which role may open it
+├── components/ProtectedRoute.jsx  # logged out → /login, wrong role → /forbidden
+├── components/Layout.jsx          # navbar with only your role's links
+├── components/OrderCard.jsx       # one order (customers and admins)
+├── pages/LoginPage.jsx            # login + register tabs
+├── pages/ProductsPage.jsx         # customer: products + cart + checkout
+├── pages/MyOrdersPage.jsx         # customer: own orders, cancel pending ones
+├── pages/AdminProductsPage.jsx    # admin: add, price, stock, hide/show
+├── pages/AdminOrdersPage.jsx      # admin: all orders, change status
+├── pages/AdminUsersPage.jsx       # admin: change roles
+├── pages/ForbiddenPage.jsx        # 403 page
+└── main.jsx
+```
+
+## Running this topic
+
+1. **Backend** (see [Shop Project](/en/docs/shop#running-this-topic)):
+
+   ```bash
+   cd example/14/a
+   uvicorn main:app --reload
+   ```
+
+2. **Frontend**, in a second terminal:
+
+   ```bash
+   cd example/14/react
+   npm install
+   npm run dev
+   ```
+
+3. Open [http://localhost:5173](http://localhost:5173) and log in as
+   `alice` / `alice-password` or `admin` / `admin-password`.
+
+## Pages
+
+| URL | Who | What |
+|---|---|---|
+| `/login`, `/register` | anyone | Login and register tabs |
+| `/products` | customer | Product grid, cart, phone + address, **Place order** |
+| `/orders` | customer | Your orders; **Cancel order** while pending |
+| `/admin/products` | admin | Add products, edit price, `+5` / `-2` stock, hide/show |
+| `/admin/orders` | admin | Every order, decrypted phone and address, status buttons |
+| `/admin/users` | admin | Every user; change role (not your own) |
+| `/forbidden` | logged in | "Your role can't open that page" |
+
+## The API layer: `src/api.js`
+
+```js title="src/api.js"
+import axios from "axios";
+
+// Where the FastAPI backend (14/a) is running.
+export const API_URL = "http://127.0.0.1:8000";
+
+// Tokens live in localStorage so a page reload doesn't log you out.
+// (Any script on this page could read them; fine for learning, but real
+// apps often use httpOnly cookies instead.)
+export const tokenStore = {
+  get() {
+    try {
+      return JSON.parse(localStorage.getItem("tokens"));
+    } catch {
+      return null;
+    }
+  },
+  set(tokens) {
+    localStorage.setItem("tokens", JSON.stringify(tokens));
+  },
+  clear() {
+    localStorage.removeItem("tokens");
+  },
+};
+
+// Every page uses this instead of plain axios, so they never have to
+// think about tokens.
+const api = axios.create({ baseURL: API_URL });
+
+// 1) Before each request: attach the access token.
+api.interceptors.request.use((config) => {
+  const tokens = tokenStore.get();
+  if (tokens) config.headers.Authorization = `Bearer ${tokens.access_token}`;
+  return config;
+});
+
+// 2) After each response: if it's 401 (access token expired), swap the
+// refresh token for a new access token and repeat the request once.
+let refreshing = null; // shared, so 3 requests failing at once cause only 1 refresh
+let onSessionExpired = () => {};
+
+export function setOnSessionExpired(fn) {
+  onSessionExpired = fn;
+}
+
+api.interceptors.response.use(
+  (response) => response,
+  async (error) => {
+    const request = error.config;
+    const tokens = tokenStore.get();
+    if (error.response?.status !== 401 || request._retried || !tokens) throw error;
+    request._retried = true;
+
+    try {
+      refreshing ??= axios
+        .post(`${API_URL}/refresh`, { refresh_token: tokens.refresh_token })
+        .finally(() => {
+          refreshing = null;
+        });
+      const res = await refreshing;
+      tokenStore.set(res.data);
+    } catch {
+      // The refresh token expired too: the session is over.
+      tokenStore.clear();
+      onSessionExpired();
+      throw error;
+    }
+    return api(request);
+  },
+);
+
+// FastAPI puts the reason in `detail`: a string for our own errors, a
+// list for validation errors.
+export function errorText(error) {
+  const detail = error.response?.data?.detail;
+  if (Array.isArray(detail)) return detail.map((d) => d.msg).join(", ");
+  return detail || "Cannot reach the server";
+}
+
+export function money(value) {
+  return `$${Number(value).toFixed(2)}`;
+}
+
+export default api;
+```
+
+Every page calls `api.get(...)` / `api.post(...)` and never thinks about
+tokens. The **request interceptor** adds the `Authorization` header. The
+**response interceptor** handles an expired access token: on a `401` it
+calls `/refresh` once, saves the new tokens, and replays the request.
+`refreshing` is shared, so three requests failing at the same moment
+cause **one** `/refresh` call, not three. If the refresh token has
+expired too, the tokens are cleared and `onSessionExpired()` tells the
+app to show the login page.
+
+## Who is logged in: `src/auth.jsx`
+
+```jsx title="src/auth.jsx"
+import { createContext, useContext, useEffect, useState } from "react";
+import axios from "axios";
+import api, { API_URL, setOnSessionExpired, tokenStore } from "./api";
+
+const AuthContext = createContext(null);
+
+// Holds the logged-in user ({ id, username, role }) for the whole app.
+export function AuthProvider({ children }) {
+  const [user, setUser] = useState(null);
+  // If tokens were saved from last time, ask /me who we are before
+  // deciding whether to show the login page.
+  const [checking, setChecking] = useState(() => tokenStore.get() !== null);
+
+  useEffect(() => {
+    setOnSessionExpired(() => setUser(null));
+    if (!tokenStore.get()) return;
+    api
+      .get("/me")
+      .then((res) => setUser(res.data))
+      .catch(() => tokenStore.clear())
+      .finally(() => setChecking(false));
+  }, []);
+
+  async function login(username, password) {
+    tokenStore.clear();
+    const res = await axios.post(`${API_URL}/login`, { username, password });
+    tokenStore.set(res.data);
+    // The role comes from /me (the database), not from decoding the token.
+    const me = await api.get("/me");
+    setUser(me.data);
+    return me.data;
+  }
+
+  function logout() {
+    tokenStore.clear();
+    setUser(null);
+  }
+
+  return (
+    <AuthContext.Provider value={{ user, checking, login, logout }}>
+      {children}
+    </AuthContext.Provider>
+  );
+}
+
+export function useAuth() {
+  return useContext(AuthContext);
+}
+
+// Where each role lands after logging in.
+export function homeFor(user) {
+  return user.role === "admin" ? "/admin/products" : "/products";
+}
+```
+
+`AuthProvider` wraps the whole app, so any component can call
+`useAuth()` to get `user`, `login()` and `logout()`.
+
+- **`login()`** stores the tokens, then asks `/me` for the user. The
+  role in the UI comes from the database, the same as on the backend.
+- **`checking`**: on a page reload with saved tokens, the app first asks
+  `/me`. Until the answer arrives, `checking` is `true` and
+  `ProtectedRoute` shows "Loading…". Without it, a logged-in user would
+  see the login page flash for a moment, or worse, get redirected to it.
+- **`homeFor(user)`** decides where each role lands: customers on
+  `/products`, admins on `/admin/products`.
+
+## Every route in one place: `src/App.jsx`
+
+```jsx title="src/App.jsx"
+import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
+import { AuthProvider, homeFor, useAuth } from "./auth";
+import Layout from "./components/Layout";
+import ProtectedRoute from "./components/ProtectedRoute";
+import AdminOrdersPage from "./pages/AdminOrdersPage";
+import AdminProductsPage from "./pages/AdminProductsPage";
+import AdminUsersPage from "./pages/AdminUsersPage";
+import ForbiddenPage from "./pages/ForbiddenPage";
+import LoginPage from "./pages/LoginPage";
+import MyOrdersPage from "./pages/MyOrdersPage";
+import ProductsPage from "./pages/ProductsPage";
+
+function Home() {
+  const { user } = useAuth();
+  return <Navigate to={homeFor(user)} replace />;
+}
+
+const customerOnly = (page) => <ProtectedRoute roles={["customer"]}>{page}</ProtectedRoute>;
+const adminOnly = (page) => <ProtectedRoute roles={["admin"]}>{page}</ProtectedRoute>;
+
+function App() {
+  return (
+    <AuthProvider>
+      <BrowserRouter>
+        <Routes>
+          {/* Public */}
+          <Route path="/login" element={<LoginPage />} />
+          <Route path="/register" element={<LoginPage startMode="register" />} />
+
+          {/* Everything below needs a login; some pages also need a role. */}
+          <Route
+            element={
+              <ProtectedRoute>
+                <Layout />
+              </ProtectedRoute>
+            }
+          >
+            <Route index element={<Home />} />
+            <Route path="products" element={customerOnly(<ProductsPage />)} />
+            <Route path="orders" element={customerOnly(<MyOrdersPage />)} />
+            <Route path="admin/products" element={adminOnly(<AdminProductsPage />)} />
+            <Route path="admin/orders" element={adminOnly(<AdminOrdersPage />)} />
+            <Route path="admin/users" element={adminOnly(<AdminUsersPage />)} />
+            <Route path="forbidden" element={<ForbiddenPage />} />
+          </Route>
+
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </BrowserRouter>
+    </AuthProvider>
+  );
+}
+
+export default App;
+```
+
+Routes are nested in two layers:
+
+1. The **outer** route has no `path`. It wraps everything in
+   `<ProtectedRoute>` (any logged-in user) and `<Layout />` (the
+   navbar). Every page inside it needs a login.
+2. The **inner** routes add a role on top: `customerOnly(...)` and
+   `adminOnly(...)` are short for
+   `<ProtectedRoute roles={["admin"]}>...</ProtectedRoute>`.
+
+`/login` and `/register` sit outside, so they're public. Any unknown URL
+goes to `/`, and `Home` sends you to your role's home page.
+
+## The guard: `src/components/ProtectedRoute.jsx`
+
+```jsx title="src/components/ProtectedRoute.jsx"
+import { Navigate, useLocation } from "react-router-dom";
+import { useAuth } from "../auth";
+
+// <ProtectedRoute>               → any logged-in user
+// <ProtectedRoute roles={['admin']}> → admins only
+//
+// This only decides what the browser SHOWS. Anyone can edit frontend
+// code, so the real protection is require_roles() on the backend.
+export default function ProtectedRoute({ roles, children }) {
+  const { user, checking } = useAuth();
+  const location = useLocation();
+
+  if (checking) return <p className="center-note">Loading…</p>;
+
+  if (!user) {
+    // Remember where they were going, so login can send them back.
+    return <Navigate to="/login" replace state={{ from: location.pathname }} />;
+  }
+
+  if (roles && !roles.includes(user.role)) {
+    return <Navigate to="/forbidden" replace />;
+  }
+
+  return children;
+}
+```
+
+The same split as on the backend:
+
+| Situation | Backend says | Frontend does |
+|---|---|---|
+| Not logged in | `401` | Redirect to `/login`, remembering where you were going |
+| Logged in, wrong role | `403` | Redirect to `/forbidden` |
+| Allowed | `200` | Show the page |
+
+`state={{ from: location.pathname }}` remembers the page you tried to
+open. After logging in, `LoginPage` sends you back there instead of to
+your home page.
+
+**This is not security.** Anyone can open DevTools, change `user.role` to
+`"admin"` and the admin pages will render. But every request those pages
+make still gets `403` from `require_roles("admin")`, because the backend
+reads the role from the database. `ProtectedRoute` decides what to
+**show**. The API decides what is **allowed**.
+
+## A navbar per role: `src/components/Layout.jsx`
+
+```jsx title="src/components/Layout.jsx"
+import { NavLink, Outlet, useNavigate } from "react-router-dom";
+import { useAuth } from "../auth";
+
+const LINKS = {
+  customer: [
+    { to: "/products", label: "Shop" },
+    { to: "/orders", label: "My orders" },
+  ],
+  admin: [
+    { to: "/admin/products", label: "Products" },
+    { to: "/admin/orders", label: "Orders" },
+    { to: "/admin/users", label: "Users" },
+  ],
+};
+
+// The navbar only shows links the user's role can open.
+export default function Layout() {
+  const { user, logout } = useAuth();
+  const navigate = useNavigate();
+
+  function handleLogout() {
+    logout();
+    navigate("/login");
+  }
+
+  return (
+    <>
+      <nav className="navbar">
+        <span className="brand">MiniShop</span>
+        <div className="nav-links">
+          {LINKS[user.role].map((link) => (
+            <NavLink key={link.to} to={link.to} className="nav-link">
+              {link.label}
+            </NavLink>
+          ))}
+        </div>
+        <div className="nav-user">
+          <span>{user.username}</span>
+          <span className={`badge role-${user.role}`}>{user.role}</span>
+          <button className="btn small secondary" onClick={handleLogout}>
+            Log out
+          </button>
+        </div>
+      </nav>
+      <main className="container">
+        <Outlet />
+      </main>
+    </>
+  );
+}
+```
+
+`LINKS[user.role]` picks the menu. Hiding links is a convenience, not
+protection: typing `/admin/users` as a customer still goes through
+`ProtectedRoute`, and the API behind it still checks. `NavLink` adds an
+`active` class to the current page's link, and `<Outlet />` is where the
+matching child route renders.
+
+## Login and register: `src/pages/LoginPage.jsx`
+
+```jsx title="src/pages/LoginPage.jsx"
+import { useState } from "react";
+import { Navigate, useLocation, useNavigate } from "react-router-dom";
+import axios from "axios";
+import { API_URL, errorText } from "../api";
+import { homeFor, useAuth } from "../auth";
+
+export default function LoginPage({ startMode = "login" }) {
+  const { user, login } = useAuth();
+  const navigate = useNavigate();
+  const location = useLocation();
+
+  const [mode, setMode] = useState(startMode); // 'login' or 'register'
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [notice, setNotice] = useState(null); // { type: 'ok' | 'error', text }
+  const [loading, setLoading] = useState(false);
+
+  const isLogin = mode === "login";
+
+  // Already logged in? Skip the form.
+  if (user) return <Navigate to={homeFor(user)} replace />;
+
+  function switchMode(newMode) {
+    setMode(newMode);
+    setNotice(null);
+    setPassword("");
+  }
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    setLoading(true);
+    setNotice(null);
+
+    try {
+      if (isLogin) {
+        const me = await login(username, password);
+        // Back to the page they tried to open, or their role's home page.
+        navigate(location.state?.from || homeFor(me), { replace: true });
+      } else {
+        await axios.post(`${API_URL}/register`, { username, password });
+        setNotice({ type: "ok", text: "Account created! You can log in now." });
+        setMode("login");
+        setPassword("");
+      }
+    } catch (err) {
+      // axios throws on 4xx/5xx: wrong password (401), username taken (409),
+      // password too short (422), or the backend isn't running.
+      setNotice({ type: "error", text: errorText(err) });
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="page">
+      <div className="card">
+        <h1>{isLogin ? "Welcome back" : "Create account"}</h1>
+        <p className="subtitle">{isLogin ? "Log in to continue" : "Sign up in a few seconds"}</p>
+
+        <div className="tabs">
+          <button
+            type="button"
+            className={isLogin ? "tab active" : "tab"}
+            onClick={() => switchMode("login")}
+          >
+            Login
+          </button>
+          <button
+            type="button"
+            className={!isLogin ? "tab active" : "tab"}
+            onClick={() => switchMode("register")}
+          >
+            Register
+          </button>
+        </div>
+
+        <form onSubmit={handleSubmit}>
+          <label>
+            Username
+            <input
+              type="text"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              placeholder="e.g. alice"
+              minLength={isLogin ? undefined : 3}
+              maxLength={30}
+              required
+              autoComplete="username"
+            />
+          </label>
+
+          <label>
+            Password
+            <input
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder={isLogin ? "Your password" : "At least 8 characters"}
+              minLength={isLogin ? undefined : 8}
+              maxLength={128}
+              required
+              autoComplete={isLogin ? "current-password" : "new-password"}
+            />
+          </label>
+
+          {notice && <div className={`alert ${notice.type}`}>{notice.text}</div>}
+
+          <button className="btn" type="submit" disabled={loading}>
+            {loading ? "Please wait…" : isLogin ? "Log in" : "Register"}
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+}
+```
+
+If you're already logged in, the page redirects you straight to your
+home page. On a failed login, `errorText(err)` shows the backend's
+`detail`, such as "Incorrect username or password".
+
+## The shop: `src/pages/ProductsPage.jsx`
+
+```jsx title="src/pages/ProductsPage.jsx"
+import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
+import api, { errorText, money } from "../api";
+
+// Customer shop: browse products, fill a cart, place an order.
+export default function ProductsPage() {
+  const navigate = useNavigate();
+  const [products, setProducts] = useState([]);
+  const [cart, setCart] = useState({}); // { productId: quantity }
+  const [phone, setPhone] = useState("");
+  const [address, setAddress] = useState("");
+  const [notice, setNotice] = useState(null); // { type: 'error' | 'ok', text }
+  const [placing, setPlacing] = useState(false);
+
+  function load() {
+    api.get("/products").then((res) => setProducts(res.data));
+  }
+
+  useEffect(load, []);
+
+  function setQty(product, qty) {
+    const quantity = Math.max(0, Math.min(qty, product.stock));
+    setCart((prev) => {
+      const next = { ...prev, [product.id]: quantity };
+      if (quantity === 0) delete next[product.id];
+      return next;
+    });
+  }
+
+  const cartItems = products
+    .filter((p) => cart[p.id])
+    .map((p) => ({ product: p, quantity: cart[p.id] }));
+  // Shown only as a preview. The backend works out the real total.
+  const cartTotal = cartItems.reduce((sum, i) => sum + Number(i.product.price) * i.quantity, 0);
+
+  async function placeOrder(e) {
+    e.preventDefault();
+    setPlacing(true);
+    setNotice(null);
+    try {
+      await api.post("/orders", {
+        items: cartItems.map((i) => ({ product_id: i.product.id, quantity: i.quantity })),
+        phone,
+        address,
+      });
+      setCart({});
+      navigate("/orders");
+    } catch (err) {
+      // e.g. "Only 1 of Mug left" when someone else bought it first.
+      setNotice({ type: "error", text: errorText(err) });
+      load();
+    } finally {
+      setPlacing(false);
+    }
+  }
+
+  return (
+    <div className="shop">
+      <section>
+        <h2>Products</h2>
+        {products.length === 0 && <p className="muted">No products yet.</p>}
+        <div className="grid">
+          {products.map((p) => (
+            <div key={p.id} className="product">
+              <h3>{p.name}</h3>
+              {p.description && <p className="muted">{p.description}</p>}
+              <div className="product-row">
+                <strong>{money(p.price)}</strong>
+                <span className={p.stock === 0 ? "stock out" : "stock"}>
+                  {p.stock === 0 ? "Out of stock" : `${p.stock} in stock`}
+                </span>
+              </div>
+              <div className="qty">
+                <button
+                  className="btn small secondary"
+                  onClick={() => setQty(p, (cart[p.id] || 0) - 1)}
+                  disabled={!cart[p.id]}
+                >
+                  −
+                </button>
+                <span>{cart[p.id] || 0}</span>
+                <button
+                  className="btn small"
+                  onClick={() => setQty(p, (cart[p.id] || 0) + 1)}
+                  disabled={(cart[p.id] || 0) >= p.stock}
+                >
+                  +
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <aside className="panel">
+        <h2>Cart</h2>
+        {cartItems.length === 0 ? (
+          <p className="muted">Your cart is empty.</p>
+        ) : (
+          <form onSubmit={placeOrder} className="stack">
+            <ul className="lines">
+              {cartItems.map(({ product, quantity }) => (
+                <li key={product.id}>
+                  <span>
+                    {quantity} × {product.name}
+                  </span>
+                  <span>{money(Number(product.price) * quantity)}</span>
+                </li>
+              ))}
+              <li className="total">
+                <span>Total</span>
+                <span>{money(cartTotal)}</span>
+              </li>
+            </ul>
+            <label>
+              Phone
+              <input
+                value={phone}
+                onChange={(e) => setPhone(e.target.value)}
+                minLength={5}
+                maxLength={30}
+                required
+              />
+            </label>
+            <label>
+              Address
+              <textarea
+                value={address}
+                onChange={(e) => setAddress(e.target.value)}
+                minLength={5}
+                maxLength={300}
+                rows={3}
+                required
+              />
+            </label>
+            <p className="hint">🔒 Phone and address are stored encrypted.</p>
+            {notice && <div className={`alert ${notice.type}`}>{notice.text}</div>}
+            <button className="btn" disabled={placing}>
+              {placing ? "Placing…" : "Place order"}
+            </button>
+          </form>
+        )}
+      </aside>
+    </div>
+  );
+}
+```
+
+The cart is just `{ productId: quantity }` in state, and the `+` button
+stops at the product's stock. The **total is only a preview**: the
+backend computes the real total from its own prices. If the order fails
+(for example, someone else bought the last item first), the backend's
+message is shown and the product list reloads to show the new stock.
+
+## Orders: `OrderCard.jsx` and `MyOrdersPage.jsx`
+
+```jsx title="src/components/OrderCard.jsx"
+import { money } from "../api";
+
+// One order, used by both "My orders" and the admin "Orders" page.
+// `actions` is whatever buttons the page wants to show for it.
+export default function OrderCard({ order, showCustomer, actions }) {
+  return (
+    <div className="order">
+      <div className="order-head">
+        <div>
+          <strong>Order #{order.id}</strong>
+          <span className="muted"> · {new Date(order.created_at).toLocaleString()}</span>
+        </div>
+        <span className={`badge status-${order.status}`}>{order.status}</span>
+      </div>
+
+      {showCustomer && (
+        <p className="muted">
+          {order.username} · {order.phone} · {order.address}
+        </p>
+      )}
+
+      <ul className="lines">
+        {order.items.map((item) => (
+          <li key={item.product_id}>
+            <span>
+              {item.quantity} × {item.product_name}
+            </span>
+            <span>{money(Number(item.unit_price) * item.quantity)}</span>
+          </li>
+        ))}
+        <li className="total">
+          <span>Total</span>
+          <span>{money(order.total)}</span>
+        </li>
+      </ul>
+
+      {actions && <div className="order-actions">{actions}</div>}
+    </div>
+  );
+}
+```
+
+```jsx title="src/pages/MyOrdersPage.jsx"
+import { useEffect, useState } from "react";
+import api from "../api";
+import OrderCard from "../components/OrderCard";
+
+export default function MyOrdersPage() {
+  const [orders, setOrders] = useState(null);
+
+  function load() {
+    api.get("/orders/mine").then((res) => setOrders(res.data));
+  }
+
+  useEffect(load, []);
+
+  async function cancel(order) {
+    await api.post(`/orders/${order.id}/cancel`);
+    load();
+  }
+
+  if (orders === null) return <p className="muted">Loading…</p>;
+
+  return (
+    <section>
+      <h2>My orders</h2>
+      {orders.length === 0 && <p className="muted">You haven't ordered anything yet.</p>}
+      {orders.map((order) => (
+        <OrderCard
+          key={order.id}
+          order={order}
+          showCustomer
+          actions={
+            order.status === "pending" && (
+              <button className="btn small danger" onClick={() => cancel(order)}>
+                Cancel order
+              </button>
+            )
+          }
+        />
+      ))}
+    </section>
+  );
+}
+```
+
+`OrderCard` is shared by customers and admins. Each page passes its own
+`actions`: a **Cancel order** button for the customer's pending orders,
+status buttons for the admin.
+
+## Admin pages
+
+```jsx title="src/pages/AdminProductsPage.jsx"
+import { useEffect, useState } from "react";
+import api, { errorText } from "../api";
+
+const EMPTY = { name: "", description: "", price: "", stock: "0" };
+
+export default function AdminProductsPage() {
+  const [products, setProducts] = useState([]);
+  const [form, setForm] = useState(EMPTY);
+  const [notice, setNotice] = useState(null);
+
+  function load() {
+    api.get("/products").then((res) => setProducts(res.data));
+  }
+
+  useEffect(load, []);
+
+  // Runs an API call, then reloads the list (or shows why it failed).
+  async function run(request) {
+    setNotice(null);
+    try {
+      await request;
+      load();
+      return true;
+    } catch (err) {
+      setNotice({ type: "error", text: errorText(err) });
+      return false;
+    }
+  }
+
+  async function addProduct(e) {
+    e.preventDefault();
+    const ok = await run(api.post("/products", { ...form, stock: Number(form.stock) }));
+    if (ok) setForm(EMPTY);
+  }
+
+  return (
+    <section>
+      <h2>Products</h2>
+
+      <form className="panel add-form" onSubmit={addProduct}>
+        <input
+          placeholder="Name"
+          value={form.name}
+          required
+          onChange={(e) => setForm({ ...form, name: e.target.value })}
+        />
+        <input
+          placeholder="Description"
+          value={form.description}
+          onChange={(e) => setForm({ ...form, description: e.target.value })}
+        />
+        <input
+          placeholder="Price"
+          type="number"
+          min="0.01"
+          step="0.01"
+          value={form.price}
+          required
+          onChange={(e) => setForm({ ...form, price: e.target.value })}
+        />
+        <input
+          placeholder="Stock"
+          type="number"
+          min="0"
+          value={form.stock}
+          required
+          onChange={(e) => setForm({ ...form, stock: e.target.value })}
+        />
+        <button className="btn">Add product</button>
+      </form>
+
+      {notice && <div className={`alert ${notice.type}`}>{notice.text}</div>}
+
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Price</th>
+              <th>Stock</th>
+              <th>Change stock</th>
+              <th>Visible</th>
+            </tr>
+          </thead>
+          <tbody>
+            {products.map((p) => (
+              <ProductRow key={p.id} product={p} run={run} />
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function ProductRow({ product, run }) {
+  const [price, setPrice] = useState(product.price);
+  const [change, setChange] = useState("");
+
+  async function applyStock() {
+    if (await run(api.patch(`/products/${product.id}/stock`, { change: Number(change) }))) {
+      setChange("");
+    }
+  }
+
+  return (
+    <tr className={product.is_active ? "" : "hidden-row"}>
+      <td>
+        <strong>{product.name}</strong>
+        <div className="muted small-text">id: {product.id}</div>
+      </td>
+      <td>
+        <div className="inline">
+          <input
+            className="narrow"
+            type="number"
+            min="0.01"
+            step="0.01"
+            value={price}
+            onChange={(e) => setPrice(e.target.value)}
+          />
+          {Number(price) !== Number(product.price) && (
+            <button
+              className="btn small"
+              onClick={() => run(api.patch(`/products/${product.id}`, { price }))}
+            >
+              Save
+            </button>
+          )}
+        </div>
+      </td>
+      <td>
+        <span className={product.stock === 0 ? "stock out" : "stock"}>{product.stock}</span>
+      </td>
+      <td>
+        <div className="inline">
+          <input
+            className="narrow"
+            type="number"
+            placeholder="+5 / -2"
+            value={change}
+            onChange={(e) => setChange(e.target.value)}
+          />
+          <button className="btn small" disabled={!Number(change)} onClick={applyStock}>
+            Apply
+          </button>
+        </div>
+      </td>
+      <td>
+        {product.is_active ? (
+          <button
+            className="btn small secondary"
+            onClick={() => run(api.delete(`/products/${product.id}`))}
+          >
+            Hide
+          </button>
+        ) : (
+          <button
+            className="btn small"
+            onClick={() => run(api.patch(`/products/${product.id}`, { is_active: true }))}
+          >
+            Show
+          </button>
+        )}
+      </td>
+    </tr>
+  );
+}
+```
+
+Each row is its own `ProductRow` component with its own state (the price
+being edited, the stock change being typed). The **Save** button only
+appears once the price differs from the saved one. Stock changes are sent
+as `{ change }`, matching the backend's locked `+/-` route.
+
+```jsx title="src/pages/AdminOrdersPage.jsx"
+import { useEffect, useState } from "react";
+import api, { errorText } from "../api";
+import OrderCard from "../components/OrderCard";
+
+// Same rules as NEXT_STATUS in backend/routers/orders.py. The backend
+// enforces them; this only decides which buttons to show.
+const NEXT_STATUS = {
+  pending: ["shipped", "cancelled"],
+  shipped: ["delivered"],
+  delivered: [],
+  cancelled: [],
+};
+
+export default function AdminOrdersPage() {
+  const [orders, setOrders] = useState(null);
+  const [notice, setNotice] = useState(null);
+
+  function load() {
+    api.get("/orders").then((res) => setOrders(res.data));
+  }
+
+  useEffect(load, []);
+
+  async function setStatus(order, status) {
+    setNotice(null);
+    try {
+      await api.patch(`/orders/${order.id}/status`, { status });
+      load();
+    } catch (err) {
+      setNotice({ type: "error", text: errorText(err) });
+    }
+  }
+
+  if (orders === null) return <p className="muted">Loading…</p>;
+
+  return (
+    <section>
+      <h2>All orders</h2>
+      <p className="hint">
+        🔓 Phone and address are decrypted for you; in MySQL they're unreadable.
+      </p>
+      {notice && <div className={`alert ${notice.type}`}>{notice.text}</div>}
+      {orders.length === 0 && <p className="muted">No orders yet.</p>}
+      {orders.map((order) => (
+        <OrderCard
+          key={order.id}
+          order={order}
+          showCustomer
+          actions={NEXT_STATUS[order.status].map((status) => (
+            <button
+              key={status}
+              className={status === "cancelled" ? "btn small danger" : "btn small"}
+              onClick={() => setStatus(order, status)}
+            >
+              Mark {status}
+            </button>
+          ))}
+        />
+      ))}
+    </section>
+  );
+}
+```
+
+`NEXT_STATUS` mirrors the backend's table, so only valid buttons are
+shown. The backend enforces the same rules, so even a hand-made request
+can't jump from `pending` to `delivered`.
+
+```jsx title="src/pages/AdminUsersPage.jsx"
+import { useEffect, useState } from "react";
+import api, { errorText } from "../api";
+import { useAuth } from "../auth";
+
+export default function AdminUsersPage() {
+  const { user: me } = useAuth();
+  const [users, setUsers] = useState([]);
+  const [notice, setNotice] = useState(null);
+
+  function load() {
+    api.get("/users").then((res) => setUsers(res.data));
+  }
+
+  useEffect(load, []);
+
+  async function changeRole(user, role) {
+    setNotice(null);
+    try {
+      await api.patch(`/users/${user.id}/role`, { role });
+      load();
+    } catch (err) {
+      setNotice({ type: "error", text: errorText(err) });
+    }
+  }
+
+  return (
+    <section>
+      <h2>Users</h2>
+      {notice && <div className={`alert ${notice.type}`}>{notice.text}</div>}
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Username</th>
+              <th>Id (hashed)</th>
+              <th>Role</th>
+            </tr>
+          </thead>
+          <tbody>
+            {users.map((u) => (
+              <tr key={u.id}>
+                <td>
+                  {u.username}
+                  {u.id === me.id && <span className="muted"> (you)</span>}
+                </td>
+                <td className="muted">{u.id}</td>
+                <td>
+                  {/* You can't change your own role: the backend refuses too. */}
+                  <select
+                    value={u.role}
+                    disabled={u.id === me.id}
+                    onChange={(e) => changeRole(u, e.target.value)}
+                  >
+                    <option value="customer">customer</option>
+                    <option value="admin">admin</option>
+                  </select>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+```
+
+Your own row's role dropdown is disabled. The backend refuses it too
+(`400`), so the last admin can't lock everyone out.
+
+```jsx title="src/pages/ForbiddenPage.jsx"
+import { Link } from "react-router-dom";
+import { homeFor, useAuth } from "../auth";
+
+export default function ForbiddenPage() {
+  const { user } = useAuth();
+  return (
+    <section className="center-note">
+      <h2>403: Not allowed</h2>
+      <p className="muted">Your role ({user.role}) can't open that page.</p>
+      <Link className="btn inline-btn" to={homeFor(user)}>
+        Go to my home page
+      </Link>
+    </section>
+  );
+}
+```
+
+The styles are in `src/index.css` (on GitHub); they're plain CSS with no
+logic in them.
+
+## What to try
+
+| Do this | What you'll see |
+|---|---|
+| Open `/admin/products` while logged out | Sent to `/login`; after logging in as `admin` you land back on `/admin/products` |
+| Log in as `alice` | Only **Shop** and **My orders** in the navbar |
+| As alice, type `/admin/users` in the address bar | Sent to `/forbidden` |
+| Buy the **Sticker pack** (stock 1) | Order placed; the product now shows "Out of stock" |
+| As bob, buy it in a tab opened earlier | "Only 0 of Sticker pack left", and the list reloads |
+| Cancel a pending order | Status `cancelled`, stock goes back up |
+| Log in as `admin` | **Products**, **Orders**, **Users**; phone and address readable |
+| Mark an order **shipped** | The customer can no longer cancel it |
+| Hide a product | Greyed out for admin, gone from the customer's shop |
+| Promote bob, then reload bob's tab | Bob's menu switches to the admin pages |

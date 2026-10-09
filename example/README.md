@@ -22,6 +22,7 @@ code itself).
 | [11 — Relationships, transactions & soft delete](11) | One-to-many, nested responses, many-to-many, all-or-nothing transactions, soft delete. |
 | [12 — Security](12) | Password hashing, JWT, protected routes, refresh tokens, roles, ownership, encryption, ID hashing, rate limiting, and a React login UI. |
 | [13 — Database migrations](13) | Alembic instead of `create_all`. |
+| [14 — Shop project](14) | Capstone: products, stock, orders, admin/customer roles, role-protected React routes. |
 
 See the root [README.md](../README.md) for environment setup and how to
 run any single sub-example (`cd example/<topic>/<letter>` then
